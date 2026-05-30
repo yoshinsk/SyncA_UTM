@@ -3,6 +3,7 @@
 
 text
 skipx
+interactive
 lang en_US.UTF-8
 keyboard us
 timezone Asia/Tokyo --utc
@@ -16,6 +17,7 @@ reboot
 # Storage is intentionally left to Anaconda's installation destination screen.
 # Device names differ across physical servers, VPS/KVM, NVMe systems, and USB
 # boot media. The operator must choose the target disk during installation.
+bootloader --location=mbr
 
 repo --name="BaseOS" --baseurl=file:///run/install/repo/BaseOS
 repo --name="AppStream" --baseurl=file:///run/install/repo/AppStream
