@@ -132,7 +132,11 @@
 async function refresh() {
     const data = await api.get('/backup/api/list');
     if (!data) return;
-    document.getElementById('store-path').textContent = data.store ? `(${data.store})` : '';
+    const retention = data.retention || {};
+    const summary = data.store
+        ? `(${data.store} / 合計 ${formatBytes(data.total_size || 0)} / 保持 ${retention.max_count || '-'}世代・${formatBytes(retention.max_bytes || 0)})`
+        : '';
+    document.getElementById('store-path').textContent = summary;
     const tbody = document.getElementById('backup-tbody');
     const items = data.backups || [];
     tbody.innerHTML = items.length === 0
@@ -169,7 +173,9 @@ async function createBackup() {
     const res = await api.send('/backup/api/create', 'POST', {});
     if (!res) return;
     if (res.ok) {
-        toast(`バックアップ作成: ${res.name} (${formatBytes(res.size)})`);
+        const pruned = (res.pruned || []).length;
+        const suffix = pruned ? ` / 古いバックアップを${pruned}件削除` : '';
+        toast(`バックアップ作成: ${res.name} (${formatBytes(res.size)})${suffix}`);
         refresh();
     } else {
         toast('失敗: ' + (res.error || 'unknown'), true);

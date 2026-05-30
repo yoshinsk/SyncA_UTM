@@ -13,9 +13,27 @@ network --bootproto=dhcp --device=link --activate --onboot=on
 rootpw --lock
 reboot
 
+%pre --log=/tmp/synca-utm-pre.log
+set -eux
+mem_mib="$(awk '/MemTotal/ {print int(($2 + 1023) / 1024)}' /proc/meminfo)"
+if [ -z "$mem_mib" ] || [ "$mem_mib" -lt 1024 ]; then
+    mem_mib=1024
+fi
+
+{
+    echo "bootloader --location=mbr"
+    echo "clearpart --all --initlabel"
+    if [ -d /sys/firmware/efi ]; then
+        echo 'part /boot/efi --fstype="efi" --size=15 --fsoptions="umask=0077,shortname=winnt"'
+    fi
+    echo 'part /boot --fstype="xfs" --size=1024'
+    echo "part swap --fstype=\"swap\" --size=${mem_mib}"
+    echo 'part / --fstype="xfs" --grow --size=1'
+} > /tmp/synca-partitions.ks
+%end
+
 zerombr
-clearpart --all --initlabel
-autopart --type=lvm
+%include /tmp/synca-partitions.ks
 
 repo --name="BaseOS" --baseurl=file:///run/install/repo/BaseOS
 repo --name="AppStream" --baseurl=file:///run/install/repo/AppStream

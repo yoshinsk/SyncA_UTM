@@ -30,8 +30,19 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint("backup", __name__, url_prefix="/backup")
 
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        logger.warning("invalid integer environment variable %s", name)
+        return default
+
+
 BACKUP_STORE = Path("/var/lib/server-gui/backups")
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+BACKUP_MAX_COUNT = max(1, _int_env("SYNCA_BACKUP_MAX_COUNT", 10))
+BACKUP_MAX_BYTES = max(512 * 1024 * 1024, _int_env("SYNCA_BACKUP_MAX_BYTES", 2 * 1024 * 1024 * 1024))
 ARCHIVE_VERSION = 2
 SUPPORTED_ARCHIVE_VERSIONS = {1, 2}
 
@@ -124,14 +135,17 @@ def page():
 @login_required
 def list_backups():
     BACKUP_STORE.mkdir(parents=True, exist_ok=True)
-    items: list[dict] = []
-    for p in sorted(BACKUP_STORE.glob("server-gui-*.tar.gz"), reverse=True):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        items.append({"name": p.name, "size": st.st_size, "mtime": int(st.st_mtime)})
-    return jsonify({"backups": items, "store": str(BACKUP_STORE)})
+    items = _backup_items()
+    public_items = [{k: v for k, v in item.items() if k != "path"} for item in items]
+    return jsonify({
+        "backups": public_items,
+        "store": str(BACKUP_STORE),
+        "total_size": sum(item["size"] for item in items),
+        "retention": {
+            "max_count": BACKUP_MAX_COUNT,
+            "max_bytes": BACKUP_MAX_BYTES,
+        },
+    })
 
 
 @bp.route("/api/create", methods=["POST"])
@@ -164,6 +178,7 @@ def create_backup():
         logger.exception("backup creation failed")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+    pruned = _prune_old_backups()
     st = out_path.stat()
     return jsonify({
         "ok": True,
@@ -172,6 +187,7 @@ def create_backup():
         "size": st.st_size,
         "file_count": len(files),
         "sections": _section_counts(files),
+        "pruned": pruned,
     })
 
 
@@ -283,6 +299,39 @@ def restore_backup():
 
 def _safe_backup_name(name: str) -> bool:
     return bool(re.match(r"^server-gui-\d{8}-\d{6}\.tar\.gz$", name))
+
+
+def _backup_items() -> list[dict]:
+    items: list[dict] = []
+    candidates = []
+    for p in BACKUP_STORE.glob("server-gui-*.tar.gz"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        candidates.append((p, st))
+    for p, st in sorted(candidates, key=lambda item: item[1].st_mtime, reverse=True):
+        items.append({"name": p.name, "size": st.st_size, "mtime": int(st.st_mtime), "path": p})
+    return items
+
+
+def _prune_old_backups() -> list[dict]:
+    """Delete oldest archives until local backup retention policy is satisfied."""
+    items = _backup_items()
+    total = sum(item["size"] for item in items)
+    pruned: list[dict] = []
+    for index, item in enumerate(items):
+        if index < BACKUP_MAX_COUNT and total <= BACKUP_MAX_BYTES:
+            continue
+        path = item["path"]
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.warning("failed to prune backup %s: %s", path, e)
+            continue
+        total -= item["size"]
+        pruned.append({"name": item["name"], "size": item["size"]})
+    return pruned
 
 
 def _build_manifest(files: list[dict]) -> dict:

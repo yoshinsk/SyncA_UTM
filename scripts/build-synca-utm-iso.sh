@@ -35,7 +35,7 @@ download_base_iso() {
     fi
     echo "Downloading AlmaLinux ISO: $ALMA_ISO_URL"
     mkdir -p "$(dirname "$ALMA_ISO")"
-    curl -L --fail --output "${ALMA_ISO}.part" "$ALMA_ISO_URL"
+    curl -L --fail --continue-at - --output "${ALMA_ISO}.part" "$ALMA_ISO_URL"
     mv "${ALMA_ISO}.part" "$ALMA_ISO"
 }
 
