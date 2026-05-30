@@ -13,13 +13,9 @@ network --bootproto=dhcp --device=link --activate --onboot=on
 rootpw --lock
 reboot
 
-zerombr
-ignoredisk --only-use=sda
-bootloader --location=mbr --boot-drive=sda
-clearpart --all --initlabel --drives=sda
-reqpart --add-boot
-part swap --fstype="swap" --recommended --ondisk=sda
-part / --fstype="xfs" --grow --size=1 --ondisk=sda
+# Storage is intentionally left to Anaconda's installation destination screen.
+# Device names differ across physical servers, VPS/KVM, NVMe systems, and USB
+# boot media. The operator must choose the target disk during installation.
 
 repo --name="BaseOS" --baseurl=file:///run/install/repo/BaseOS
 repo --name="AppStream" --baseurl=file:///run/install/repo/AppStream
