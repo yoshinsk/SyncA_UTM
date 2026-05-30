@@ -9,7 +9,9 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 
 - ISO作成時点のAlmaLinux 9.x最新安定版を基準にする。2026-05-30時点の実機検証はAlmaLinux 9.8。
 - インストール中と初回起動中に外部リポジトリへ依存しない。
-- ISO内にBaseOS、AppStream、CRB、Extras、EPELのRPMスナップショットを同梱する。
+- ISOは `AlmaLinux-9-latest-x86_64-dvd.iso` をベースにする。標準RPMはDVD内のBaseOS/AppStreamを利用し、重複同梱しない。
+- DVDに含まれないEPEL系RPMだけを追加RPMディレクトリとして同梱する。2026-05-30時点の追加対象は `certbot`、`fail2ban`、`nginx-mod-modsecurity`、`libmodsecurity`、`ssdeep-libs`、`strongswan`。
+- 追加RPMは依存込みでも小さく保つ。検証時点では約73MBで、独自payloadとwheelhouseは約8.4MB。
 - `server-gui` のPython依存はwheelhouseまたはビルド済みvenvとして同梱する。
 - Bootstrap、Bootstrap Icons、JavaScript/CSS、画像などGUI静的資産はローカル配布に固定する。
 - `wireguard-ui` はバイナリまたは再現可能なローカルパッケージとして同梱する。

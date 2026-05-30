@@ -1,0 +1,10 @@
+# iso/package-lists/synca-rpms.txt
+# Extra RPMs copied into the SyncA UTM ISO for offline post-install setup.
+# Keep this list small. AlmaLinux DVD packages should be installed from DVD,
+# not duplicated here. These are EPEL-only on AlmaLinux 9.8.
+certbot
+fail2ban
+nginx-mod-modsecurity
+libmodsecurity
+ssdeep-libs
+strongswan
