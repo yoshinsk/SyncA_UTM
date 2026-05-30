@@ -24,7 +24,7 @@ fi
     echo "bootloader --location=mbr"
     echo "clearpart --all --initlabel"
     if [ -d /sys/firmware/efi ]; then
-        echo 'part /boot/efi --fstype="efi" --size=15 --fsoptions="umask=0077,shortname=winnt"'
+        echo 'part /boot/efi --fstype="efi" --size=600 --fsoptions="umask=0077,shortname=winnt"'
     fi
     echo 'part /boot --fstype="xfs" --size=1024'
     echo "part swap --fstype=\"swap\" --size=${mem_mib}"
