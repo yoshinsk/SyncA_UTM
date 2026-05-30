@@ -14,6 +14,7 @@ WHEELHOUSE_SRC="${WHEELHOUSE_SRC:-}"
 RPM_DIR_SRC="${RPM_DIR_SRC:-}"
 WGUI_BINARY="${WGUI_BINARY:-}"
 SYNC_PREPARE_ONLY="${SYNC_PREPARE_ONLY:-0}"
+SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-1}"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -78,9 +79,9 @@ copy_payload_files() {
     if [[ -n "$WGUI_BINARY" ]]; then
         install -m 0755 "$WGUI_BINARY" "${BUILD_DIR}/payload/synca/wireguard-ui"
     fi
-    if [[ -n "$RPM_DIR_SRC" ]]; then
+    if [[ -n "$RPM_DIR_SRC" && -d "${RPM_DIR_SRC%/}/SyncA-Extra" ]]; then
         mkdir -p "${BUILD_DIR}/payload/synca/rpms"
-        rsync -a "${RPM_DIR_SRC%/}/" "${BUILD_DIR}/payload/synca/rpms/"
+        rsync -a "${RPM_DIR_SRC%/}/SyncA-Extra/" "${BUILD_DIR}/payload/synca/rpms/"
     fi
 }
 
@@ -132,6 +133,17 @@ build_iso() {
         -map "${BUILD_DIR}/payload/ks" /ks
         -map "${BUILD_DIR}/payload/synca" /synca
     )
+    if [[ "$SYNC_PRUNE_DVD_REPOS" == "1" && -n "$RPM_DIR_SRC" ]]; then
+        if [[ ! -d "${RPM_DIR_SRC%/}/BaseOS" || ! -d "${RPM_DIR_SRC%/}/AppStream" ]]; then
+            echo "SYNC_PRUNE_DVD_REPOS=1 requires RPM_DIR_SRC with BaseOS and AppStream directories." >&2
+            exit 1
+        fi
+        cmd+=(
+            -rm_r /BaseOS /AppStream --
+            -map "${RPM_DIR_SRC%/}/BaseOS" /BaseOS
+            -map "${RPM_DIR_SRC%/}/AppStream" /AppStream
+        )
+    fi
     if [[ -f "${BUILD_DIR}/bootcfg/isolinux/isolinux.cfg" ]]; then
         cmd+=(-map "${BUILD_DIR}/bootcfg/isolinux/isolinux.cfg" /isolinux/isolinux.cfg)
     fi

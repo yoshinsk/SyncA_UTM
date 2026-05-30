@@ -37,9 +37,19 @@ zerombr
 
 repo --name="BaseOS" --baseurl=file:///run/install/repo/BaseOS
 repo --name="AppStream" --baseurl=file:///run/install/repo/AppStream
+repo --name="SyncA-Extra" --baseurl=file:///run/install/repo/synca/rpms
 
 %packages --ignoremissing
-@^minimal-environment
+bash
+ca-certificates
+coreutils
+dnf
+efibootmgr
+grub2-efi-x64
+grub2-pc
+grub2-tools
+kernel
+lvm2
 NetworkManager
 NetworkManager-ppp
 bind-utils
@@ -61,15 +71,21 @@ openssl
 policycoreutils
 postfix
 ppp
+passwd
 python3
 python3-pip
+rootfiles
 rsync
+shadow-utils
 strongswan
 sudo
+systemd
 tar
 tcpdump
+util-linux
 vim-minimal
 wireguard-tools
+xfsprogs
 mod_security
 mod_security_crs
 nginx-mod-modsecurity
