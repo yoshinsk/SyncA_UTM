@@ -14,11 +14,12 @@ rootpw --lock
 reboot
 
 zerombr
-bootloader --location=mbr
-clearpart --all --initlabel
+ignoredisk --only-use=sda
+bootloader --location=mbr --boot-drive=sda
+clearpart --all --initlabel --drives=sda
 reqpart --add-boot
-part swap --fstype="swap" --recommended
-part / --fstype="xfs" --grow --size=1
+part swap --fstype="swap" --recommended --ondisk=sda
+part / --fstype="xfs" --grow --size=1 --ondisk=sda
 
 repo --name="BaseOS" --baseurl=file:///run/install/repo/BaseOS
 repo --name="AppStream" --baseurl=file:///run/install/repo/AppStream
