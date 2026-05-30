@@ -9,31 +9,33 @@
 </div>
 
 <div class="alert alert-warning small">
-    Sophos XMLから復元可能な設定を解析します。リモートアクセス設定は除外します。存在しない機能は無視し、Web proxy / Webserver Protection はNginx移行対象として扱います。
+    Sophos XMLから復元可能な設定を解析します。リモートアクセス設定は除外します。
+    存在しない機能は無視し、Web proxy / Webserver Protection は Nginx 移行対象として扱います。
 </div>
 
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-filetype-xml text-secondary"></i>
-        <strong>XML読込み</strong>
+        <strong>XML 読み込み</strong>
     </div>
     <div class="card-body">
         <div class="row g-2 align-items-end">
             <div class="col-md-8">
                 <label class="form-label">Sophos WebAdmin XML</label>
-                <input id="xml-file" type="file" class="form-control" accept=".xml,text/xml">
+                <input id="xml-file" type="file" class="form-control" accept=".xml,text/xml,application/xml">
             </div>
             <div class="col-md-2">
-                <button class="btn btn-outline-primary w-100" onclick="previewImport()">
+                <button id="preview-btn" type="button" class="btn btn-outline-primary w-100">
                     <i class="bi bi-search"></i> 解析
                 </button>
             </div>
             <div class="col-md-2">
-                <button class="btn btn-primary w-100" onclick="savePlan()">
+                <button id="save-btn" type="button" class="btn btn-primary w-100">
                     <i class="bi bi-save"></i> プラン保存
                 </button>
             </div>
         </div>
+        <div id="import-status" class="alert alert-info small mt-3 d-none mb-0"></div>
     </div>
 </div>
 
@@ -50,50 +52,85 @@
 {% endblock %}
 {% block scripts %}
 <script>
-async function _sendXml(path) {
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('preview-btn').addEventListener('click', () => runSophosImport('preview'));
+    document.getElementById('save-btn').addEventListener('click', () => runSophosImport('save'));
+});
+
+function setImportBusy(isBusy, message = '') {
+    const status = document.getElementById('import-status');
+    const previewBtn = document.getElementById('preview-btn');
+    const saveBtn = document.getElementById('save-btn');
+    previewBtn.disabled = isBusy;
+    saveBtn.disabled = isBusy;
+    if (message) {
+        status.classList.remove('d-none', 'alert-danger', 'alert-info', 'alert-success');
+        status.classList.add(isBusy ? 'alert-info' : 'alert-success');
+        status.textContent = message;
+    }
+}
+
+function showImportError(message) {
+    const status = document.getElementById('import-status');
+    status.classList.remove('d-none', 'alert-info', 'alert-success');
+    status.classList.add('alert-danger');
+    status.textContent = message;
+    toast(message, true);
+}
+
+async function sendSophosXml(path) {
     const file = document.getElementById('xml-file').files[0];
     if (!file) {
-        toast('XMLファイルを選択してください', true);
-        return null;
+        throw new Error('XMLファイルを選択してください');
     }
     const form = new FormData();
     form.append('xml', file);
-    const r = await fetch(path, {
+    const response = await fetch(path, {
         method: 'POST',
         headers: { 'X-CSRF-Token': csrfToken },
         credentials: 'same-origin',
         body: form,
     });
-    return await r.json();
+    let data = null;
+    try {
+        data = await response.json();
+    } catch (e) {
+        throw new Error(`サーバ応答をJSONとして読めませんでした。HTTP ${response.status}`);
+    }
+    if (!response.ok || data.error) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    return data;
 }
 
-function _render(data) {
+function renderSophosPlan(data) {
     document.getElementById('result').classList.remove('d-none');
-    const s = data.summary || {};
+    const summary = data.summary || {};
     document.getElementById('summary').innerHTML = `
         <div class="row g-2 small">
             <div class="col-md-3"><strong>release:</strong> <code>${escapeHtml((data.format || {}).release || '-')}</code></div>
-            <div class="col-md-3"><strong>対応対象:</strong> ${s.supported_items || 0}</div>
-            <div class="col-md-3"><strong>remote access除外:</strong> ${s.remote_access_ignored || 0}</div>
-            <div class="col-md-3"><strong>秘密情報検出:</strong> ${s.secret_fields_detected || 0}</div>
-            <div class="col-12"><strong>分類:</strong> <code>${escapeHtml(JSON.stringify(s.supported_by_target || {}))}</code></div>
+            <div class="col-md-3"><strong>対応対象:</strong> ${summary.supported_items || 0}</div>
+            <div class="col-md-3"><strong>remote access除外:</strong> ${summary.remote_access_ignored || 0}</div>
+            <div class="col-md-3"><strong>秘密情報検出:</strong> ${summary.secret_fields_detected || 0}</div>
+            <div class="col-12"><strong>分類:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
         </div>`;
     document.getElementById('plan-json').textContent = JSON.stringify(data, null, 2);
 }
 
-async function previewImport() {
-    const data = await _sendXml('/sophos-import/api/preview');
-    if (!data) return;
-    if (data.error) return toast(data.error, true);
-    _render(data);
-}
-
-async function savePlan() {
-    const data = await _sendXml('/sophos-import/api/save-plan');
-    if (!data) return;
-    if (data.error) return toast(data.error, true);
-    toast(`プランを保存しました: ${data.path}`);
-    _render(data);
+async function runSophosImport(mode) {
+    const isSave = mode === 'save';
+    const path = isSave ? '/sophos-import/api/save-plan' : '/sophos-import/api/preview';
+    setImportBusy(true, isSave ? '取込プランを保存しています...' : 'XMLを解析しています...');
+    try {
+        const data = await sendSophosXml(path);
+        renderSophosPlan(data);
+        setImportBusy(false, isSave ? `保存しました: ${data.path}` : '解析が完了しました');
+    } catch (e) {
+        showImportError(e.message || String(e));
+    } finally {
+        document.getElementById('preview-btn').disabled = false;
+        document.getElementById('save-btn').disabled = false;
+    }
 }
 </script>
 {% endblock %}

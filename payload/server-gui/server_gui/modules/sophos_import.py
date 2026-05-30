@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -21,6 +22,7 @@ from flask import Blueprint, Flask, jsonify, render_template, request
 from ..auth import csrf_protect, login_required
 
 bp = Blueprint("sophos_import", __name__, url_prefix="/sophos-import")
+logger = logging.getLogger(__name__)
 
 STORE_DIR = Path("/var/lib/server-gui/sophos-imports")
 MAX_XML_BYTES = 16 * 1024 * 1024
@@ -72,9 +74,11 @@ def preview():
     if isinstance(xml_bytes, tuple):
         return xml_bytes
     try:
+        logger.info("sophos import preview started: %d bytes", len(xml_bytes))
         plan = _build_plan(xml_bytes)
     except ET.ParseError as e:
         return jsonify({"error": f"XML parse failed: {e}"}), 400
+    logger.info("sophos import preview completed: %s", plan.get("summary", {}))
     return jsonify(plan)
 
 
@@ -86,6 +90,7 @@ def save_plan():
     if isinstance(xml_bytes, tuple):
         return xml_bytes
     try:
+        logger.info("sophos import save-plan started: %d bytes", len(xml_bytes))
         plan = _build_plan(xml_bytes)
     except ET.ParseError as e:
         return jsonify({"error": f"XML parse failed: {e}"}), 400
@@ -94,6 +99,7 @@ def save_plan():
     path = STORE_DIR / f"sophos-import-plan-{ts}.json"
     path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     path.chmod(0o600)
+    logger.info("sophos import plan saved: %s", path)
     return jsonify({"ok": True, "path": str(path), "summary": plan.get("summary", {})})
 
 
