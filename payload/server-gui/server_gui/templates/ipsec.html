@@ -1,0 +1,715 @@
+{% extends "base.html" %}
+{% block title %}IPsec — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-lock-fill text-primary"></i> IPsec (StrongSwan / swanctl)
+    </h1>
+    <div class="d-flex gap-2 align-items-center">
+        <span id="strongswan-state-badge"></span>
+        <button class="btn btn-outline-secondary btn-sm" onclick="reloadAll()" title="swanctl --load-all">
+            <i class="bi bi-arrow-clockwise"></i> 設定再読込
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+            <i class="bi bi-arrow-clockwise"></i> 更新
+        </button>
+    </div>
+</div>
+
+<!-- Managed connections -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-shield-shaded text-secondary"></i>
+            <strong>GUI 管理の接続 (PSK / EAP)</strong>
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+            <button class="btn btn-primary btn-sm" onclick="openConnModal(null)">
+                <i class="bi bi-plus-lg"></i> 接続追加
+            </button>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>local_addrs</th>
+                        <th>remote_addrs</th>
+                        <th>local_ts → remote_ts</th>
+                        <th style="width:170px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="managed-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Connection edit modal -->
+<div class="modal fade" id="conn-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="conn-modal-title">接続追加</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-5">
+                        <label class="form-label">接続名 <span class="text-danger">*</span></label>
+                        <input id="cf-name" class="form-control font-monospace" placeholder="例: branch1 / rw-eap">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">認証方式</label>
+                        <select id="cf-auth-type" class="form-select" onchange="onAuthTypeChange()">
+                            <option value="psk" selected>PSK (site-to-site)</option>
+                            <option value="cert">証明書 (mutual X.509 site-to-site)</option>
+                            <option value="eap">EAP (Windows/iOS roadwarrior)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">IKE バージョン</label>
+                        <select id="cf-version" class="form-select">
+                            <option value="1" selected>IKEv1</option>
+                            <option value="2">IKEv2</option>
+                        </select>
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">エンドポイント</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">local_addrs (自端)</label>
+                        <input id="cf-local" class="form-control font-monospace" placeholder="%any" value="%any">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">remote_addrs (対向) <span class="text-danger">*</span></label>
+                        <input id="cf-remote" class="form-control font-monospace" placeholder="203.0.113.1 / %any (EAP)">
+                    </div>
+                </div>
+
+                <!-- PSK fields -->
+                <div id="cf-psk-section">
+                    <hr>
+                    <h6 class="text-secondary small">PSK 認証</h6>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">local_id (任意)</label>
+                            <input id="cf-local-id" class="form-control font-monospace" placeholder="未指定なら local_addrs">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">remote_id (任意)</label>
+                            <input id="cf-remote-id" class="form-control font-monospace" placeholder="未指定なら remote_addrs">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">PSK <span class="text-secondary small">(管理者のみ閲覧 / 編集時は空欄で前回値を保持)</span></label>
+                            <input id="cf-psk" type="text" class="form-control font-monospace" placeholder="新規時は必須" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EAP fields -->
+                <div id="cf-eap-section" class="d-none">
+                    <hr>
+                    <h6 class="text-secondary small"><i class="bi bi-shield-lock"></i> EAP 認証 (Windows / iOS / macOS ネイティブ VPN)</h6>
+                    <div class="alert alert-info small">
+                        <i class="bi bi-info-circle-fill"></i>
+                        サーバ証明書 (Let's Encrypt の fullchain.pem と privkey.pem) と、
+                        クライアントに割当てる仮想 IP プール、ユーザー名/パスワードのリストを指定します。
+                        クライアントは <code>VPN タイプ: IKEv2</code>、認証方式 <code>EAP (ユーザ名+パスワード)</code> で接続します。
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">サーバ証明書 (cert) <span class="text-danger">*</span></label>
+                            <input id="cf-server-cert" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/letsencrypt/live/vpn.example.com/fullchain.pem">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">サーバ秘密鍵 (key) <span class="text-danger">*</span></label>
+                            <input id="cf-server-key" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/letsencrypt/live/vpn.example.com/privkey.pem">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">サーバ ID (FQDN) <span class="text-danger">*</span></label>
+                            <input id="cf-server-id" class="form-control font-monospace" placeholder="vpn.example.com">
+                            <div class="form-text">クライアントが検証する FQDN。証明書の CN / SAN と一致が必要。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">仮想 IP プール (pool_addrs) <span class="text-danger">*</span></label>
+                            <input id="cf-pool-addrs" class="form-control font-monospace" placeholder="10.10.10.0/24">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">プールから配布する DNS (カンマ区切り、任意)</label>
+                            <input id="cf-pool-dns" class="form-control font-monospace" placeholder="10.0.0.1, 8.8.8.8">
+                        </div>
+                    </div>
+                    <h6 class="text-secondary small mt-3">EAP ユーザー <span class="text-danger">*</span></h6>
+                    <div id="cf-eap-users" class="d-flex flex-column gap-2"></div>
+                    <button type="button" class="btn btn-link btn-sm p-0 mt-2" onclick="addEapUserRow()">
+                        <i class="bi bi-plus-circle"></i> ユーザー追加
+                    </button>
+                </div>
+
+                <!-- Cert (mutual X.509) fields -->
+                <div id="cf-cert-section" class="d-none">
+                    <hr>
+                    <h6 class="text-secondary small"><i class="bi bi-shield-check"></i> 証明書認証 (相互 X.509 site-to-site)</h6>
+                    <div class="alert alert-info small">
+                        <i class="bi bi-info-circle-fill"></i>
+                        双方が自身の X.509 証明書を提示します。<strong>local 側</strong> はこの機器の証明書 + 秘密鍵、
+                        <strong>remote 側</strong> は対向機器の証明書 (の CN/SAN) と、それを発行した CA 証明書を指定します。
+                        CA を空欄にすると strongswan の既定 <code>/etc/strongswan/swanctl/x509ca/</code> が使われます。
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">自身の証明書 (local cert) <span class="text-danger">*</span></label>
+                            <input id="cf-cert-server-cert" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/strongswan/swanctl/x509/local-cert.pem">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">自身の秘密鍵 (local key) <span class="text-danger">*</span></label>
+                            <input id="cf-cert-server-key" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/strongswan/swanctl/private/local-key.pem">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">自身の ID (local cert CN/SAN) <span class="text-danger">*</span></label>
+                            <input id="cf-cert-server-id" class="form-control font-monospace"
+                                   placeholder="local.example.com">
+                            <div class="form-text">自証明書の Common Name か SAN と一致する必要があります。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">対向の ID (remote cert CN/SAN) <span class="text-danger">*</span></label>
+                            <input id="cf-cert-remote-id" class="form-control font-monospace"
+                                   placeholder="branch.example.com">
+                            <div class="form-text">対向機器の証明書 CN/SAN。これが一致しない接続は拒否されます。</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">CA 証明書 (cacerts、任意)</label>
+                            <input id="cf-cert-ca" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/strongswan/swanctl/x509ca/my-ca.pem (空欄なら x509ca/ 配下を自動)">
+                            <div class="form-text">
+                                空欄: strongswan が <code>/etc/strongswan/swanctl/x509ca/</code> 内の全 CA を信頼。
+                                明示指定: その PEM のみで対向証明書を検証。
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <hr>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="text-secondary small mb-0">子 SA (Traffic Selectors)</h6>
+                    <button type="button" class="btn btn-link btn-sm p-0" onclick="addChildRow()">
+                        <i class="bi bi-plus-circle"></i> 子 SA 追加
+                    </button>
+                </div>
+                <div id="cf-children" class="d-flex flex-column gap-2"></div>
+
+                <hr>
+                <h6 class="text-secondary small">IKE proposals (上級)</h6>
+                <input id="cf-proposals" class="form-control font-monospace" value="aes256-sha256-modp2048"
+                       list="ike-proposals-datalist" autocomplete="off">
+                <div class="form-text small">候補から選択 / 直接入力可。<code>encryption-integrity-dh</code> のセット。複数候補は <code>,</code> 区切り。</div>
+
+                <datalist id="ike-proposals-datalist">
+                    <option value="aes256-sha256-modp2048">AES-256 / SHA-256 / DH14 (推奨, IKEv2)</option>
+                    <option value="aes256-sha384-modp3072">AES-256 / SHA-384 / DH15</option>
+                    <option value="aes256-sha512-modp4096">AES-256 / SHA-512 / DH16</option>
+                    <option value="aes128-sha256-modp2048">AES-128 / SHA-256 / DH14</option>
+                    <option value="aes128-sha1-modp1024">AES-128 / SHA-1 / DH2 (legacy IKEv1)</option>
+                    <option value="aes256gcm16-prfsha384-ecp384">AES-256-GCM / PRF-SHA-384 / ECP-384 (modern)</option>
+                    <option value="aes256gcm16-prfsha256-modp2048">AES-256-GCM / PRF-SHA-256 / DH14</option>
+                    <option value="chacha20poly1305-prfsha256-curve25519">ChaCha20-Poly1305 / Curve25519 (modern)</option>
+                    <option value="3des-sha1-modp1024">3DES / SHA-1 / DH2 (legacy weak)</option>
+                </datalist>
+                <datalist id="esp-proposals-datalist">
+                    <option value="aes256-sha256">AES-256 / SHA-256 (PFS なし)</option>
+                    <option value="aes256-sha384">AES-256 / SHA-384</option>
+                    <option value="aes256-sha256-modp2048">AES-256 / SHA-256 + PFS DH14</option>
+                    <option value="aes256-sha384-modp3072">AES-256 / SHA-384 + PFS DH15</option>
+                    <option value="aes128-sha256">AES-128 / SHA-256</option>
+                    <option value="aes128-sha1">AES-128 / SHA-1 (legacy)</option>
+                    <option value="aes256gcm16">AES-256-GCM (AEAD)</option>
+                    <option value="aes256gcm16-modp2048">AES-256-GCM + PFS DH14</option>
+                    <option value="chacha20poly1305">ChaCha20-Poly1305 (modern)</option>
+                    <option value="3des-sha1">3DES / SHA-1 (legacy weak)</option>
+                </datalist>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitConn()">
+                    <i class="bi bi-check2"></i> <span id="cf-submit-label">保存して swanctl --load-all</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Loaded connections -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-diagram-2 text-secondary"></i>
+        <strong>読み込まれている接続</strong>
+        <span class="text-secondary small">swanctl --list-conns</span>
+    </div>
+    <div class="card-body p-0">
+        <div id="conns-list"></div>
+    </div>
+</div>
+
+<!-- Active SAs -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-activity text-secondary"></i>
+        <strong>アクティブな SA (セッション)</strong>
+        <span class="text-secondary small">swanctl --list-sas</span>
+    </div>
+    <div class="card-body p-0">
+        <div id="sas-list"></div>
+    </div>
+</div>
+
+<!-- Config files -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-file-earmark-text text-secondary"></i>
+        <strong>設定ファイル</strong>
+        <span class="text-secondary small">/etc/strongswan/swanctl/</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>パス</th>
+                        <th style="width:120px">サイズ</th>
+                        <th style="width:200px">更新</th>
+                        <th style="width:80px"></th>
+                    </tr>
+                </thead>
+                <tbody id="files-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- File view modal -->
+<div class="modal fade" id="file-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title font-monospace" id="file-modal-title"></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0">
+                <pre class="m-0 p-3 small" id="file-modal-content" style="background:#0f172a;color:#a5f3fc;max-height:70vh;overflow:auto;"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let fileModal = null;
+let connModal = null;
+let editingConnId = null;
+let managedConns = [];
+
+document.addEventListener('DOMContentLoaded', () => {
+    fileModal = new bootstrap.Modal(document.getElementById('file-modal'));
+    connModal = new bootstrap.Modal(document.getElementById('conn-modal'));
+});
+
+async function refresh() {
+    await Promise.all([loadStatus(), loadManaged(), loadConns(), loadSas(), loadFiles()]);
+}
+
+async function loadManaged() {
+    const data = await api.get('/ipsec/api/managed');
+    if (!data) return;
+    managedConns = data.connections || [];
+    const tbody = document.getElementById('managed-tbody');
+    tbody.innerHTML = managedConns.length === 0
+        ? '<tr><td colspan="5" class="text-center text-secondary py-3">GUI 管理の接続なし</td></tr>'
+        : managedConns.map(c => {
+            const children = c.children || [];
+            const tsView = children.length === 0
+                ? '<span class="text-secondary">—</span>'
+                : children.map(ch =>
+                    `<div>${escapeHtml(ch.local_ts || '—')} → ${escapeHtml(ch.remote_ts || '—')}</div>`
+                  ).join('');
+            const authBadge = c.auth_type === 'eap'
+                ? '<span class="badge bg-info-subtle text-info-emphasis ms-1">EAP</span>'
+                : c.auth_type === 'cert'
+                    ? '<span class="badge bg-primary-subtle text-primary-emphasis ms-1">CERT</span>'
+                    : '<span class="badge bg-success-subtle text-success-emphasis ms-1">PSK</span>';
+            const childCount = children.length > 1
+                ? `<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${children.length} children</span>`
+                : '';
+            return `<tr>
+                <td>
+                    <span class="fw-semibold font-monospace">${escapeHtml(c.name)}</span>
+                    ${authBadge}${childCount}
+                </td>
+                <td class="font-monospace small">${escapeHtml(c.local_addrs)}</td>
+                <td class="font-monospace small">${escapeHtml(c.remote_addrs)}</td>
+                <td class="font-monospace small">${tsView}</td>
+                <td class="d-flex gap-1 flex-wrap">
+                    <button class="btn btn-sm btn-outline-primary" onclick='openConnModal(${JSON.stringify(c)})' title="編集">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    ${children.map(ch => `<button class="btn btn-sm btn-outline-success" onclick="initiate('${escapeJs(ch.name)}')" title="${escapeHtml(ch.name)} initiate"><i class="bi bi-play"></i></button>`).join('')}
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteConn('${escapeJs(c.id)}', '${escapeJs(c.name)}')" title="削除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+}
+
+function onAuthTypeChange() {
+    const t = document.getElementById('cf-auth-type').value;
+    document.getElementById('cf-psk-section').classList.toggle('d-none', t !== 'psk');
+    document.getElementById('cf-eap-section').classList.toggle('d-none', t !== 'eap');
+    document.getElementById('cf-cert-section').classList.toggle('d-none', t !== 'cert');
+    if (t === 'eap') {
+        // EAP requires IKEv2
+        document.getElementById('cf-version').value = '2';
+        document.getElementById('cf-version').disabled = true;
+    } else {
+        // PSK + cert support both IKEv1 and IKEv2
+        document.getElementById('cf-version').disabled = false;
+    }
+}
+
+function addChildRow(child) {
+    const c = child || {};
+    const wrap = document.getElementById('cf-children');
+    const idx = wrap.children.length;
+    const div = document.createElement('div');
+    div.className = 'border rounded p-2 bg-light-subtle';
+    div.dataset.row = 'child';
+    div.innerHTML = `
+        <div class="row g-2">
+            <div class="col-md-3">
+                <label class="form-label small mb-1">子 SA 名</label>
+                <input class="form-control form-control-sm font-monospace ch-name" placeholder="自動">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">esp_proposals</label>
+                <input class="form-control form-control-sm font-monospace ch-esp" value="aes256-sha256"
+                       list="esp-proposals-datalist" autocomplete="off">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">start_action</label>
+                <select class="form-select form-select-sm ch-start">
+                    <option value="">(指定なし)</option>
+                    <option value="none">none</option>
+                    <option value="trap">trap</option>
+                    <option value="start">start</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">dpd_action</label>
+                <select class="form-select form-select-sm ch-dpd">
+                    <option value="">(指定なし)</option>
+                    <option value="none">none</option>
+                    <option value="clear">clear</option>
+                    <option value="hold">hold</option>
+                    <option value="restart">restart</option>
+                </select>
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+                <button type="button" class="btn btn-sm btn-outline-danger w-100" onclick="this.closest('[data-row=child]').remove()">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label small mb-1">local_ts (自サブネット)</label>
+                <input class="form-control form-control-sm font-monospace ch-lts" placeholder="10.0.0.0/24">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label small mb-1">remote_ts (対向サブネット)</label>
+                <input class="form-control form-control-sm font-monospace ch-rts" placeholder="192.168.1.0/24">
+            </div>
+        </div>`;
+    wrap.appendChild(div);
+    div.querySelector('.ch-name').value = c.name || '';
+    div.querySelector('.ch-esp').value = c.esp_proposals || 'aes256-sha256';
+    div.querySelector('.ch-start').value = c.start_action || (idx === 0 ? 'trap' : '');
+    div.querySelector('.ch-dpd').value = c.dpd_action || 'restart';
+    div.querySelector('.ch-lts').value = c.local_ts || '';
+    div.querySelector('.ch-rts').value = c.remote_ts || '';
+}
+
+function collectChildren() {
+    return Array.from(document.querySelectorAll('#cf-children [data-row=child]')).map(row => ({
+        name: row.querySelector('.ch-name').value.trim(),
+        esp_proposals: row.querySelector('.ch-esp').value.trim(),
+        start_action: row.querySelector('.ch-start').value,
+        dpd_action: row.querySelector('.ch-dpd').value,
+        local_ts: row.querySelector('.ch-lts').value.trim(),
+        remote_ts: row.querySelector('.ch-rts').value.trim(),
+    }));
+}
+
+function addEapUserRow(user) {
+    const u = user || {};
+    const wrap = document.getElementById('cf-eap-users');
+    const div = document.createElement('div');
+    div.className = 'd-flex gap-2 align-items-center';
+    div.dataset.row = 'eap-user';
+    div.innerHTML = `
+        <input class="form-control form-control-sm font-monospace eap-user" placeholder="ユーザー名">
+        <input type="password" class="form-control form-control-sm font-monospace eap-pass" placeholder="パスワード (編集時に *** なら保持)">
+        <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('[data-row=eap-user]').remove()">
+            <i class="bi bi-trash"></i>
+        </button>`;
+    wrap.appendChild(div);
+    div.querySelector('.eap-user').value = u.username || '';
+    div.querySelector('.eap-pass').value = u.password || '';
+}
+
+function collectEapUsers() {
+    return Array.from(document.querySelectorAll('#cf-eap-users [data-row=eap-user]')).map(row => ({
+        username: row.querySelector('.eap-user').value.trim(),
+        password: row.querySelector('.eap-pass').value,
+    })).filter(u => u.username);
+}
+
+function openConnModal(c) {
+    editingConnId = c ? c.id : null;
+    document.getElementById('conn-modal-title').textContent = c ? `接続編集: ${c.name}` : '接続追加';
+    document.getElementById('cf-submit-label').textContent = c ? '更新して swanctl --load-all' : '保存して swanctl --load-all';
+    document.getElementById('cf-name').value = c ? c.name : '';
+    document.getElementById('cf-auth-type').value = c ? (c.auth_type || 'psk') : 'psk';
+    document.getElementById('cf-version').value = c ? c.version : 2;
+    document.getElementById('cf-local').value = c ? c.local_addrs : '%any';
+    document.getElementById('cf-remote').value = c ? c.remote_addrs : '';
+    document.getElementById('cf-local-id').value = c ? (c.local_id || '') : '';
+    document.getElementById('cf-remote-id').value = c ? (c.remote_id || '') : '';
+    document.getElementById('cf-psk').value = '';
+    document.getElementById('cf-psk').placeholder = c ? '(変更しない場合は空欄)' : '新規時は必須';
+    document.getElementById('cf-proposals').value = (c && c.proposals) || 'aes256-sha256-modp2048';
+    // EAP fields
+    document.getElementById('cf-server-cert').value = c ? (c.server_cert || '') : '';
+    document.getElementById('cf-server-key').value = c ? (c.server_key || '') : '';
+    document.getElementById('cf-server-id').value = c ? (c.server_id || '') : '';
+    document.getElementById('cf-pool-addrs').value = c ? (c.pool_addrs || '') : '';
+    document.getElementById('cf-pool-dns').value = c ? (c.pool_dns || []).join(', ') : '';
+    document.getElementById('cf-eap-users').innerHTML = '';
+    if (c && (c.eap_users || []).length) {
+        c.eap_users.forEach(addEapUserRow);
+    }
+    // Cert (mutual X.509) fields
+    document.getElementById('cf-cert-server-cert').value = c ? (c.server_cert || '') : '';
+    document.getElementById('cf-cert-server-key').value = c ? (c.server_key || '') : '';
+    document.getElementById('cf-cert-server-id').value = c ? (c.server_id || '') : '';
+    document.getElementById('cf-cert-remote-id').value = c ? (c.remote_id || '') : '';
+    document.getElementById('cf-cert-ca').value = c ? (c.ca_cert || '') : '';
+    // Children
+    document.getElementById('cf-children').innerHTML = '';
+    if (c && (c.children || []).length) {
+        c.children.forEach(addChildRow);
+    } else {
+        addChildRow();
+    }
+    onAuthTypeChange();
+    connModal.show();
+}
+
+async function submitConn() {
+    const authType = document.getElementById('cf-auth-type').value;
+    const payload = {
+        name: document.getElementById('cf-name').value.trim(),
+        auth_type: authType,
+        version: parseInt(document.getElementById('cf-version').value, 10),
+        local_addrs: document.getElementById('cf-local').value.trim(),
+        remote_addrs: document.getElementById('cf-remote').value.trim(),
+        proposals: document.getElementById('cf-proposals').value.trim(),
+        children: collectChildren(),
+    };
+    if (authType === 'psk') {
+        payload.local_id = document.getElementById('cf-local-id').value.trim();
+        payload.remote_id = document.getElementById('cf-remote-id').value.trim();
+        payload.psk = document.getElementById('cf-psk').value;
+    } else if (authType === 'eap') {
+        payload.server_cert = document.getElementById('cf-server-cert').value.trim();
+        payload.server_key = document.getElementById('cf-server-key').value.trim();
+        payload.server_id = document.getElementById('cf-server-id').value.trim();
+        payload.pool_addrs = document.getElementById('cf-pool-addrs').value.trim();
+        payload.pool_dns = document.getElementById('cf-pool-dns').value.trim();
+        payload.eap_users = collectEapUsers();
+    } else if (authType === 'cert') {
+        payload.server_cert = document.getElementById('cf-cert-server-cert').value.trim();
+        payload.server_key  = document.getElementById('cf-cert-server-key').value.trim();
+        payload.server_id   = document.getElementById('cf-cert-server-id').value.trim();
+        payload.remote_id   = document.getElementById('cf-cert-remote-id').value.trim();
+        payload.ca_cert     = document.getElementById('cf-cert-ca').value.trim();
+    }
+    if (!payload.name || !payload.remote_addrs) return toast('接続名と remote_addrs は必須', true);
+    const res = editingConnId
+        ? await api.send(`/ipsec/api/managed/${editingConnId}`, 'PUT', payload)
+        : await api.send('/ipsec/api/managed', 'POST', payload);
+    if (!res) return;
+    toast(editingConnId ? '更新しました' : '追加しました');
+    connModal.hide();
+    refresh();
+}
+
+async function deleteConn(cid, name) {
+    if (!confirm(`接続 "${name}" を削除しますか? (swanctl --load-all 実行)`)) return;
+    const res = await api.send(`/ipsec/api/managed/${cid}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function loadStatus() {
+    const data = await api.get('/ipsec/api/status');
+    if (!data) return;
+    document.getElementById('strongswan-state-badge').innerHTML = data.strongswan_active
+        ? '<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> strongswan active</span>'
+        : '<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> strongswan inactive</span>';
+}
+
+async function loadConns() {
+    const data = await api.get('/ipsec/api/connections');
+    const container = document.getElementById('conns-list');
+    if (!data || data.error) {
+        container.innerHTML = `<div class="p-3 text-secondary small">${escapeHtml(data?.error || '取得失敗')}</div>`;
+        return;
+    }
+    const conns = data.connections || [];
+    if (conns.length === 0) {
+        container.innerHTML = '<div class="p-3 text-secondary small">読み込まれている接続なし</div>';
+        return;
+    }
+    container.innerHTML = conns.map(c => `
+        <div class="border-bottom p-3">
+            <div class="d-flex justify-content-between align-items-start mb-1">
+                <h6 class="mb-0">
+                    <i class="bi bi-link-45deg"></i> <span class="font-monospace">${escapeHtml(c.name)}</span>
+                    <span class="text-secondary small ms-2">${escapeHtml(c.header)}</span>
+                </h6>
+            </div>
+            <ul class="list-unstyled small font-monospace text-secondary mb-2 ps-3">
+                ${(c.fields || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+            </ul>
+            ${(c.children || []).map(ch => `
+                <div class="ms-3 ps-3 border-start small">
+                    <div><strong class="font-monospace">${escapeHtml(ch.name)}</strong>
+                        <span class="text-secondary">${escapeHtml(ch.header)}</span>
+                        <button class="btn btn-sm btn-outline-success ms-2" onclick="initiate('${escapeJs(ch.name)}')">
+                            <i class="bi bi-play"></i> initiate
+                        </button>
+                    </div>
+                    <ul class="list-unstyled font-monospace text-secondary mb-0 ps-3 mt-1">
+                        ${(ch.fields || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+                    </ul>
+                </div>
+            `).join('')}
+        </div>
+    `).join('');
+}
+
+async function loadSas() {
+    const data = await api.get('/ipsec/api/sas');
+    const container = document.getElementById('sas-list');
+    if (!data || data.error) {
+        container.innerHTML = `<div class="p-3 text-secondary small">${escapeHtml(data?.error || '取得失敗')}</div>`;
+        return;
+    }
+    const sas = data.sas || [];
+    if (sas.length === 0) {
+        container.innerHTML = '<div class="p-3 text-secondary small">アクティブな SA なし</div>';
+        return;
+    }
+    container.innerHTML = sas.map(s => {
+        const stateBadge = s.state === 'ESTABLISHED'
+            ? 'bg-success-subtle text-success-emphasis'
+            : 'bg-warning-subtle text-warning-emphasis';
+        return `<div class="border-bottom p-3">
+            <div class="d-flex justify-content-between align-items-start mb-1">
+                <h6 class="mb-0 d-flex align-items-center gap-2">
+                    <i class="bi bi-key-fill"></i>
+                    <span class="font-monospace">${escapeHtml(s.name)}</span>
+                    <span class="badge ${stateBadge}">${escapeHtml(s.state)}</span>
+                    <span class="text-secondary small">#${escapeHtml(s.id)}</span>
+                </h6>
+                <button class="btn btn-sm btn-outline-danger" onclick="terminate('${escapeJs(s.name)}')">
+                    <i class="bi bi-stop"></i> terminate
+                </button>
+            </div>
+            <ul class="list-unstyled small font-monospace text-secondary mb-0 ps-3">
+                ${(s.fields || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+            </ul>
+        </div>`;
+    }).join('');
+}
+
+async function loadFiles() {
+    const data = await api.get('/ipsec/api/files');
+    if (!data) return;
+    const tbody = document.getElementById('files-tbody');
+    const files = data.files || [];
+    tbody.innerHTML = files.length === 0
+        ? '<tr><td colspan="4" class="text-center text-secondary py-3">ファイルなし</td></tr>'
+        : files.map(f => {
+            const isManaged = f.path.endsWith('/server-gui.conf');
+            return `<tr>
+                <td class="font-monospace small">${escapeHtml(f.path)}${isManaged ? ' <span class="badge bg-info-subtle text-info-emphasis ms-1">managed</span>' : ''}</td>
+                <td class="font-monospace small">${f.size} B</td>
+                <td class="small text-secondary">${new Date(f.mtime * 1000).toLocaleString('ja-JP')}</td>
+                <td class="d-flex gap-1">
+                    <button class="btn btn-sm btn-outline-primary" onclick="viewFile('${escapeJs(f.path)}')">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+}
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function viewFile(path) {
+    const data = await api.get('/ipsec/api/files/content?path=' + encodeURIComponent(path));
+    if (!data) return;
+    document.getElementById('file-modal-title').textContent = data.path || path;
+    document.getElementById('file-modal-content').textContent = data.content || '';
+    fileModal.show();
+}
+
+async function initiate(child) {
+    if (!confirm(`child SA "${child}" を initiate しますか?`)) return;
+    const res = await api.send('/ipsec/api/initiate', 'POST', { child });
+    if (res) {
+        toast(res.ok ? 'initiate しました' : '失敗: ' + (res.output || ''), !res.ok);
+        loadSas();
+    }
+}
+
+async function terminate(ike) {
+    if (!confirm(`IKE SA "${ike}" を terminate しますか?`)) return;
+    const res = await api.send('/ipsec/api/terminate', 'POST', { ike });
+    if (res) {
+        toast(res.ok ? 'terminate しました' : '失敗: ' + (res.output || ''), !res.ok);
+        loadSas();
+    }
+}
+
+async function reloadAll() {
+    const res = await api.send('/ipsec/api/reload', 'POST');
+    if (res) {
+        toast(res.ok ? 'swanctl --load-all 完了' : '失敗: ' + (res.output || ''), !res.ok);
+        refresh();
+    }
+}
+
+refresh();
+</script>
+{% endblock %}

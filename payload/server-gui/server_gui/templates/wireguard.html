@@ -1,0 +1,867 @@
+{% extends "base.html" %}
+{% block title %}WireGuard — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-shield-shaded text-primary"></i> WireGuard
+    </h1>
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+        <label class="form-label small mb-0">Interface:</label>
+        <select id="iface-select" class="form-select form-select-sm" style="width:auto" onchange="loadSelected()"></select>
+        <button class="btn btn-outline-primary btn-sm" onclick="openIfaceCreate()" title="新規インターフェース">
+            <i class="bi bi-plus-lg"></i>
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()" title="更新">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+    </div>
+</div>
+
+<!-- Client download links -->
+<div class="alert alert-info border-0 shadow-sm d-flex flex-wrap align-items-center gap-2 mb-3 py-2">
+    <i class="bi bi-download fs-5 text-primary"></i>
+    <strong class="me-1">クライアント:</strong>
+    <span class="text-secondary small me-2">下記から OS 別 WireGuard アプリをダウンロード &rarr;</span>
+    <a href="https://www.wireguard.com/install/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">
+        <i class="bi bi-box-arrow-up-right"></i> 公式ダウンロード
+    </a>
+    <a href="https://apps.apple.com/app/wireguard/id1441195209" target="_blank" rel="noopener"
+       class="btn btn-sm btn-outline-secondary" title="iOS / macOS">
+        <i class="bi bi-apple"></i> iOS / macOS
+    </a>
+    <a href="https://play.google.com/store/apps/details?id=com.wireguard.android" target="_blank" rel="noopener"
+       class="btn btn-sm btn-outline-secondary" title="Android">
+        <i class="bi bi-google-play"></i> Android
+    </a>
+    <a href="https://download.wireguard.com/windows-client/" target="_blank" rel="noopener"
+       class="btn btn-sm btn-outline-secondary" title="Windows">
+        <i class="bi bi-windows"></i> Windows
+    </a>
+    <span class="text-secondary small ms-auto">
+        インストール後、各ピアの <i class="bi bi-qr-code"></i> から QR を読込/.conf をインポート
+    </span>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-router text-secondary"></i>
+                    <strong>インターフェース設定</strong>
+                </div>
+                <div class="d-flex gap-1 align-items-center flex-wrap">
+                    <span id="iface-state-badge"></span>
+                    <button class="btn btn-sm btn-outline-primary" onclick="openIfaceEdit()" title="設定を編集">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="upIface()" title="wg-quick up">
+                        <i class="bi bi-arrow-up-circle"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="downIface()" title="wg-quick down">
+                        <i class="bi bi-arrow-down-circle"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body small">
+                <table class="table table-sm mb-0">
+                    <tbody id="iface-info"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2 flex-wrap">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-key text-secondary"></i>
+                    <strong>サーバ公開鍵</strong>
+                    <span class="text-secondary small">クライアント設定時に必要</span>
+                </div>
+                <button class="btn btn-sm btn-outline-warning" onclick="regenerateServerKeys()"
+                        title="サーバ鍵ペアを再生成 (全ピアの再設定が必要)">
+                    <i class="bi bi-arrow-repeat"></i> 鍵を再生成
+                </button>
+            </div>
+            <div class="card-body">
+                <code class="small text-break" id="server-pubkey">—</code>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-people text-secondary"></i>
+            <strong>ピア</strong>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openPeerModal(null)">
+            <i class="bi bi-plus-lg"></i> 新規ピア
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前 / 状態</th>
+                        <th>IP アドレス</th>
+                        <th>Extra Allowed IPs</th>
+                        <th>最終ハンドシェイク</th>
+                        <th>転送量 (RX / TX)</th>
+                        <th style="width:170px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="peer-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Interface edit / create modal -->
+<div class="modal fade" id="iface-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="iface-modal-title">インターフェース設定</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="if-create-only" class="d-none mb-3">
+                    <label class="form-label">名前 <span class="text-danger">*</span></label>
+                    <input id="if-name" class="form-control font-monospace" placeholder="例: wg1">
+                    <div class="form-text">英字始まり、英数 + <code>_</code><code>-</code>、15 文字以内。<code>wg-quick @ &lt;name&gt;</code> の単位。</div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-7">
+                        <label class="form-label">Address (CIDR、カンマ区切り) <span class="text-danger">*</span></label>
+                        <input id="if-address" class="form-control font-monospace" placeholder="10.252.1.1/24">
+                        <div class="form-text">この interface に与える VPN 内 IP + プレフィックス。</div>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label">ListenPort <span class="text-danger">*</span></label>
+                        <input id="if-listen-port" type="number" class="form-control font-monospace" placeholder="51820" min="1" max="65535">
+                        <div class="form-text">UDP ポート。firewalld で別途穴あけが必要です。</div>
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">詳細設定 (任意)</h6>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">MTU</label>
+                        <input id="if-mtu" type="number" class="form-control font-monospace" placeholder="(空欄=デフォルト)">
+                        <div class="form-text">576-9200。空欄でカーネル既定。</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Table</label>
+                        <input id="if-table" class="form-control font-monospace" placeholder="auto" list="if-table-options">
+                        <datalist id="if-table-options">
+                            <option value="auto">auto (既定 — wg-quick が自動でルート追加)</option>
+                            <option value="off">off (ルートを追加しない)</option>
+                            <option value="51820">51820 (専用テーブル番号の例)</option>
+                        </datalist>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">DNS (カンマ区切り)</label>
+                        <input id="if-dns" class="form-control font-monospace" placeholder="任意。サーバ側ではあまり使わない">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">PostUp (1行1コマンド、最大 8 行)</label>
+                        <textarea id="if-post-up" class="form-control form-control-sm font-monospace" rows="3"
+                                  placeholder="iptables -A FORWARD -i %i -j ACCEPT"></textarea>
+                        <div class="form-text">wg-quick up 時に root で実行される。<code>%i</code> は interface 名に置換。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">PostDown (1行1コマンド、最大 8 行)</label>
+                        <textarea id="if-post-down" class="form-control form-control-sm font-monospace" rows="3"
+                                  placeholder="iptables -D FORWARD -i %i -j ACCEPT"></textarea>
+                        <div class="form-text">wg-quick down 時に root で実行される。</div>
+                    </div>
+                </div>
+                <div id="if-create-extras" class="d-none mt-3">
+                    <hr>
+                    <div class="form-check form-switch">
+                        <input id="if-start" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label small" for="if-start">作成後にすぐ起動 (<code>wg-quick up</code>)</label>
+                    </div>
+                </div>
+                <div id="if-restart-note" class="alert alert-warning small mt-3 d-none">
+                    <i class="bi bi-exclamation-triangle"></i>
+                    Address / MTU / DNS / Table / PostUp / PostDown は <code>wg-quick down</code> +
+                    <code>up</code> を経ないと反映されません。保存後にトップの ↑↓ ボタンで再起動してください。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitIfaceForm()">
+                    <i class="bi bi-check2"></i> <span id="if-submit-label">保存</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Peer edit modal -->
+<div class="modal fade" id="peer-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="peer-modal-title">ピア追加</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-7">
+                        <label class="form-label">コメント / 名前</label>
+                        <input id="pf-comment" class="form-control" placeholder="例: yoshi-iphone">
+                    </div>
+                    <div class="col-md-5 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input id="pf-enabled" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="pf-enabled">有効</label>
+                        </div>
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">サーバ側設定 (このピアの正体)</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Peer Address <span class="text-danger">*</span></label>
+                        <input id="pf-peer-address" class="form-control font-monospace" placeholder="10.252.1.42/32">
+                        <div class="form-text">ピア (クライアント) に割り当てる VPN 内 IP。通常 /32。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Extra Allowed IPs</label>
+                        <input id="pf-extra" class="form-control font-monospace" placeholder="192.168.50.0/24, 10.10.0.0/16">
+                        <div class="form-text">このピアの背後にあるサブネット (カンマ区切り、任意)。</div>
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">クライアント側 .conf に書き込まれる値</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="form-check form-switch mb-1">
+                            <input id="pf-dns-use" type="checkbox" class="form-check-input">
+                            <label class="form-check-label" for="pf-dns-use">Client DNS を指定する</label>
+                        </div>
+                        <input id="pf-dns" class="form-control font-monospace" placeholder="10.252.1.1, 8.8.8.8" disabled>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Client MTU</label>
+                        <input id="pf-mtu" type="number" class="form-control font-monospace" value="1450">
+                        <div class="form-text">標準は 1450 (Ethernet 1500 − 50 byte overhead)。</div>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Client Allowed IPs <span class="text-secondary small">(クライアントが VPN 経由で送るあて先)</span></label>
+                        <input id="pf-client-aips" class="form-control font-monospace" placeholder="自動入力されます">
+                        <div class="form-text">
+                            自動: WG サブネット + LAN サブネット。
+                            フルトンネル化したい場合は <code>0.0.0.0/0, ::/0</code>。
+                        </div>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Endpoint (サーバ接続先)</label>
+                        <input id="pf-endpoint" class="form-control font-monospace" placeholder="vpn.example.com:51820">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">PersistentKeepalive (秒)</label>
+                        <input id="pf-keepalive" type="number" class="form-control font-monospace" value="25">
+                    </div>
+                </div>
+                <hr>
+                <div class="form-check form-switch">
+                    <input id="pf-psk" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="pf-psk">PresharedKey を使用</label>
+                </div>
+                <div id="pf-edit-extra" class="d-none mt-2">
+                    <div class="form-check">
+                        <input id="pf-psk-regen" type="checkbox" class="form-check-input">
+                        <label class="form-check-label" for="pf-psk-regen">PSK を新しく生成し直す</label>
+                    </div>
+                    <div class="form-check">
+                        <input id="pf-psk-drop" type="checkbox" class="form-check-input">
+                        <label class="form-check-label" for="pf-psk-drop">PSK を削除する</label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button id="pf-submit" class="btn btn-primary" onclick="submitPeerForm()">
+                    <i class="bi bi-check2"></i> <span id="pf-submit-label">追加して鍵生成</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Adopt existing private key modal -->
+<div class="modal fade" id="adopt-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">既存の秘密鍵で取り込み</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info small">
+                    <i class="bi bi-info-circle-fill"></i>
+                    <strong>鍵を再生成せずに</strong> 既存ピアを GUI 管理下に取り込みます。
+                    ピアが過去に <em>wireguard-ui</em> 等で作成され、その時の <strong>クライアント秘密鍵</strong>を持っている場合に使ってください。
+                    鍵ペアの整合性は自動検証されます (一致しなければ拒否)。
+                </div>
+                <div class="mb-2 small">
+                    <strong>公開鍵 (このピア):</strong>
+                    <code id="adopt-pubkey" class="text-break"></code>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">クライアント側の秘密鍵 (PrivateKey)</label>
+                    <textarea id="adopt-privkey" class="form-control font-monospace" rows="3"
+                              placeholder="wireguard-ui のクライアント設定からコピー&amp;ペースト"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitAdoptKey()">
+                    <i class="bi bi-check2"></i> 取り込み
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Client config / QR modal (re-openable) -->
+<div class="modal fade" id="config-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="config-modal-title">クライアント設定</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="config-result-banner" class="alert alert-info small d-none"></div>
+                <div class="row g-3">
+                    <div class="col-md-7">
+                        <label class="form-label small">クライアント設定 (.conf)</label>
+                        <textarea id="config-text" class="form-control font-monospace small" rows="14" readonly></textarea>
+                        <div class="d-flex gap-2 mt-2">
+                            <button class="btn btn-sm btn-outline-primary" onclick="copyClientConf()">
+                                <i class="bi bi-clipboard"></i> コピー
+                            </button>
+                            <button class="btn btn-sm btn-outline-primary" onclick="downloadClientConf()">
+                                <i class="bi bi-download"></i> .conf をダウンロード
+                            </button>
+                        </div>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small">QR コード</label>
+                        <div id="config-qr" class="text-center bg-white p-2 border rounded"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let interfaces = [];
+let wanEndpoint = '';
+let currentIface = null;
+let currentData = null;
+let peerModal = null;
+let configModal = null;
+let adoptModal = null;
+let ifaceModal = null;
+
+// Peer modal state
+let editingPubkey = null;   // null = adding
+let adoptingPubkey = null;
+let lastConfigFilename = 'wg-client.conf';
+
+// Interface modal state: 'create' or 'edit'
+let ifaceModalMode = 'create';
+
+document.addEventListener('DOMContentLoaded', () => {
+    peerModal = new bootstrap.Modal(document.getElementById('peer-modal'));
+    configModal = new bootstrap.Modal(document.getElementById('config-modal'));
+    adoptModal = new bootstrap.Modal(document.getElementById('adopt-modal'));
+    ifaceModal = new bootstrap.Modal(document.getElementById('iface-modal'));
+    document.getElementById('pf-dns-use').addEventListener('change', e => {
+        document.getElementById('pf-dns').disabled = !e.target.checked;
+        if (!e.target.checked) document.getElementById('pf-dns').value = '';
+    });
+});
+
+async function refresh() {
+    const data = await api.get('/wg/api/interfaces');
+    if (!data) return;
+    interfaces = data.interfaces || [];
+    wanEndpoint = data.wan_endpoint || '';
+    const sel = document.getElementById('iface-select');
+    if (interfaces.length === 0) {
+        sel.innerHTML = '<option>(なし)</option>';
+        renderEmpty();
+        return;
+    }
+    const prev = currentIface;
+    sel.innerHTML = interfaces.map(i =>
+        `<option value="${escapeHtml(i.name)}" ${i.name === prev ? 'selected' : ''}>
+            ${escapeHtml(i.name)}${i.active ? ' (UP)' : ' (DOWN)'}
+         </option>`
+    ).join('');
+    if (!currentIface || !interfaces.find(i => i.name === currentIface)) {
+        currentIface = interfaces[0].name;
+        sel.value = currentIface;
+    }
+    await loadSelected();
+}
+
+function renderEmpty() {
+    document.getElementById('iface-info').innerHTML =
+        '<tr><td class="text-secondary py-3 text-center">WireGuard 設定ファイル (/etc/wireguard/*.conf) が見つかりません。「+」から新規作成してください。</td></tr>';
+    document.getElementById('peer-tbody').innerHTML =
+        '<tr><td colspan="6" class="text-center text-secondary py-4">—</td></tr>';
+}
+
+/* ---- interface create / edit modal ---- */
+function openIfaceCreate() {
+    ifaceModalMode = 'create';
+    document.getElementById('iface-modal-title').textContent = '新規インターフェース';
+    document.getElementById('if-submit-label').textContent = '作成';
+    document.getElementById('if-create-only').classList.remove('d-none');
+    document.getElementById('if-create-extras').classList.remove('d-none');
+    document.getElementById('if-restart-note').classList.add('d-none');
+    document.getElementById('if-name').value = _suggestNextIfaceName();
+    document.getElementById('if-address').value = '';
+    document.getElementById('if-listen-port').value = _suggestNextListenPort();
+    document.getElementById('if-mtu').value = '';
+    document.getElementById('if-dns').value = '';
+    document.getElementById('if-table').value = 'auto';
+    document.getElementById('if-post-up').value = '';
+    document.getElementById('if-post-down').value = '';
+    document.getElementById('if-start').checked = true;
+    ifaceModal.show();
+}
+
+function openIfaceEdit() {
+    if (!currentData) return toast('Interface を選択してください', true);
+    ifaceModalMode = 'edit';
+    const intf = currentData.interface || {};
+    document.getElementById('iface-modal-title').textContent = `インターフェース編集: ${currentIface}`;
+    document.getElementById('if-submit-label').textContent = '保存';
+    document.getElementById('if-create-only').classList.add('d-none');
+    document.getElementById('if-create-extras').classList.add('d-none');
+    document.getElementById('if-restart-note').classList.add('d-none');
+    document.getElementById('if-address').value = (intf.address || []).join(', ');
+    document.getElementById('if-listen-port').value = intf.listen_port ?? '';
+    document.getElementById('if-mtu').value = intf.mtu ?? '';
+    document.getElementById('if-dns').value = (intf.dns || []).join(', ');
+    document.getElementById('if-table').value = intf.table || '';
+    document.getElementById('if-post-up').value = (intf.post_up || []).filter(Boolean).join('\n');
+    document.getElementById('if-post-down').value = (intf.post_down || []).filter(Boolean).join('\n');
+    ifaceModal.show();
+}
+
+function _suggestNextIfaceName() {
+    const taken = new Set(interfaces.map(i => i.name));
+    for (let n = 0; n < 100; n++) {
+        const candidate = `wg${n}`;
+        if (!taken.has(candidate)) return candidate;
+    }
+    return 'wg0';
+}
+
+function _suggestNextListenPort() {
+    const taken = new Set();
+    // We don't know listen ports from the index endpoint (only names),
+    // so we just nudge upward from 51820 if any iface already exists.
+    if (interfaces.length === 0) return 51820;
+    return 51820 + interfaces.length;
+}
+
+async function submitIfaceForm() {
+    const payload = {
+        address: document.getElementById('if-address').value.trim(),
+        listen_port: document.getElementById('if-listen-port').value.trim(),
+        mtu: document.getElementById('if-mtu').value.trim(),
+        dns: document.getElementById('if-dns').value.trim(),
+        table: document.getElementById('if-table').value.trim(),
+        post_up: document.getElementById('if-post-up').value,
+        post_down: document.getElementById('if-post-down').value,
+    };
+    if (ifaceModalMode === 'create') {
+        payload.name = document.getElementById('if-name').value.trim();
+        payload.start = document.getElementById('if-start').checked;
+        const res = await api.send('/wg/api/interfaces', 'POST', payload);
+        if (!res) return;
+        ifaceModal.hide();
+        const startInfo = res.start_result
+            ? (res.start_result.ok ? ' (起動済)' : ' (起動失敗: ' + (res.start_result.output || '') + ')')
+            : '';
+        toast(`作成しました${startInfo}`, res.start_result && !res.start_result.ok);
+        currentIface = (res.interface && res.interface.name) || currentIface;
+        refresh();
+    } else {
+        const res = await api.send(
+            `/wg/api/interfaces/${encodeURIComponent(currentIface)}`,
+            'PUT', payload);
+        if (!res) return;
+        if (res.requires_restart) {
+            // Keep modal open with the note shown so the operator sees it.
+            document.getElementById('if-restart-note').classList.remove('d-none');
+            toast('保存しました (再起動が必要な項目があります)');
+        } else {
+            ifaceModal.hide();
+            toast('保存しました');
+        }
+        refresh();
+    }
+}
+
+async function regenerateServerKeys() {
+    if (!currentIface) return toast('Interface を選択してください', true);
+    const peerCount = (currentData?.peers || []).length;
+    if (!confirm(
+        `${currentIface} のサーバ鍵ペアを再生成しますか?\n\n` +
+        `・サーバ公開鍵が変わります\n` +
+        `・現在登録されている ${peerCount} 個のピアは、新しいクライアント設定を再ダウンロード\n` +
+        `  しないと接続できなくなります\n` +
+        `・active な場合は wg syncconf で即時反映されます`
+    )) return;
+    const res = await api.send(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/regenerate-server-keys`,
+        'POST');
+    if (!res) return;
+    if (res.ok) {
+        toast(`サーバ鍵を再生成しました (新公開鍵: ${(res.public_key || '').slice(0,16)}…)`);
+        const affected = (res.affected_peers || []).length;
+        if (affected > 0) {
+            alert(
+                `サーバ公開鍵が更新されました。\n\n` +
+                `${affected} 個のピアそれぞれで「QR / 設定表示」から新しい .conf を再ダウンロードし、\n` +
+                `クライアント側に反映してください。`
+            );
+        }
+        refresh();
+    } else if (res.error) {
+        toast(res.error, true);
+    }
+}
+
+async function loadSelected() {
+    currentIface = document.getElementById('iface-select').value;
+    if (!currentIface) return;
+    const data = await api.get(`/wg/api/interfaces/${encodeURIComponent(currentIface)}`);
+    if (!data) return;
+    currentData = data;
+    renderIface(data);
+    renderPeers(data);
+}
+
+function _suggestionsOrEmpty() {
+    return (currentData && currentData.suggestions) || {};
+}
+
+function renderIface(data) {
+    const intf = data.interface || {};
+    const ifaceMeta = interfaces.find(i => i.name === currentIface) || {};
+    document.getElementById('iface-state-badge').innerHTML = ifaceMeta.active
+        ? '<span class="badge bg-success-subtle text-success-emphasis">UP</span>'
+        : '<span class="badge bg-secondary-subtle text-secondary-emphasis">DOWN</span>';
+    document.getElementById('server-pubkey').textContent = intf.public_key || '—';
+    const rows = [
+        ['Address', (intf.address || []).join(', ') || '—'],
+        ['ListenPort', intf.listen_port ?? '—'],
+        ['MTU', intf.mtu ?? '—'],
+        ['DNS', (intf.dns || []).join(', ') || '—'],
+        ['Table', intf.table || '—'],
+        ['PostUp', (intf.post_up || []).filter(Boolean).join('<br>') || '—'],
+        ['PostDown', (intf.post_down || []).filter(Boolean).join('<br>') || '—'],
+    ];
+    document.getElementById('iface-info').innerHTML = rows.map(([k, v]) =>
+        `<tr><td class="text-secondary" style="width:30%">${escapeHtml(k)}</td><td class="font-monospace">${v}</td></tr>`
+    ).join('');
+}
+
+function renderPeers(data) {
+    const peers = data.peers || [];
+    const tbody = document.getElementById('peer-tbody');
+    if (peers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-4">ピア未登録</td></tr>';
+        return;
+    }
+    tbody.innerHTML = peers.map(p => {
+        const status = p.status || {};
+        const handshake = status.latest_handshake
+            ? new Date(status.latest_handshake * 1000).toLocaleString('ja-JP')
+            : '<span class="text-secondary">—</span>';
+        const recent = status.latest_handshake
+            ? (Date.now() / 1000 - status.latest_handshake < 180 ? '🟢' : '🟡')
+            : '⚪';
+        const rx = formatBytes(status.rx_bytes || 0);
+        const tx = formatBytes(status.tx_bytes || 0);
+        const stateBadge = !p.enabled
+            ? '<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">無効</span>'
+            : '';
+        const managedBadge = p.managed
+            ? ''
+            : '<span class="badge bg-warning-subtle text-warning-emphasis ms-1" title="秘密鍵が GUI に保存されていません">limited</span>';
+        const showCfgBtn = p.managed
+            ? `<button class="btn btn-sm btn-outline-primary" onclick="showClientConfig('${escapeJs(p.public_key)}', '${escapeJs(p.comment || '')}')" title="設定 / QR 表示">
+                   <i class="bi bi-qr-code"></i>
+               </button>`
+            : `<button class="btn btn-sm btn-outline-secondary" disabled title="秘密鍵が無いため再生成不可">
+                   <i class="bi bi-qr-code"></i>
+               </button>`;
+        const editBtn = p.managed
+            ? `<button class="btn btn-sm btn-outline-primary" onclick='openPeerModal(${JSON.stringify(p)})' title="編集">
+                   <i class="bi bi-pencil"></i>
+               </button>`
+            : `<div class="btn-group">
+                   <button class="btn btn-sm btn-outline-info" onclick="openAdoptKey('${escapeJs(p.public_key)}')" title="既存の秘密鍵で取り込み (鍵を変更しない)">
+                       <i class="bi bi-box-arrow-in-down"></i>
+                   </button>
+                   <button class="btn btn-sm btn-outline-secondary" onclick="regenerateKeys('${escapeJs(p.public_key)}')" title="鍵を再生成して GUI 管理下に置く (鍵が変わる)">
+                       <i class="bi bi-key"></i>
+                   </button>
+               </div>`;
+        const extraStr = (p.extra_allowed_ips || []).length
+            ? p.extra_allowed_ips.map(escapeHtml).join('<br>')
+            : '<span class="text-secondary">—</span>';
+        return `<tr>
+            <td>
+                <div class="fw-semibold">${recent} ${escapeHtml(p.comment || '(no name)')}${stateBadge}${managedBadge}</div>
+                <code class="small text-secondary text-break">${escapeHtml((p.public_key || '').slice(0, 28))}…</code>
+            </td>
+            <td class="font-monospace small">${escapeHtml(p.peer_address || '—')}</td>
+            <td class="font-monospace small">${extraStr}</td>
+            <td class="small">${handshake}</td>
+            <td class="font-monospace small">${rx} / ${tx}</td>
+            <td>
+                <div class="d-flex gap-1">
+                    ${editBtn}
+                    ${showCfgBtn}
+                    <button class="btn btn-sm btn-outline-danger" onclick="deletePeer('${escapeJs(p.public_key)}')" title="削除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function formatBytes(n) {
+    if (!n) return '0';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + units[i];
+}
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+/* ---- peer modal ---- */
+function openPeerModal(peer) {
+    if (!currentIface) return toast('Interface を選択してください', true);
+    const sug = _suggestionsOrEmpty();
+    if (peer) {
+        editingPubkey = peer.public_key;
+        document.getElementById('peer-modal-title').textContent = `ピア編集: ${peer.comment || peer.public_key.slice(0,16)}…`;
+        document.getElementById('pf-submit-label').textContent = '更新を保存 (鍵は変更しない)';
+        document.getElementById('pf-edit-extra').classList.remove('d-none');
+        document.getElementById('pf-psk').parentElement.classList.add('d-none');
+        document.getElementById('pf-comment').value = peer.comment || '';
+        document.getElementById('pf-enabled').checked = peer.enabled !== false;
+        document.getElementById('pf-peer-address').value = peer.peer_address || '';
+        document.getElementById('pf-extra').value = (peer.extra_allowed_ips || []).join(', ');
+        const dnsList = peer.client_dns || [];
+        document.getElementById('pf-dns-use').checked = dnsList.length > 0;
+        document.getElementById('pf-dns').value = dnsList.join(', ');
+        document.getElementById('pf-dns').disabled = dnsList.length === 0;
+        document.getElementById('pf-mtu').value = peer.client_mtu || 1450;
+        document.getElementById('pf-client-aips').value =
+            (peer.client_allowed_ips || []).join(', ') || (sug.client_allowed_ips || []).join(', ');
+        document.getElementById('pf-endpoint').value = peer.endpoint || sug.endpoint || wanEndpoint;
+        document.getElementById('pf-keepalive').value = peer.persistent_keepalive ?? 25;
+        document.getElementById('pf-psk-regen').checked = false;
+        document.getElementById('pf-psk-drop').checked = false;
+    } else {
+        editingPubkey = null;
+        document.getElementById('peer-modal-title').textContent = '新規ピア追加';
+        document.getElementById('pf-submit-label').textContent = '追加して鍵生成';
+        document.getElementById('pf-edit-extra').classList.add('d-none');
+        document.getElementById('pf-psk').parentElement.classList.remove('d-none');
+        document.getElementById('pf-comment').value = '';
+        document.getElementById('pf-enabled').checked = true;
+        document.getElementById('pf-peer-address').value = sug.next_peer_address || '';
+        document.getElementById('pf-extra').value = '';
+        document.getElementById('pf-dns-use').checked = false;
+        document.getElementById('pf-dns').value = '';
+        document.getElementById('pf-dns').disabled = true;
+        document.getElementById('pf-mtu').value = 1450;
+        document.getElementById('pf-client-aips').value = (sug.client_allowed_ips || ['0.0.0.0/0', '::/0']).join(', ');
+        document.getElementById('pf-endpoint').value = sug.endpoint || wanEndpoint;
+        document.getElementById('pf-keepalive').value = 25;
+        document.getElementById('pf-psk').checked = false;
+    }
+    peerModal.show();
+}
+
+async function submitPeerForm() {
+    const useDns = document.getElementById('pf-dns-use').checked;
+    const payload = {
+        comment: document.getElementById('pf-comment').value.trim(),
+        enabled: document.getElementById('pf-enabled').checked,
+        peer_address: document.getElementById('pf-peer-address').value.trim(),
+        extra_allowed_ips: document.getElementById('pf-extra').value.trim(),
+        client_dns: useDns ? document.getElementById('pf-dns').value.trim() : '',
+        client_mtu: document.getElementById('pf-mtu').value.trim(),
+        client_allowed_ips: document.getElementById('pf-client-aips').value.trim(),
+        endpoint: document.getElementById('pf-endpoint').value.trim(),
+        persistent_keepalive: document.getElementById('pf-keepalive').value.trim(),
+    };
+    if (!payload.peer_address) return toast('Peer Address は必須', true);
+
+    let res;
+    if (editingPubkey) {
+        payload.preshared_key_regen = document.getElementById('pf-psk-regen').checked;
+        payload.preshared_key_drop = document.getElementById('pf-psk-drop').checked;
+        res = await api.send(
+            `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(editingPubkey)}`,
+            'PUT', payload);
+    } else {
+        payload.preshared_key = document.getElementById('pf-psk').checked;
+        res = await api.send(
+            `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers`,
+            'POST', payload);
+    }
+    if (!res) return;
+    peerModal.hide();
+    toast(editingPubkey ? '更新しました' : '追加しました');
+    refresh();
+    // Open config modal with the fresh client config
+    if (res.client_config) {
+        const title = `クライアント設定: ${payload.comment || (res.peer && res.peer.public_key.slice(0,16) + '…') || '(no name)'}`;
+        showConfigPanel(title, res.client_config, res.qr_svg,
+            editingPubkey ? '設定を更新しました。新しい .conf をクライアントに反映してください。'
+                          : '<strong>このピアの設定は何度でも再表示できます。</strong>');
+    }
+}
+
+/* ---- show config / QR (anytime) ---- */
+async function showClientConfig(pubkey, name) {
+    const res = await api.get(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}/client-config`);
+    if (!res) return;
+    showConfigPanel(`クライアント設定: ${name || pubkey.slice(0,16) + '…'}`,
+        res.client_config, res.qr_svg, '');
+    lastConfigFilename = res.filename || lastConfigFilename;
+}
+
+function showConfigPanel(title, conf, qrSvg, banner) {
+    document.getElementById('config-modal-title').textContent = title;
+    document.getElementById('config-text').value = conf || '';
+    document.getElementById('config-qr').innerHTML = qrSvg || '<em>QR 生成に失敗</em>';
+    const b = document.getElementById('config-result-banner');
+    if (banner) {
+        b.innerHTML = banner;
+        b.classList.remove('d-none');
+    } else {
+        b.classList.add('d-none');
+    }
+    configModal.show();
+}
+
+function copyClientConf() {
+    const ta = document.getElementById('config-text');
+    ta.select();
+    document.execCommand('copy');
+    toast('コピーしました');
+}
+
+function downloadClientConf() {
+    const text = document.getElementById('config-text').value;
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (lastConfigFilename || 'wg-client.conf').replace(/[^A-Za-z0-9._\-]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+/* ---- adopt existing private key (no key change) ---- */
+function openAdoptKey(pubkey) {
+    adoptingPubkey = pubkey;
+    document.getElementById('adopt-pubkey').textContent = pubkey;
+    document.getElementById('adopt-privkey').value = '';
+    adoptModal.show();
+}
+
+async function submitAdoptKey() {
+    const privkey = document.getElementById('adopt-privkey').value.trim();
+    if (!privkey) return toast('秘密鍵を入力してください', true);
+    const res = await api.send(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(adoptingPubkey)}/adopt-key`,
+        'POST', { private_key: privkey });
+    if (!res) return;
+    toast('取り込みました');
+    adoptModal.hide();
+    refresh();
+    if (res.client_config) {
+        showConfigPanel(`取り込み完了: ${(res.peer && res.peer.comment) || ''}`,
+            res.client_config, res.qr_svg,
+            '<strong>このピアは GUI 管理下に入りました。</strong>設定変更や再ダウンロードが可能です。');
+    }
+}
+
+/* ---- regenerate keys (rotate keypair) ---- */
+async function regenerateKeys(pubkey) {
+    if (!confirm(
+        `このピアの鍵ペアを再生成しますか?\n\n` +
+        `・公開鍵が変わるためクライアント側の設定差し替えが必要です\n` +
+        `・新しい .conf がモーダルに表示されます (再表示可)\n` +
+        `・GUI 管理下に取り込まれます (これまで limited だった場合)`)) return;
+    const res = await api.send(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}/regenerate-keys`,
+        'POST', { regenerate_psk: true });
+    if (!res) return;
+    toast('鍵を再生成しました');
+    refresh();
+    if (res.client_config) {
+        showConfigPanel(`鍵再生成: ${res.peer && res.peer.comment || '(no name)'}`,
+            res.client_config, res.qr_svg,
+            '<strong>クライアント側の設定を新しい .conf に差し替えてください。</strong>');
+    }
+}
+
+async function deletePeer(pubkey) {
+    if (!confirm('このピアを削除しますか?\n' + pubkey)) return;
+    const res = await api.send(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}`,
+        'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function upIface() {
+    if (!confirm(`${currentIface} を up しますか?`)) return;
+    const res = await api.send(`/wg/api/interfaces/${encodeURIComponent(currentIface)}/up`, 'POST');
+    if (res) { toast(res.ok ? 'up しました' : ('失敗: ' + (res.output || '')), !res.ok); refresh(); }
+}
+async function downIface() {
+    if (!confirm(`${currentIface} を down しますか?`)) return;
+    const res = await api.send(`/wg/api/interfaces/${encodeURIComponent(currentIface)}/down`, 'POST');
+    if (res) { toast(res.ok ? 'down しました' : ('失敗: ' + (res.output || '')), !res.ok); refresh(); }
+}
+
+refresh();
+</script>
+{% endblock %}

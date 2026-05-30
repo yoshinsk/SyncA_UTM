@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}国別IP — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-globe-asia-australia text-primary"></i> 国別 IP リスト
+    </h1>
+    <button class="btn btn-primary btn-sm" onclick="openAddModal()">
+        <i class="bi bi-plus-lg"></i> 国を追加
+    </button>
+</div>
+
+<!-- Managed countries -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-flag-fill text-secondary"></i>
+        <strong>管理中の国</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width:80px">コード</th>
+                        <th>ipset 名</th>
+                        <th>エントリ数</th>
+                        <th>最終更新</th>
+                        <th style="width:300px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="country-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Discovered ipsets -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-search text-secondary"></i>
+            <strong>firewalld 上の ipset 一覧</strong>
+            <span class="badge bg-secondary-subtle text-secondary-emphasis">discovery</span>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refreshDiscovery()">
+            <i class="bi bi-arrow-clockwise"></i> 再スキャン
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>ipset 名</th>
+                        <th>エントリ数</th>
+                        <th>状態</th>
+                        <th style="width:200px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="ipset-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Add country modal -->
+<div class="modal fade" id="add-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">国を追加</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">ISO 3166 alpha-2 コード</label>
+                    <input id="add-code" type="text" class="form-control text-uppercase font-monospace" maxlength="2" placeholder="JP / US / CN ...">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">ipset 名 <span class="text-secondary small">(空欄で <code>&lt;cc&gt;-ipv4</code>)</span></label>
+                    <input id="add-ipset" type="text" class="form-control font-monospace" placeholder="例: jp-ipv4">
+                    <div class="form-text">既存の ipset 名を指定すると、その内容を上書き(または adopt 時は維持)します。</div>
+                </div>
+                <div class="form-check form-switch">
+                    <input id="add-adopt" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="add-adopt">
+                        取り込みモード <span class="text-secondary small">(既存 ipset をそのまま管理対象に取り込む / 再ダウンロードしない)</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="addCountry()">
+                    <i class="bi bi-check2"></i> 追加
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Attach modal -->
+<div class="modal fade" id="attach-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="attach-modal-title">Zone に紐付け</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">対象 zone 名</label>
+                    <input id="attach-zone" type="text" class="form-control font-monospace" placeholder="japan / drop / public / ...">
+                    <div class="form-text">指定 zone の source に <code>ipset:&lt;name&gt;</code> を追加します。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-warning" onclick="detachFromZone()">
+                    <i class="bi bi-x-circle"></i> 取り外し
+                </button>
+                <button class="btn btn-primary" onclick="attachToZone()">
+                    <i class="bi bi-link-45deg"></i> 紐付け
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let countries = [];
+let ipsets = [];
+let addModal, attachModal;
+let attachTargetCode = null;
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+document.addEventListener('DOMContentLoaded', () => {
+    addModal = new bootstrap.Modal(document.getElementById('add-modal'));
+    attachModal = new bootstrap.Modal(document.getElementById('attach-modal'));
+});
+
+async function refreshAll() {
+    await refresh();
+    await refreshDiscovery();
+}
+
+async function refresh() {
+    const data = await api.get('/geoip/api/countries');
+    if (!data) return;
+    countries = data.countries || [];
+    const tbody = document.getElementById('country-tbody');
+    tbody.innerHTML = countries.length === 0
+        ? '<tr><td colspan="5" class="text-center text-secondary py-4">未登録</td></tr>'
+        : countries.map(c => {
+            const adoptedBadge = c.adopted
+                ? '<span class="badge bg-info-subtle text-info-emphasis ms-1">利用中</span>'
+                : '';
+            return `<tr>
+                <td class="fw-bold font-monospace">${escapeHtml(c.code)}${adoptedBadge}</td>
+                <td class="font-monospace">${escapeHtml(c.ipset)}</td>
+                <td>${c.entry_count.toLocaleString()}</td>
+                <td class="small">${escapeHtml(c.last_updated || '—')}</td>
+                <td class="d-flex gap-1 flex-wrap">
+                    <button class="btn btn-sm btn-outline-primary" onclick="refreshCountry('${escapeJs(c.code)}')" title="ipdeny.com から再ダウンロード">
+                        <i class="bi bi-cloud-download"></i> 更新
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="openAttach('${escapeJs(c.code)}')">
+                        <i class="bi bi-link-45deg"></i> zone
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteCountry('${escapeJs(c.code)}')">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+}
+
+async function refreshDiscovery() {
+    const data = await api.get('/geoip/api/ipsets/discover');
+    if (!data) return;
+    ipsets = data.ipsets || [];
+    const tbody = document.getElementById('ipset-tbody');
+    tbody.innerHTML = ipsets.length === 0
+        ? '<tr><td colspan="4" class="text-center text-secondary py-3">ipset なし</td></tr>'
+        : ipsets.map(s => {
+            const status = s.managed_by
+                ? `<span class="badge bg-success-subtle text-success-emphasis">管理中 (${escapeHtml(s.managed_by)})</span>`
+                : '<span class="badge bg-warning-subtle text-warning-emphasis">未管理</span>';
+            const actions = [
+                s.managed_by
+                    ? ''
+                    : `<button class="btn btn-sm btn-outline-info me-1" onclick="adoptIpset('${escapeJs(s.name)}')">
+                           <i class="bi bi-arrow-down-left-square"></i> 取り込み
+                       </button>`,
+                `<button class="btn btn-sm btn-outline-danger" onclick="deleteIpset('${escapeJs(s.name)}')">
+                     <i class="bi bi-trash"></i> 削除
+                 </button>`,
+            ].join('');
+            return `<tr>
+                <td class="font-monospace">${escapeHtml(s.name)}</td>
+                <td>${s.entry_count.toLocaleString()}</td>
+                <td>${status}</td>
+                <td>${actions}</td>
+            </tr>`;
+        }).join('');
+}
+
+function openAddModal() {
+    document.getElementById('add-code').value = '';
+    document.getElementById('add-ipset').value = '';
+    document.getElementById('add-adopt').checked = false;
+    addModal.show();
+}
+
+async function addCountry() {
+    const code = document.getElementById('add-code').value.trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(code)) return toast('2 文字の国コードを入力してください', true);
+    const ipset = document.getElementById('add-ipset').value.trim() || undefined;
+    const adopt = document.getElementById('add-adopt').checked;
+    const res = await api.send('/geoip/api/countries', 'POST', { code, ipset, adopt });
+    if (res && res.country) {
+        toast(`${code}: ${adopt ? '取り込みました' : `${res.country.entry_count} 件登録`}`);
+        addModal.hide();
+        refreshAll();
+    }
+}
+
+async function adoptIpset(name) {
+    // The ipset name is e.g. "jp-ipv4" → infer the country code "JP".
+    const m = name.match(/^([a-z]{2})/i);
+    const code = m ? m[1].toUpperCase() : prompt(`${name} に対応する国コード (例: JP) を入力`);
+    if (!code || !/^[A-Z]{2}$/i.test(code)) return;
+    const res = await api.send('/geoip/api/countries', 'POST',
+        { code: code.toUpperCase(), ipset: name, adopt: true });
+    if (res && res.country) {
+        toast(`${code.toUpperCase()} を取り込みました (${res.country.entry_count} 件)`);
+        refreshAll();
+    }
+}
+
+async function refreshCountry(code) {
+    const res = await api.send(`/geoip/api/countries/${code}/refresh`, 'POST');
+    if (res && res.country) { toast(`${code}: ${res.country.entry_count} 件に更新`); refreshAll(); }
+}
+
+async function deleteCountry(code) {
+    const choice = confirm(`${code} を GUI 管理から外しますか?\n\nOK = ipset は保持\nキャンセル = 何もしない`);
+    if (!choice) return;
+    const res = await api.send(`/geoip/api/countries/${code}`, 'DELETE', { delete_ipset: false });
+    if (res) { toast(`${code} 削除`); refreshAll(); }
+}
+
+async function deleteIpset(name) {
+    if (!confirm(`firewalld の ipset "${name}" を削除しますか?\n\n注意: いずれかの zone の source に紐付いている場合は失敗します。先に detach してください。`)) return;
+    const res = await api.send(`/geoip/api/ipsets/${encodeURIComponent(name)}`, 'DELETE');
+    if (res && res.ok) { toast(`${name} 削除しました`); refreshAll(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+
+function openAttach(code) {
+    attachTargetCode = code;
+    document.getElementById('attach-modal-title').textContent = `${code} を zone に紐付け`;
+    document.getElementById('attach-zone').value = '';
+    attachModal.show();
+}
+
+async function attachToZone() {
+    const zone = document.getElementById('attach-zone').value.trim();
+    if (!zone) return toast('zone 名を入力してください', true);
+    const res = await api.send(`/geoip/api/countries/${attachTargetCode}/attach`, 'POST', { zone });
+    if (res && res.ok) { toast(`${attachTargetCode} を ${zone} に紐付けました`); attachModal.hide(); }
+}
+
+async function detachFromZone() {
+    const zone = document.getElementById('attach-zone').value.trim();
+    if (!zone) return toast('zone 名を入力してください', true);
+    const res = await api.send(`/geoip/api/countries/${attachTargetCode}/detach`, 'POST', { zone });
+    if (res && res.ok) { toast(`${attachTargetCode} を ${zone} から外しました`); attachModal.hide(); }
+}
+
+refreshAll();
+</script>
+{% endblock %}

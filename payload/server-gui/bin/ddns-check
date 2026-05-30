@@ -1,0 +1,46 @@
+#!/opt/server-gui/venv/bin/python
+"""Periodic DDNS update — invoked by server-gui-ddns.timer.
+
+Imports the in-app logic from server_gui.modules.ddns so the timer and the
+GUI's `/ddns/api/check` endpoint behave identically.
+"""
+from __future__ import annotations
+
+import datetime
+import os
+import sys
+from pathlib import Path
+
+LOG = Path("/var/log/server-gui/ddns.log")
+LOG.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')} {msg}\n")
+
+
+def main() -> int:
+    os.environ.setdefault("SERVER_GUI_CONFIG_DIR", "/etc/server-gui")
+    # Need a Flask application context for the modules' current_app references
+    sys.path.insert(0, "/opt/server-gui")
+    try:
+        from server_gui.app import create_app
+        from server_gui.modules.ddns import _check_and_update
+    except ImportError as e:
+        _log(f"import failed: {e}")
+        return 1
+
+    app = create_app(os.environ["SERVER_GUI_CONFIG_DIR"])
+    with app.app_context():
+        try:
+            result = _check_and_update()
+        except Exception as e:  # pragma: no cover
+            _log(f"ERROR: {e}")
+            return 1
+    _log(f"check ip={result.get('ip')} changed={result.get('changed')} updates={result.get('updates')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

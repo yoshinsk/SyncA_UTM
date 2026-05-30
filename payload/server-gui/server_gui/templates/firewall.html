@@ -1,0 +1,730 @@
+{% extends "base.html" %}
+{% block title %}Firewall — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-bricks text-primary"></i> Firewalld
+    </h1>
+    <div class="d-flex gap-2 align-items-center">
+        <span class="small text-secondary">default zone:</span>
+        <span class="badge bg-primary" id="default-zone">—</span>
+        <button class="btn btn-outline-secondary btn-sm" onclick="reloadFw()">
+            <i class="bi bi-arrow-clockwise"></i> reload
+        </button>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-3 firewall-visual-editor">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-ui-checks-grid text-secondary"></i>
+            <strong>ドラッグ操作</strong>
+            <span class="small text-secondary">サービス / ポート / source をゾーンへドロップ</span>
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-lg-4">
+                <div class="small text-secondary mb-1">サービス</div>
+                <div id="fw-service-palette" class="fw-palette"></div>
+            </div>
+            <div class="col-lg-4">
+                <div class="small text-secondary mb-1">ポート</div>
+                <div id="fw-port-palette" class="fw-palette"></div>
+            </div>
+            <div class="col-lg-4">
+                <div class="small text-secondary mb-1">source / ipset</div>
+                <div id="fw-source-palette" class="fw-palette"></div>
+            </div>
+        </div>
+        <div class="small text-secondary mt-3 mb-2">ドロップ先ゾーン</div>
+        <div id="zone-drop-board" class="zone-drop-board"></div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-list-ul text-secondary"></i> <strong>Zone 一覧</strong>
+            </div>
+            <ul class="list-group list-group-flush" id="zone-list"></ul>
+        </div>
+    </div>
+
+    <div class="col-md-9">
+        <div class="card border-0 shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <i class="bi bi-shield-fill-check text-secondary"></i>
+                    <strong>Zone:</strong> <span id="active-zone" class="font-monospace">—</span>
+                    <span class="badge bg-info-subtle text-info-emphasis ms-1" id="zone-target">target: —</span>
+                </div>
+                <button class="btn btn-sm btn-outline-primary" onclick="makeDefault()">
+                    <i class="bi bi-star"></i> default に設定
+                </button>
+            </div>
+            <div class="card-body">
+
+                <!-- interfaces / sources -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-ethernet"></i> interfaces</h6>
+                        <div id="z-interfaces" class="d-flex flex-wrap gap-1"></div>
+                    </div>
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-geo-alt"></i> sources <small class="text-secondary">(CIDR / ipset)</small></h6>
+                        <div id="z-sources" class="d-flex flex-wrap gap-1 mb-2"></div>
+                        <div class="input-group input-group-sm">
+                            <input id="src-input" type="text" class="form-control" placeholder="10.0.0.0/8 または ipset:geoip-jp">
+                            <button class="btn btn-primary" onclick="addSource()"><i class="bi bi-plus"></i></button>
+                        </div>
+                    </div>
+                </div>
+                <hr>
+
+                <!-- ports / services -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-door-open"></i> ports</h6>
+                        <div id="z-ports" class="d-flex flex-wrap gap-1 mb-2"></div>
+                        <div class="input-group input-group-sm">
+                            <input id="port-input" type="text" class="form-control" placeholder="443/tcp">
+                            <button class="btn btn-primary" onclick="addPort()"><i class="bi bi-plus"></i></button>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-app-indicator"></i> services</h6>
+                        <div id="z-services" class="d-flex flex-wrap gap-1 mb-2"></div>
+                        <div class="input-group input-group-sm">
+                            <input id="svc-input" type="text" class="form-control" list="svc-datalist" placeholder="https / ssh / dns ... (候補から選択)">
+                            <button class="btn btn-primary" onclick="addService()"><i class="bi bi-plus"></i></button>
+                        </div>
+                        <datalist id="svc-datalist"></datalist>
+                        <div class="small text-secondary mt-1">候補数: <span id="svc-available-count">—</span></div>
+                    </div>
+                </div>
+                <hr>
+
+                <!-- forward ports -->
+                <h6><i class="bi bi-arrow-right-square"></i> forward ports <small class="text-secondary">(ポート転送 / DNAT)</small></h6>
+                <div id="z-forward-ports" class="list-group mb-2"></div>
+                <div class="row g-2 align-items-end small">
+                    <div class="col-sm-2">
+                        <label class="form-label mb-0">port</label>
+                        <input id="fp-port" type="text" class="form-control form-control-sm font-monospace" placeholder="8080">
+                    </div>
+                    <div class="col-sm-2">
+                        <label class="form-label mb-0">proto</label>
+                        <select id="fp-proto" class="form-select form-select-sm">
+                            <option value="tcp">tcp</option>
+                            <option value="udp">udp</option>
+                            <option value="sctp">sctp</option>
+                            <option value="dccp">dccp</option>
+                        </select>
+                    </div>
+                    <div class="col-sm-2">
+                        <label class="form-label mb-0">→ toport</label>
+                        <input id="fp-toport" type="text" class="form-control form-control-sm font-monospace" placeholder="80 (任意)">
+                    </div>
+                    <div class="col-sm-4">
+                        <label class="form-label mb-0">→ toaddr</label>
+                        <input id="fp-toaddr" type="text" class="form-control form-control-sm font-monospace" placeholder="192.168.1.10 (任意)">
+                    </div>
+                    <div class="col-sm-2">
+                        <button class="btn btn-primary btn-sm w-100" onclick="addForwardPort()">
+                            <i class="bi bi-plus"></i> 追加
+                        </button>
+                    </div>
+                </div>
+                <hr>
+
+                <!-- rich rules -->
+                <h6><i class="bi bi-rule"></i> rich rules</h6>
+                <div id="z-rich" class="list-group mb-2"></div>
+                <div class="input-group input-group-sm">
+                    <input id="rich-input" type="text" class="form-control font-monospace small"
+                           placeholder='rule family="ipv4" source address="10.0.0.0/8" port port="22" protocol="tcp" accept'>
+                    <button class="btn btn-primary" onclick="addRichRule()"><i class="bi bi-plus"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== Forward Port Edit Modal ========== -->
+<div class="modal fade" id="fp-edit-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-arrow-right-square"></i> 転送ルール編集
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-light border small font-monospace mb-3" id="fp-edit-original"></div>
+                <div class="row g-2 mb-2">
+                    <div class="col-sm-6">
+                        <label class="form-label small mb-1">port</label>
+                        <input id="fp-edit-port" class="form-control form-control-sm font-monospace">
+                    </div>
+                    <div class="col-sm-6">
+                        <label class="form-label small mb-1">proto</label>
+                        <select id="fp-edit-proto" class="form-select form-select-sm">
+                            <option value="tcp">tcp</option>
+                            <option value="udp">udp</option>
+                            <option value="sctp">sctp</option>
+                            <option value="dccp">dccp</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-sm-4">
+                        <label class="form-label small mb-1">→ toport</label>
+                        <input id="fp-edit-toport" class="form-control form-control-sm font-monospace" placeholder="任意">
+                    </div>
+                    <div class="col-sm-8">
+                        <label class="form-label small mb-1">→ toaddr</label>
+                        <input id="fp-edit-toaddr" class="form-control form-control-sm font-monospace" placeholder="任意">
+                    </div>
+                </div>
+                <div class="form-text mt-2">
+                    <i class="bi bi-info-circle"></i> 編集は「旧ルールを削除 → 新ルールを追加」として処理されます。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="saveForwardPortEdit()">
+                    <i class="bi bi-check2"></i> 更新
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Direct rules (global) -->
+<div class="card border-0 shadow-sm mt-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-arrow-90deg-right text-secondary"></i>
+            <strong>Direct rules</strong>
+            <span class="badge bg-secondary-subtle text-secondary-emphasis">global / 上級者向け</span>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadDirectRules()">
+            <i class="bi bi-arrow-clockwise"></i> 再読込
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0 small align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width:60px">ipv</th>
+                        <th style="width:100px">table</th>
+                        <th style="width:120px">chain</th>
+                        <th style="width:80px">prio</th>
+                        <th>args</th>
+                        <th style="width:60px"></th>
+                    </tr>
+                </thead>
+                <tbody id="direct-tbody"></tbody>
+            </table>
+        </div>
+
+        <div class="border-top p-3 small bg-light">
+            <h6 class="mb-2"><i class="bi bi-plus-circle"></i> 新規 direct rule</h6>
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-1">
+                    <label class="form-label mb-0">ipv</label>
+                    <select id="dr-ipv" class="form-select form-select-sm">
+                        <option value="ipv4">ipv4</option>
+                        <option value="ipv6">ipv6</option>
+                        <option value="eb">eb</option>
+                    </select>
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label mb-0">table</label>
+                    <input id="dr-table" class="form-control form-control-sm font-monospace" value="filter">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label mb-0">chain</label>
+                    <input id="dr-chain" class="form-control form-control-sm font-monospace" placeholder="INPUT / FORWARD ...">
+                </div>
+                <div class="col-sm-1">
+                    <label class="form-label mb-0">prio</label>
+                    <input id="dr-priority" type="number" class="form-control form-control-sm" value="0">
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label mb-0">args (iptables 構文)</label>
+                    <input id="dr-args" class="form-control form-control-sm font-monospace" placeholder='例: -i lo -j ACCEPT'>
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addDirectRule()">
+                        <i class="bi bi-plus"></i> 追加
+                    </button>
+                </div>
+            </div>
+            <div class="form-text mt-1">
+                <i class="bi bi-info-circle"></i>
+                <code>firewall-cmd --permanent --direct --add-rule &lt;ipv&gt; &lt;table&gt; &lt;chain&gt; &lt;prio&gt; &lt;args&gt;</code> を実行します。
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let zones = [];
+let activeData = {};
+let defaultZone = null;
+let activeZone = null;
+let allServices = [];
+// Per-zone state captured from latest fetch (used by remove-by-index handlers)
+let currentForwardPorts = [];
+let currentRichRules = [];
+let fpEditModal = null;
+let editingFpOld = null;
+const commonServices = ['ssh', 'http', 'https', 'dns', 'dhcp', 'ipsec', 'wireguard', 'sip-custom'];
+const commonPorts = ['4444/tcp', '5011/tcp', '51820/udp', '500/udp', '4500/udp', '48060/tcp', '48060/udp', '10000-20000/udp'];
+const commonSources = ['ipset:jp-ipv4', 'ipset:cn-ipv4', 'ipset:kr-ipv4', '10.0.0.0/8', '192.168.151.0/24'];
+
+document.addEventListener('DOMContentLoaded', () => {
+    fpEditModal = new bootstrap.Modal(document.getElementById('fp-edit-modal'));
+});
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+function tag(text, onRemove, dragMeta = null) {
+    const safe = escapeHtml(text);
+    const handler = onRemove ? `<button class="btn-close ms-1" aria-label="remove" onclick="${onRemove}"></button>` : '';
+    const drag = dragMeta
+        ? ` draggable="true" ondragstart="dragFirewallItem(event,'${escapeJs(dragMeta.kind)}','${escapeJs(text)}','${escapeJs(dragMeta.originZone || '')}')"`
+        : '';
+    return `<span class="badge bg-primary-subtle text-primary-emphasis d-inline-flex align-items-center font-monospace fw-draggable"${drag}>${safe}${handler}</span>`;
+}
+
+async function init() {
+    console.log('[firewall] init');
+    await loadServiceList();
+    await refreshZones();
+    await loadDirectRules();
+}
+
+async function loadServiceList() {
+    const data = await api.get('/firewall/api/services-available');
+    if (!data) return;
+    allServices = data.services || [];
+    const dl = document.getElementById('svc-datalist');
+    dl.innerHTML = allServices.map(s => `<option value="${escapeHtml(s)}">`).join('');
+    document.getElementById('svc-available-count').textContent = allServices.length;
+    renderPalettes();
+}
+
+async function refreshZones() {
+    const data = await api.get('/firewall/api/zones');
+    if (!data) return;
+    zones = data.zones || [];
+    activeData = data.active || {};
+    defaultZone = data.default;
+    document.getElementById('default-zone').textContent = defaultZone || '—';
+    renderSidebar();
+    renderDropBoard();
+    if (!activeZone && zones.length) {
+        await selectZone(zones[0]);
+    } else if (activeZone) {
+        await loadZoneDetail(activeZone);
+    }
+}
+
+function renderSidebar() {
+    const ul = document.getElementById('zone-list');
+    ul.innerHTML = zones.map(z => {
+        const activeBadge = activeData[z]
+            ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">active</span>'
+            : '';
+        const defBadge = z === defaultZone
+            ? '<span class="badge bg-primary ms-1">default</span>'
+            : '';
+        const cls = z === activeZone ? 'active' : '';
+        return `<li class="list-group-item d-flex justify-content-between align-items-center ${cls}"
+                    style="cursor:pointer" onclick="selectZone('${escapeJs(z)}')"
+                    ondragover="allowFirewallDrop(event)" ondragleave="leaveFirewallDrop(event)"
+                    ondrop="dropFirewallItem(event,'${escapeJs(z)}')">
+                    <span class="font-monospace">${escapeHtml(z)}</span>
+                    <span>${defBadge}${activeBadge}</span>
+                </li>`;
+    }).join('');
+}
+
+function renderPalettes() {
+    renderPalette('fw-service-palette', 'service', commonServices.filter(s => allServices.includes(s)));
+    renderPalette('fw-port-palette', 'port', commonPorts);
+    renderPalette('fw-source-palette', 'source', commonSources);
+}
+
+function renderPalette(id, kind, items) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = items.map(item =>
+        `<span class="fw-palette-chip font-monospace" draggable="true"
+               ondragstart="dragFirewallItem(event,'${escapeJs(kind)}','${escapeJs(item)}','')">${escapeHtml(item)}</span>`
+    ).join('') || '<span class="text-secondary small">候補なし</span>';
+}
+
+function renderDropBoard() {
+    const board = document.getElementById('zone-drop-board');
+    if (!board) return;
+    board.innerHTML = zones.map(z => {
+        const activeBadge = activeData[z] ? '<span class="badge bg-success-subtle text-success-emphasis">active</span>' : '';
+        const defBadge = z === defaultZone ? '<span class="badge bg-primary">default</span>' : '';
+        const selected = z === activeZone ? ' selected' : '';
+        return `<button type="button" class="zone-drop-card${selected}"
+                    onclick="selectZone('${escapeJs(z)}')"
+                    ondragover="allowFirewallDrop(event)" ondragleave="leaveFirewallDrop(event)"
+                    ondrop="dropFirewallItem(event,'${escapeJs(z)}')">
+                    <span class="font-monospace fw-semibold">${escapeHtml(z)}</span>
+                    <span class="d-flex gap-1">${defBadge}${activeBadge}</span>
+                </button>`;
+    }).join('');
+}
+
+function dragFirewallItem(event, kind, value, originZone) {
+    event.dataTransfer.effectAllowed = originZone ? 'move' : 'copy';
+    event.dataTransfer.setData('application/json', JSON.stringify({ kind, value, originZone }));
+}
+
+function allowFirewallDrop(event) {
+    event.preventDefault();
+    event.currentTarget.classList.add('firewall-drop-hover');
+}
+
+function leaveFirewallDrop(event) {
+    event.currentTarget.classList.remove('firewall-drop-hover');
+}
+
+async function dropFirewallItem(event, targetZone) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.classList.remove('firewall-drop-hover');
+    let item = null;
+    try {
+        item = JSON.parse(event.dataTransfer.getData('application/json') || '{}');
+    } catch (_) {
+        return;
+    }
+    if (!item || !item.kind || !item.value || !targetZone) return;
+    await applyDroppedFirewallItem(item, targetZone);
+}
+
+async function applyDroppedFirewallItem(item, targetZone) {
+    const kindLabel = item.kind === 'service' ? 'service' : item.kind === 'port' ? 'port' : 'source';
+    if (item.originZone && item.originZone === targetZone) {
+        toast('同じ zone です');
+        return;
+    }
+    const actionText = item.originZone
+        ? `${item.originZone} から ${targetZone} へ移動`
+        : `${targetZone} へ追加`;
+    if (!confirm(`${kindLabel}: ${item.value}\n${actionText}しますか?`)) return;
+
+    const add = await sendZoneItem(targetZone, item.kind, 'POST', item.value);
+    if (!add || !add.ok) {
+        if (add) toast(add.error || '追加に失敗しました', true);
+        return;
+    }
+    if (item.originZone) {
+        const removed = await sendZoneItem(item.originZone, item.kind, 'DELETE', item.value);
+        if (!removed || !removed.ok) {
+            toast('追加は成功しましたが、移動元からの削除に失敗しました', true);
+        }
+    }
+    toast(item.originZone ? '移動しました' : '追加しました');
+    await refreshZones();
+}
+
+async function sendZoneItem(zone, kind, method, value) {
+    const pathMap = { service: 'services', port: 'ports', source: 'sources' };
+    const keyMap = { service: 'service', port: 'port', source: 'source' };
+    const path = pathMap[kind];
+    const key = keyMap[kind];
+    if (!path || !key) return { ok: false, error: 'unsupported item type' };
+    return api.send(`/firewall/api/zones/${encodeURIComponent(zone)}/${path}`, method, { [key]: value });
+}
+
+async function selectZone(zone) {
+    console.log('[firewall] selectZone', zone);
+    activeZone = zone;
+    renderSidebar();
+    renderDropBoard();
+    await loadZoneDetail(zone);
+}
+
+async function loadZoneDetail(zone) {
+    const info = await api.get(`/firewall/api/zones/${encodeURIComponent(zone)}`);
+    if (!info || info.error) return;
+    renderZoneDetail(info);
+}
+
+function renderZoneDetail(info) {
+    document.getElementById('active-zone').textContent = info.zone;
+    document.getElementById('zone-target').textContent = 'target: ' + (info.target || '—');
+
+    document.getElementById('z-interfaces').innerHTML =
+        (info.interfaces || []).map(i => tag(i)).join('') ||
+        '<span class="text-secondary small">なし</span>';
+    document.getElementById('z-sources').innerHTML =
+        (info.sources || []).map(s => tag(s, `removeSource('${escapeJs(s)}')`, { kind: 'source', originZone: info.zone })).join('') ||
+        '<span class="text-secondary small">なし</span>';
+    document.getElementById('z-ports').innerHTML =
+        (info.ports || []).map(p => tag(p, `removePort('${escapeJs(p)}')`, { kind: 'port', originZone: info.zone })).join('') ||
+        '<span class="text-secondary small">なし</span>';
+    document.getElementById('z-services').innerHTML =
+        (info.services || []).map(s => tag(s, `removeService('${escapeJs(s)}')`, { kind: 'service', originZone: info.zone })).join('') ||
+        '<span class="text-secondary small">なし</span>';
+
+    currentForwardPorts = info.forward_ports || [];
+    document.getElementById('z-forward-ports').innerHTML =
+        currentForwardPorts.length === 0
+            ? '<div class="list-group-item text-secondary small">なし</div>'
+            : currentForwardPorts.map((fp, i) => `
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <code class="small">${escapeHtml(fp.raw || JSON.stringify(fp))}</code>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-outline-primary" onclick="editForwardPortByIndex(${i})" title="編集">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="removeForwardPortByIndex(${i})" title="削除">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>`).join('');
+
+    currentRichRules = info.rich_rules || [];
+    document.getElementById('z-rich').innerHTML =
+        currentRichRules.length === 0
+            ? '<div class="list-group-item text-secondary small">なし</div>'
+            : currentRichRules.map((r, i) => `
+                <div class="list-group-item d-flex justify-content-between align-items-start gap-2">
+                    <code class="small">${escapeHtml(r)}</code>
+                    <button class="btn btn-sm btn-outline-danger flex-shrink-0" onclick="removeRichRuleByIndex(${i})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>`).join('');
+}
+
+let currentDirectRules = [];
+
+async function loadDirectRules() {
+    const data = await api.get('/firewall/api/direct-rules');
+    if (!data) return;
+    currentDirectRules = data.rules || [];
+    const tbody = document.getElementById('direct-tbody');
+    tbody.innerHTML = currentDirectRules.length === 0
+        ? '<tr><td colspan="6" class="text-center text-secondary py-3">direct rule なし</td></tr>'
+        : currentDirectRules.map((r, i) => `
+            <tr>
+                <td class="font-monospace">${escapeHtml(r.ipv || '')}</td>
+                <td class="font-monospace">${escapeHtml(r.table || '')}</td>
+                <td class="font-monospace">${escapeHtml(r.chain || '')}</td>
+                <td class="font-monospace">${escapeHtml(r.priority || '')}</td>
+                <td class="font-monospace text-break">${escapeHtml(r.args || '')}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-danger" onclick="removeDirectRuleByIndex(${i})">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`).join('');
+}
+
+async function addDirectRule() {
+    const payload = {
+        ipv: document.getElementById('dr-ipv').value,
+        table: document.getElementById('dr-table').value.trim(),
+        chain: document.getElementById('dr-chain').value.trim(),
+        priority: parseInt(document.getElementById('dr-priority').value, 10) || 0,
+        args: document.getElementById('dr-args').value.trim(),
+    };
+    if (!payload.table || !payload.chain || !payload.args) {
+        return toast('table / chain / args を入力してください', true);
+    }
+    const res = await api.send('/firewall/api/direct-rules', 'POST', payload);
+    if (res && res.ok) {
+        document.getElementById('dr-args').value = '';
+        toast('追加しました');
+        loadDirectRules();
+    } else if (res) {
+        toast(res.error || 'failed', true);
+    }
+}
+
+async function removeDirectRuleByIndex(i) {
+    const r = currentDirectRules[i];
+    if (!r) return;
+    if (!confirm(`削除しますか?\n${r.ipv} ${r.table} ${r.chain} ${r.priority} ${r.args}`)) return;
+    const res = await api.send('/firewall/api/direct-rules', 'DELETE', {
+        ipv: r.ipv, table: r.table, chain: r.chain, priority: r.priority, args: r.args,
+    });
+    if (res && res.ok) { toast('削除しました'); loadDirectRules(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+
+async function reloadActiveZone() {
+    if (activeZone) await loadZoneDetail(activeZone);
+}
+
+async function makeDefault() {
+    if (!activeZone) return;
+    if (!confirm(`${activeZone} を default zone に設定しますか?`)) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/default`, 'POST');
+    if (res) { toast(res.ok ? '変更しました' : '失敗', !res.ok); await refreshZones(); }
+}
+
+async function addPort() {
+    const port = document.getElementById('port-input').value.trim();
+    if (!port) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/ports`, 'POST', { port });
+    if (res && res.ok) { document.getElementById('port-input').value = ''; toast('追加しました'); reloadActiveZone(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function removePort(port) {
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/ports`, 'DELETE', { port });
+    if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+async function addService() {
+    const service = document.getElementById('svc-input').value.trim();
+    if (!service) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/services`, 'POST', { service });
+    if (res && res.ok) { document.getElementById('svc-input').value = ''; toast('追加しました'); reloadActiveZone(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function removeService(service) {
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/services`, 'DELETE', { service });
+    if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+async function addSource() {
+    const source = document.getElementById('src-input').value.trim();
+    if (!source) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/sources`, 'POST', { source });
+    if (res && res.ok) { document.getElementById('src-input').value = ''; toast('追加しました'); reloadActiveZone(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function removeSource(source) {
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/sources`, 'DELETE', { source });
+    if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+async function addRichRule() {
+    const rule = document.getElementById('rich-input').value.trim();
+    if (!rule) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/rich-rules`, 'POST', { rule });
+    if (res && res.ok) { document.getElementById('rich-input').value = ''; toast('追加しました'); reloadActiveZone(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function removeRichRuleByIndex(i) {
+    const rule = currentRichRules[i];
+    if (!rule) return;
+    if (!confirm('このリッチルールを削除しますか?\n' + rule)) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/rich-rules`, 'DELETE', { rule });
+    if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+async function addForwardPort() {
+    const port   = document.getElementById('fp-port').value.trim();
+    const proto  = document.getElementById('fp-proto').value;
+    const toport = document.getElementById('fp-toport').value.trim();
+    const toaddr = document.getElementById('fp-toaddr').value.trim();
+    if (!port) return toast('port は必須', true);
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`, 'POST', { port, proto, toport, toaddr });
+    if (res && res.ok) {
+        document.getElementById('fp-port').value = '';
+        document.getElementById('fp-toport').value = '';
+        document.getElementById('fp-toaddr').value = '';
+        toast('追加しました');
+        reloadActiveZone();
+    } else if (res) {
+        toast(res.error || 'failed', true);
+    }
+}
+async function removeForwardPortByIndex(i) {
+    const fp = currentForwardPorts[i];
+    if (!fp) return;
+    if (!confirm('この転送ルールを削除しますか?\n' + fp.raw)) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`, 'DELETE',
+        { port: fp.port, proto: fp.proto, toport: fp.toport || '', toaddr: fp.toaddr || '' });
+    if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+function editForwardPortByIndex(i) {
+    const fp = currentForwardPorts[i];
+    if (!fp) return;
+    editingFpOld = fp;
+    document.getElementById('fp-edit-original').textContent = '編集前: ' + (fp.raw || '');
+    document.getElementById('fp-edit-port').value = fp.port || '';
+    document.getElementById('fp-edit-proto').value = fp.proto || 'tcp';
+    document.getElementById('fp-edit-toport').value = fp.toport || '';
+    document.getElementById('fp-edit-toaddr').value = fp.toaddr || '';
+    fpEditModal.show();
+}
+
+async function saveForwardPortEdit() {
+    if (!editingFpOld || !activeZone) return;
+    const newRule = {
+        port:   document.getElementById('fp-edit-port').value.trim(),
+        proto:  document.getElementById('fp-edit-proto').value,
+        toport: document.getElementById('fp-edit-toport').value.trim(),
+        toaddr: document.getElementById('fp-edit-toaddr').value.trim(),
+    };
+    if (!newRule.port) return toast('port は必須', true);
+    if (!newRule.toport && !newRule.toaddr) return toast('toport または toaddr を入力', true);
+
+    // If nothing actually changed, skip the round trip.
+    const sameAsOld = (
+        newRule.port === (editingFpOld.port || '') &&
+        newRule.proto === (editingFpOld.proto || '') &&
+        newRule.toport === (editingFpOld.toport || '') &&
+        newRule.toaddr === (editingFpOld.toaddr || '')
+    );
+    if (sameAsOld) {
+        toast('変更なし');
+        fpEditModal.hide();
+        return;
+    }
+
+    const delRes = await api.send(
+        `/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`,
+        'DELETE',
+        { port: editingFpOld.port, proto: editingFpOld.proto,
+          toport: editingFpOld.toport || '', toaddr: editingFpOld.toaddr || '' });
+    if (!delRes || !delRes.ok) {
+        if (delRes) toast('編集前ルールの削除に失敗: ' + (delRes.error || 'unknown'), true);
+        return;
+    }
+    const addRes = await api.send(
+        `/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`,
+        'POST',
+        newRule);
+    if (addRes && addRes.ok) {
+        toast('更新しました');
+        fpEditModal.hide();
+        editingFpOld = null;
+        reloadActiveZone();
+    } else if (addRes) {
+        toast('新ルールの追加に失敗 (旧ルールは削除済 — ログを確認): ' + (addRes.error || 'unknown'), true);
+        reloadActiveZone();
+    }
+}
+
+async function reloadFw() {
+    const res = await api.send('/firewall/api/reload', 'POST');
+    if (res) toast(res.ok ? 'reload OK' : 'reload 失敗', !res.ok);
+    await refreshZones();
+}
+
+init();
+</script>
+{% endblock %}

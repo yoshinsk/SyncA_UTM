@@ -1,0 +1,57 @@
+#!/opt/server-gui/venv/bin/python
+"""Daily GitHub update probe — invoked by server-gui-update-check.timer.
+
+Reuses _run_update_check() from server_gui.modules.admin so the timer and
+the /admin/api/update/check endpoint share their logic.
+
+If GitHub URL is unset in admin.json, exits silently. If an update is
+detected, the next time the operator opens /admin/ the badge will say
+"更新あり" and the apply button will be enabled.
+"""
+from __future__ import annotations
+
+import datetime
+import os
+import sys
+from pathlib import Path
+
+LOG = Path("/var/log/server-gui/update-check.log")
+LOG.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')} {msg}\n")
+
+
+def main() -> int:
+    config_dir = Path(os.environ.get("SERVER_GUI_CONFIG_DIR", "/etc/server-gui"))
+    sys.path.insert(0, "/opt/server-gui")
+    try:
+        from server_gui.modules.admin import _run_update_check
+    except ImportError as e:
+        _log(f"import failed: {e}")
+        return 1
+
+    try:
+        result = _run_update_check(config_dir=config_dir)
+    except RuntimeError as e:
+        # GitHub URL unset → skip silently. Other errors are logged.
+        if "未設定" in str(e):
+            return 0
+        _log(f"check failed: {e}")
+        return 1
+    except Exception as e:  # pragma: no cover
+        _log(f"unexpected error: {e}")
+        return 1
+
+    _log(
+        f"checked installed={result.get('installed_sha', '')[:8]} "
+        f"latest={result.get('latest_sha', '')[:8]} "
+        f"update_available={result.get('update_available')}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

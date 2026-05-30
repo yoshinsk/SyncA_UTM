@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SyncA UTM{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap-icons/bootstrap-icons.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+</head>
+<body class="bg-body-tertiary {% if session.user %}app-has-sidebar{% endif %}">
+{% if session.user %}
+{% set tabs = [
+    ('dashboard', 'system.dashboard',  'bi-speedometer2', 'ダッシュボード'),
+    ('network',   'network.page',      'bi-hdd-network',  'ネットワーク'),
+    ('ddns',      'ddns.page',         'bi-broadcast',    'DDNS'),
+    ('firewall',  'firewall.page',     'bi-bricks',       'Firewall'),
+    ('fail2ban',  'fail2ban.page',     'bi-slash-circle', 'fail2ban'),
+    ('geoip',     'geoip.page',        'bi-globe-asia-australia', '国別IP'),
+    ('dns',       'dns.page',          'bi-signpost-split', 'DNS'),
+    ('dhcp',      'dhcp.page',         'bi-diagram-3',    'DHCP'),
+    ('ipsec',     'ipsec.page',        'bi-lock-fill',    'IPsec'),
+    ('wireguard', 'wireguard.page',    'bi-shield-shaded', 'WireGuard'),
+    ('nginx',     'nginx_proxy.page',  'bi-arrow-left-right', 'Nginx'),
+    ('certs',     'certs.page',        'bi-patch-check',  '証明書'),
+    ('backup',    'backup.page',       'bi-archive',      'バックアップ'),
+    ('admin',     'admin.page',        'bi-gear-fill',    '管理'),
+] %}
+<aside class="app-sidebar d-none d-xl-flex flex-column bg-dark text-white shadow-sm">
+    <a class="app-sidebar-brand fw-semibold d-flex align-items-center gap-2 text-white text-decoration-none" href="/">
+        <i class="bi bi-shield-lock-fill text-info"></i>
+        SyncA UTM
+    </a>
+    <nav class="app-sidebar-nav flex-grow-1" aria-label="main navigation">
+        {% for tab_id, endpoint, icon, label in tabs %}
+            {% if endpoint %}
+            <a class="app-nav-link d-flex align-items-center gap-2 {% if active_tab == tab_id %}active{% endif %}"
+               href="{{ url_for(endpoint) }}">
+                <i class="bi {{ icon }}"></i>
+                <span>{{ label }}</span>
+            </a>
+            {% else %}
+            <span class="app-nav-link disabled d-flex align-items-center gap-2" title="未実装">
+                <i class="bi {{ icon }}"></i>
+                <span>{{ label }}</span>
+            </span>
+            {% endif %}
+        {% endfor %}
+    </nav>
+    <form method="POST" action="{{ url_for('auth.logout') }}" class="app-sidebar-logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn btn-outline-light btn-sm w-100 d-flex align-items-center justify-content-center gap-2">
+            <i class="bi bi-box-arrow-right"></i> ログアウト
+        </button>
+    </form>
+</aside>
+
+<nav class="navbar navbar-dark bg-dark sticky-top shadow-sm d-xl-none">
+    <div class="container-fluid">
+        <a class="navbar-brand fw-semibold d-flex align-items-center gap-2" href="/">
+            <i class="bi bi-shield-lock-fill text-info"></i>
+            SyncA UTM
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="offcanvas" data-bs-target="#mobileNav"
+                aria-controls="mobileNav" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+    </div>
+</nav>
+
+<div class="offcanvas offcanvas-start text-bg-dark app-mobile-nav" tabindex="-1" id="mobileNav" aria-labelledby="mobileNavLabel">
+    <div class="offcanvas-header">
+        <h5 class="offcanvas-title d-flex align-items-center gap-2" id="mobileNavLabel">
+            <i class="bi bi-shield-lock-fill text-info"></i>
+            SyncA UTM
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+    </div>
+    <div class="offcanvas-body d-flex flex-column">
+        <nav class="app-sidebar-nav flex-grow-1" aria-label="mobile navigation">
+            {% for tab_id, endpoint, icon, label in tabs %}
+                {% if endpoint %}
+                <a class="app-nav-link d-flex align-items-center gap-2 {% if active_tab == tab_id %}active{% endif %}"
+                   href="{{ url_for(endpoint) }}">
+                    <i class="bi {{ icon }}"></i>
+                    <span>{{ label }}</span>
+                </a>
+                {% else %}
+                <span class="app-nav-link disabled d-flex align-items-center gap-2" title="未実装">
+                    <i class="bi {{ icon }}"></i>
+                    <span>{{ label }}</span>
+                </span>
+                {% endif %}
+            {% endfor %}
+        </nav>
+        <form method="POST" action="{{ url_for('auth.logout') }}" class="pt-3">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="btn btn-outline-light btn-sm w-100 d-flex align-items-center justify-content-center gap-2">
+                <i class="bi bi-box-arrow-right"></i> ログアウト
+            </button>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+<main class="container-fluid app-main py-3 py-lg-4 px-3 px-md-4">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="app-footer text-center text-secondary small py-3 border-top mt-auto">
+    &copy; <a href="https://nsksys.com/" target="_blank" rel="noopener" class="text-secondary text-decoration-none fw-semibold">NSK,inc</a>
+</footer>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toast-container"></div>
+
+<script src="{{ url_for('static', filename='vendor/bootstrap/bootstrap.bundle.min.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

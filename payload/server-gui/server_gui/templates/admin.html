@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}管理 — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-gear-fill text-primary"></i> 管理
+    </h1>
+    <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+        <i class="bi bi-arrow-clockwise"></i> 更新
+    </button>
+</div>
+
+<!-- ========== Admin password ========== -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-key-fill text-secondary"></i>
+        <strong>管理者パスワード</strong>
+        <span class="text-secondary small">ログイン用パスワードを変更</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-2">
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label small mb-1">ユーザー名</label>
+                <input id="pw-username" type="text" class="form-control form-control-sm font-monospace" readonly>
+            </div>
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label small mb-1">現在のパスワード <span class="text-danger">*</span></label>
+                <input id="pw-current" type="password" class="form-control form-control-sm font-monospace" autocomplete="current-password">
+            </div>
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label small mb-1 d-flex align-items-baseline justify-content-between gap-2">
+                    <span>新しいパスワード <span class="text-danger">*</span></span>
+                    <span class="text-secondary fw-normal" style="font-size:0.75rem">8 文字以上</span>
+                </label>
+                <input id="pw-new" type="password" class="form-control form-control-sm font-monospace" autocomplete="new-password">
+            </div>
+            <div class="col-lg-3 col-md-6">
+                <label class="form-label small mb-1">確認 <span class="text-danger">*</span></label>
+                <input id="pw-confirm" type="password" class="form-control form-control-sm font-monospace" autocomplete="new-password">
+            </div>
+        </div>
+        <div class="mt-3">
+            <button class="btn btn-primary btn-sm" onclick="changePassword()">
+                <i class="bi bi-check2"></i> パスワードを変更
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== GitHub auto-update ========== -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-github text-secondary"></i>
+        <strong>自動更新 (GitHub)</strong>
+        <span class="text-secondary small">URL が設定されている場合、1 日 1 回 systemd timer で更新を確認</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-lg-7 col-md-12">
+                <label class="form-label small mb-1 d-flex align-items-baseline justify-content-between gap-2">
+                    <span>GitHub URL</span>
+                    <span class="text-secondary fw-normal" style="font-size:0.75rem">
+                        空欄にすると自動更新を無効化します
+                    </span>
+                </label>
+                <input id="gh-url" type="text" class="form-control form-control-sm font-monospace"
+                       placeholder="https://github.com/yoshinsk/Almautm">
+            </div>
+            <div class="col-lg-3 col-md-8">
+                <label class="form-label small mb-1">ブランチ</label>
+                <input id="gh-branch" type="text" class="form-control form-control-sm font-monospace" value="main">
+            </div>
+            <div class="col-lg-2 col-md-4">
+                <button class="btn btn-outline-primary btn-sm w-100" onclick="saveGithub()">
+                    <i class="bi bi-check2"></i> 保存
+                </button>
+            </div>
+        </div>
+
+        <hr>
+
+        <div id="update-status" class="mb-3">
+            <!-- populated via render() -->
+        </div>
+
+        <div class="d-flex gap-2 flex-wrap">
+            <button id="check-btn" class="btn btn-outline-secondary btn-sm" onclick="checkUpdate()">
+                <i class="bi bi-search"></i> 今すぐ確認
+            </button>
+            <button id="apply-btn" class="btn btn-success btn-sm" onclick="applyUpdate()" disabled>
+                <i class="bi bi-download"></i> 更新を適用
+            </button>
+        </div>
+
+        <details class="mt-3" id="last-apply-details" style="display:none;">
+            <summary class="small text-secondary">直近の適用ログ</summary>
+            <pre id="last-apply-log" class="bg-dark text-light small p-2 mt-2"
+                 style="max-height:280px; overflow:auto"></pre>
+        </details>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let settings = null;
+
+document.addEventListener('DOMContentLoaded', () => { refresh(); });
+
+async function refresh() {
+    const data = await api.get('/admin/api/settings');
+    if (!data) return;
+    settings = data;
+    document.getElementById('pw-username').value = data.username || '';
+    document.getElementById('gh-url').value = data.github_url || '';
+    document.getElementById('gh-branch').value = data.branch || 'main';
+    renderUpdateStatus(data);
+}
+
+function renderUpdateStatus(d) {
+    const wrap = document.getElementById('update-status');
+    const applyBtn = document.getElementById('apply-btn');
+    if (!d.github_url) {
+        wrap.innerHTML = '<div class="text-secondary small">GitHub URL が未設定のため自動更新は無効です。</div>';
+        applyBtn.disabled = true;
+        document.getElementById('last-apply-details').style.display = 'none';
+        return;
+    }
+    const lastCheck = d.last_check_at
+        ? new Date(d.last_check_at).toLocaleString('ja-JP')
+        : '未確認';
+    const installed = d.installed_sha ? `<code class="small">${d.installed_sha.slice(0, 12)}</code>` : '<span class="text-secondary">不明</span>';
+    const latest = d.latest_sha ? `<code class="small">${d.latest_sha.slice(0, 12)}</code>` : '<span class="text-secondary">—</span>';
+    const stateBadge = d.update_available
+        ? '<span class="badge bg-warning-subtle text-warning-emphasis"><i class="bi bi-arrow-up-circle"></i> 更新あり</span>'
+        : (d.latest_sha
+            ? '<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> 最新</span>'
+            : '<span class="badge bg-secondary-subtle text-secondary-emphasis">未確認</span>');
+    wrap.innerHTML = `
+        <div class="mb-2">${stateBadge}</div>
+        <table class="table table-sm table-borderless mb-0 small">
+            <tbody>
+                <tr><td style="width:200px" class="text-secondary">最終確認</td><td class="font-monospace">${escapeHtml(lastCheck)}</td></tr>
+                <tr><td class="text-secondary">インストール済 commit</td><td>${installed}</td></tr>
+                <tr><td class="text-secondary">GitHub 最新 commit</td><td>${latest}</td></tr>
+                <tr><td class="text-secondary">最新 commit メッセージ</td><td class="font-monospace small">${escapeHtml(d.latest_message || '—')}</td></tr>
+            </tbody>
+        </table>
+    `;
+    applyBtn.disabled = !d.update_available;
+
+    if (d.last_apply_at) {
+        document.getElementById('last-apply-details').style.display = '';
+        const okBadge = d.last_apply_ok === true
+            ? '<span class="badge bg-success-subtle text-success-emphasis">OK</span>'
+            : d.last_apply_ok === false
+                ? '<span class="badge bg-danger-subtle text-danger-emphasis">FAIL</span>'
+                : '';
+        const summary = document.querySelector('#last-apply-details summary');
+        summary.innerHTML = `<span class="small text-secondary">直近の適用: ${escapeHtml(new Date(d.last_apply_at).toLocaleString('ja-JP'))}</span> ${okBadge}`;
+        document.getElementById('last-apply-log').textContent = d.last_apply_log || '';
+    } else {
+        document.getElementById('last-apply-details').style.display = 'none';
+    }
+}
+
+async function changePassword() {
+    const payload = {
+        current_password: document.getElementById('pw-current').value,
+        new_password:     document.getElementById('pw-new').value,
+        confirm_password: document.getElementById('pw-confirm').value,
+    };
+    if (!payload.current_password || !payload.new_password || !payload.confirm_password) {
+        return toast('全ての項目を入力してください', true);
+    }
+    const res = await api.send('/admin/api/password', 'POST', payload);
+    if (!res) return;
+    if (res.ok) {
+        toast('パスワードを変更しました');
+        document.getElementById('pw-current').value = '';
+        document.getElementById('pw-new').value = '';
+        document.getElementById('pw-confirm').value = '';
+    } else if (res.error) {
+        toast(res.error, true);
+    }
+}
+
+async function saveGithub() {
+    const url = document.getElementById('gh-url').value.trim();
+    const branch = document.getElementById('gh-branch').value.trim() || 'main';
+    const res = await api.send('/admin/api/github', 'POST', { github_url: url, branch });
+    if (!res) return;
+    if (res.ok) {
+        toast(url ? 'GitHub URL を保存しました' : 'GitHub URL をクリアしました');
+        refresh();
+    } else if (res.error) {
+        toast(res.error, true);
+    }
+}
+
+async function checkUpdate() {
+    if (!settings || !settings.github_url) return toast('GitHub URL を先に保存してください', true);
+    const btn = document.getElementById('check-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 確認中...';
+    try {
+        const res = await api.send('/admin/api/update/check', 'POST');
+        if (!res) return;
+        if (res.error) {
+            toast(res.error, true);
+        } else {
+            toast(res.update_available ? '更新があります' : '最新です');
+            refresh();
+        }
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-search"></i> 今すぐ確認';
+    }
+}
+
+async function applyUpdate() {
+    if (!settings || !settings.update_available) return;
+    if (!confirm(
+        '最新版を GitHub からダウンロードして適用しますか?\n\n' +
+        '・/opt/server-gui/server_gui を新しいファイルに置換\n' +
+        '・既存ディレクトリは server_gui.old.<timestamp> として保持\n' +
+        '・適用後 systemd で本サービスを再起動\n' +
+        '・接続が一時的に切れます (10 秒ほど待って再読込)'
+    )) return;
+    const btn = document.getElementById('apply-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 適用中...';
+    const res = await api.send('/admin/api/update/apply', 'POST');
+    if (!res) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-download"></i> 更新を適用';
+        return;
+    }
+    if (res.ok) {
+        toast('更新を適用しました — 再起動を待っています');
+        // Service is about to restart; refresh after a delay
+        setTimeout(() => location.reload(), 10000);
+    } else {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-download"></i> 更新を適用';
+        toast(res.error || '適用失敗', true);
+        if (res.log) {
+            document.getElementById('last-apply-log').textContent = res.log;
+            document.getElementById('last-apply-details').style.display = '';
+        }
+    }
+}
+</script>
+{% endblock %}

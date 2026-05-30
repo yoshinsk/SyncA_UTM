@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% block title %}証明書 — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-patch-check text-primary"></i> 証明書
+    </h1>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+            <i class="bi bi-arrow-clockwise"></i> 再スキャン
+        </button>
+        <button class="btn btn-outline-primary btn-sm" onclick="openRenewModal()">
+            <i class="bi bi-arrow-repeat"></i> 更新
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="openIssueModal()">
+            <i class="bi bi-plus-lg"></i> 新規取得
+        </button>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>Subject (CN)</th>
+                        <th>SAN</th>
+                        <th>発行元</th>
+                        <th>有効期限</th>
+                        <th>残日数</th>
+                        <th>パス</th>
+                    </tr>
+                </thead>
+                <tbody id="cert-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Issue cert modal -->
+<div class="modal fade" id="issue-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">証明書を新規取得 (Let's Encrypt)</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning small">
+                    <i class="bi bi-exclamation-triangle-fill"></i>
+                    <strong>注意:</strong>
+                    <ul class="mb-0 mt-1">
+                        <li>FQDN は外部 DNS で <strong>このサーバの公開 IP に解決されている</strong>必要があります。</li>
+                        <li><strong>standalone</strong>: certbot が 80 番を一時的に bind します。事前に Firewall で 80/tcp を開放、nginx が 80 番を占有していないこと。</li>
+                        <li><strong>webroot</strong>: 既存 nginx の 80 番 vhost が <code>/.well-known/acme-challenge</code> を <code>/var/www/letsencrypt</code> から配信する設定済みのとき。</li>
+                    </ul>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">FQDN <span class="text-secondary small">(スペース区切りで複数指定可)</span></label>
+                    <input id="iss-fqdn" class="form-control font-monospace" placeholder="例: example.com www.example.com">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">メールアドレス <span class="text-secondary small">(更新通知用)</span></label>
+                    <input id="iss-email" type="email" class="form-control">
+                </div>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label">取得方法</label>
+                        <select id="iss-method" class="form-select">
+                            <option value="standalone">standalone</option>
+                            <option value="webroot">webroot</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6" id="iss-webroot-wrap" style="display:none">
+                        <label class="form-label">webroot path</label>
+                        <input id="iss-webroot" class="form-control font-monospace" value="/var/www/letsencrypt">
+                    </div>
+                </div>
+                <div class="form-check">
+                    <input id="iss-staging" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="iss-staging">
+                        staging (テスト用 — 本番取得前の動作確認に使用)
+                    </label>
+                </div>
+
+                <div id="iss-result" class="d-none mt-3">
+                    <h6>結果</h6>
+                    <pre id="iss-output" class="bg-dark text-light p-2 small" style="max-height:300px;overflow:auto"></pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+                <button id="iss-submit" class="btn btn-primary" onclick="issueCert()">
+                    <i class="bi bi-cloud-download"></i> 取得実行
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Renew modal -->
+<div class="modal fade" id="renew-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">証明書を更新</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-secondary">通常は <code>certbot</code> の systemd timer が自動で更新します。手動更新は以下で。</p>
+                <div class="mb-3">
+                    <label class="form-label">対象 (空欄=全証明書)</label>
+                    <select id="rnw-name" class="form-select"></select>
+                </div>
+                <div class="form-check mb-2">
+                    <input id="rnw-dry" type="checkbox" class="form-check-input" checked>
+                    <label class="form-check-label" for="rnw-dry">dry-run (シミュレーションのみ)</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input id="rnw-force" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="rnw-force">--force-renewal (期限内でも更新)</label>
+                </div>
+                <div id="rnw-result" class="d-none mt-3">
+                    <h6>結果</h6>
+                    <pre id="rnw-output" class="bg-dark text-light p-2 small" style="max-height:300px;overflow:auto"></pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+                <button class="btn btn-primary" onclick="renewCert()">
+                    <i class="bi bi-arrow-repeat"></i> 実行
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let issueModal = null;
+let renewModal = null;
+let currentCerts = [];
+
+document.addEventListener('DOMContentLoaded', () => {
+    issueModal = new bootstrap.Modal(document.getElementById('issue-modal'));
+    renewModal = new bootstrap.Modal(document.getElementById('renew-modal'));
+    document.getElementById('iss-method').addEventListener('change', e => {
+        document.getElementById('iss-webroot-wrap').style.display = e.target.value === 'webroot' ? '' : 'none';
+    });
+});
+
+function openIssueModal() {
+    document.getElementById('iss-fqdn').value = '';
+    document.getElementById('iss-email').value = '';
+    document.getElementById('iss-method').value = 'standalone';
+    document.getElementById('iss-webroot-wrap').style.display = 'none';
+    document.getElementById('iss-staging').checked = false;
+    document.getElementById('iss-result').classList.add('d-none');
+    document.getElementById('iss-output').textContent = '';
+    issueModal.show();
+}
+
+async function issueCert() {
+    const payload = {
+        fqdns: document.getElementById('iss-fqdn').value.trim(),
+        email: document.getElementById('iss-email').value.trim(),
+        method: document.getElementById('iss-method').value,
+        webroot: document.getElementById('iss-webroot').value.trim(),
+        staging: document.getElementById('iss-staging').checked,
+    };
+    if (!payload.fqdns || !payload.email) return toast('FQDN とメールは必須', true);
+    document.getElementById('iss-submit').disabled = true;
+    const res = await api.send('/certs/api/issue', 'POST', payload);
+    document.getElementById('iss-submit').disabled = false;
+    if (!res) return;
+    document.getElementById('iss-result').classList.remove('d-none');
+    document.getElementById('iss-output').textContent =
+        `$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
+    if (res.ok) {
+        toast('取得しました');
+        refresh();
+    } else {
+        toast('certbot 失敗', true);
+    }
+}
+
+function openRenewModal() {
+    const sel = document.getElementById('rnw-name');
+    sel.innerHTML = '<option value="">(全証明書)</option>' +
+        currentCerts.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('');
+    document.getElementById('rnw-dry').checked = true;
+    document.getElementById('rnw-force').checked = false;
+    document.getElementById('rnw-result').classList.add('d-none');
+    document.getElementById('rnw-output').textContent = '';
+    renewModal.show();
+}
+
+async function renewCert() {
+    const payload = {
+        name: document.getElementById('rnw-name').value || null,
+        dry_run: document.getElementById('rnw-dry').checked,
+        force: document.getElementById('rnw-force').checked,
+    };
+    const res = await api.send('/certs/api/renew', 'POST', payload);
+    if (!res) return;
+    document.getElementById('rnw-result').classList.remove('d-none');
+    document.getElementById('rnw-output').textContent =
+        `$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
+    if (res.ok) {
+        toast(payload.dry_run ? 'dry-run 完了' : '更新しました');
+        refresh();
+    } else {
+        toast('certbot 失敗', true);
+    }
+}
+
+function daysBadge(days) {
+    if (days === null || days === undefined) return '<span class="text-secondary">—</span>';
+    let cls = 'bg-success-subtle text-success-emphasis';
+    if (days < 7)        cls = 'bg-danger-subtle text-danger-emphasis';
+    else if (days < 30)  cls = 'bg-warning-subtle text-warning-emphasis';
+    const icon = days < 7 ? 'bi-exclamation-triangle-fill'
+              : days < 30 ? 'bi-clock-fill'
+              : 'bi-check-circle-fill';
+    return `<span class="badge ${cls}"><i class="bi ${icon} me-1"></i>残り ${days} 日</span>`;
+}
+
+async function refresh() {
+    const data = await api.get('/certs/api/certificates');
+    if (!data) return;
+    const certs = data.certificates || [];
+    currentCerts = certs;
+    const tbody = document.getElementById('cert-tbody');
+    tbody.innerHTML = certs.length === 0
+        ? '<tr><td colspan="7" class="text-center text-secondary py-4">証明書未検出</td></tr>'
+        : certs.map(c => `
+            <tr>
+                <td class="fw-semibold">${escapeHtml(c.name)}
+                    <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${escapeHtml(c.source)}</span>
+                </td>
+                <td class="font-monospace small">${escapeHtml(c.subject || '—')}</td>
+                <td class="font-monospace small">${(c.sans || []).map(escapeHtml).join('<br>') || '—'}</td>
+                <td class="font-monospace small">${escapeHtml(c.issuer || '—')}</td>
+                <td class="font-monospace small">${escapeHtml(c.not_after || '—')}</td>
+                <td>${daysBadge(c.days_remaining)}</td>
+                <td class="font-monospace small text-secondary text-break">${escapeHtml(c.cert_path)}</td>
+            </tr>`).join('');
+}
+
+refresh();
+</script>
+{% endblock %}

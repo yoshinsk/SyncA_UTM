@@ -1,0 +1,830 @@
+{% extends "base.html" %}
+{% block title %}ネットワーク — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-hdd-network text-primary"></i> ネットワーク
+    </h1>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-primary btn-sm" onclick="openBridgeModal()">
+            <i class="bi bi-diagram-2"></i> Bridge 作成
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="openPppoeModal()">
+            <i class="bi bi-plus-lg"></i> PPPoE 接続作成
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+            <i class="bi bi-arrow-clockwise"></i> 再読込
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-warning d-flex align-items-center gap-2 small" role="alert">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    <div>管理 UI に到達しているインターフェースの設定を誤ると、リモートアクセスできなくなります。コンソール経由で復旧できる環境で操作してください。</div>
+</div>
+
+<!-- WAN settings card -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-globe text-primary"></i>
+        <strong>WAN 設定</strong>
+        <span id="wan-summary" class="text-secondary small ms-2"></span>
+    </div>
+    <div class="card-body">
+        <div class="row g-2">
+            <div class="col-md-4">
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="wan-type" id="wan-pppoe" value="pppoe">
+                    <label class="form-check-label" for="wan-pppoe">
+                        <strong>PPPoE</strong>
+                        <div class="text-secondary small">フレッツ等の PPPoE 接続</div>
+                    </label>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="wan-type" id="wan-dhcp" value="dhcp">
+                    <label class="form-check-label" for="wan-dhcp">
+                        <strong>DHCP クライアント</strong>
+                        <div class="text-secondary small">ISP / 上位ルータから自動取得</div>
+                    </label>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="wan-type" id="wan-static" value="static">
+                    <label class="form-check-label" for="wan-static">
+                        <strong>Static IP</strong>
+                        <div class="text-secondary small">固定 IP を割り当てる</div>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div class="d-flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="onWanApply()">
+                <i class="bi bi-gear"></i> この方式の設定を編集
+            </button>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadWan()">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-hdd-rack text-secondary"></i><strong>物理 / 仮想デバイス</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>デバイス</th>
+                        <th>種別</th>
+                        <th>状態</th>
+                        <th>IPv4 アドレス</th>
+                        <th>MAC</th>
+                        <th>MTU</th>
+                        <th>所属 connection</th>
+                    </tr>
+                </thead>
+                <tbody id="device-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-diagram-2 text-secondary"></i><strong>NetworkManager 接続プロファイル</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>種別</th>
+                        <th>デバイス</th>
+                        <th style="width:280px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="conn-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Bridge create modal -->
+<div class="modal fade" id="bridge-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-diagram-2"></i> Bridge 作成 (スイッチングハブ)
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Bridge 名 <span class="text-danger">*</span></label>
+                        <input id="br-name" class="form-control font-monospace" placeholder="br-lan">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Interface 名 (任意)</label>
+                        <input id="br-ifname" class="form-control font-monospace" placeholder="(空欄なら Bridge 名と同じ)">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">メンバー (ブリッジに含める NIC)</label>
+                        <div id="br-members" class="d-flex flex-column gap-1"></div>
+                        <div class="form-text">WAN を含むインターフェースは表示されません。少なくとも 1 つ選択。</div>
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">LAN IP (任意)</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">アドレス (CIDR)</label>
+                        <input id="br-address" class="form-control font-monospace" placeholder="例: 192.168.1.1/24 / 空欄なら IP 無し (L2 のみ)">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">DNS (任意、カンマ区切り)</label>
+                        <input id="br-dns" class="form-control font-monospace" placeholder="例: 8.8.8.8, 1.1.1.1">
+                    </div>
+                </div>
+                <hr>
+                <h6 class="text-secondary small">STP (Spanning Tree / ループ検知)</h6>
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input id="br-stp" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="br-stp">STP 有効</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">priority</label>
+                        <input id="br-stp-priority" type="number" class="form-control form-control-sm" value="32768">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">forward-delay (s)</label>
+                        <input id="br-forward-delay" type="number" class="form-control form-control-sm" value="4">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">hello-time (s)</label>
+                        <input id="br-hello-time" type="number" class="form-control form-control-sm" value="2">
+                    </div>
+                </div>
+                <hr>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="br-autoconnect" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="br-autoconnect">起動時に自動接続</label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="br-activate" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="br-activate">作成後すぐにアクティブ化</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitBridge()">
+                    <i class="bi bi-check2"></i> Bridge 作成
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- PPPoE edit modal -->
+<div class="modal fade" id="pppoe-edit-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-plug"></i> PPPoE 接続編集</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">接続名</label>
+                    <input id="pee-name" class="form-control font-monospace" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">ユーザー名</label>
+                    <input id="pee-user" class="form-control font-monospace">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">パスワード <span class="text-secondary small">(変更しない場合は空欄)</span></label>
+                    <input id="pee-pass" type="password" class="form-control font-monospace" placeholder="(空欄で保持)">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">MTU</label>
+                    <input id="pee-mtu" type="number" class="form-control font-monospace">
+                </div>
+                <div class="alert alert-light border small">
+                    <strong>parent:</strong> <span id="pee-parent" class="font-monospace"></span><br>
+                    <strong>type:</strong> <span class="font-monospace">pppoe</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitPppoeEdit()">
+                    <i class="bi bi-check2"></i> 更新
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- PPPoE create modal -->
+<div class="modal fade" id="pppoe-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-plug"></i> PPPoE 接続作成</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning d-flex align-items-center gap-2 small">
+                    <i class="bi bi-exclamation-triangle-fill"></i>
+                    <div>
+                        PPPoE は WAN 側 ISP 接続用です。アクティブ化すると現在の WAN 経路が切り替わる可能性があります。
+                        コンソールで復旧できる状態で実行してください。
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">接続名 <span class="text-danger">*</span></label>
+                        <input id="pe-name" class="form-control font-monospace" placeholder="wan-pppoe">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">親インターフェース <span class="text-danger">*</span></label>
+                        <select id="pe-ifname" class="form-select font-monospace"></select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">ユーザー名 <span class="text-danger">*</span></label>
+                        <input id="pe-user" class="form-control font-monospace" placeholder="user@isp.example">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">パスワード <span class="text-danger">*</span></label>
+                        <input id="pe-pass" type="password" class="form-control font-monospace">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">サービス名 (任意)</label>
+                        <input id="pe-service" class="form-control font-monospace" placeholder="通常は空欄">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">MTU (任意)</label>
+                        <input id="pe-mtu" type="number" class="form-control font-monospace" placeholder="例: 1454 (日本フレッツ)">
+                        <div class="form-text">フレッツ系は 1454、その他 ISP は 1492 が一般的。</div>
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-4">
+                        <div class="form-check form-switch">
+                            <input id="pe-autoconnect" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="pe-autoconnect">起動時に自動接続</label>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="form-check form-switch">
+                            <input id="pe-activate" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="pe-activate">作成後すぐにアクティブ化</label>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="form-check form-switch">
+                            <input id="pe-mss-clamp" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="pe-mss-clamp">
+                                MSS clamp <span class="text-secondary small">(MTU ブラックホール対策)</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-text small mt-1">
+                    <i class="bi bi-info-circle"></i>
+                    <strong>MSS clamp</strong>: PPPoE 経由の TCP 接続で大きいパケットが silently drop されるのを防ぐため、firewalld direct rule で TCP SYN の MSS を path MTU にクランプします。常に ON 推奨。</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitPppoe()">
+                    <i class="bi bi-check2"></i> 作成
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit connection modal -->
+<div class="modal fade" id="conn-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="conn-modal-title">接続編集</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="conn-detail-summary" class="mb-3"></div>
+                <hr>
+                <h6 class="text-primary"><i class="bi bi-pencil-square"></i> IPv4 設定変更</h6>
+                <div class="mb-3">
+                    <label class="form-label">方式</label>
+                    <select id="n-method" class="form-select" onchange="onMethodChange()">
+                        <option value="manual">manual (静的 IP)</option>
+                        <option value="auto">auto (DHCP)</option>
+                    </select>
+                </div>
+                <div id="n-manual-fields">
+                    <div class="mb-3">
+                        <label class="form-label">アドレス/プレフィクス</label>
+                        <input id="n-address" type="text" class="form-control font-monospace" placeholder="例: 192.168.1.1/24">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">デフォルトゲートウェイ</label>
+                        <input id="n-gateway" type="text" class="form-control font-monospace" placeholder="例: 192.168.1.254">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">DNS サーバ (カンマ区切り)</label>
+                        <input id="n-dns" type="text" class="form-control font-monospace" placeholder="例: 8.8.8.8, 1.1.1.1">
+                    </div>
+                </div>
+                <div class="form-check form-switch mb-2">
+                    <input id="n-activate" type="checkbox" class="form-check-input" checked>
+                    <label class="form-check-label" for="n-activate">変更後に接続を再 up する</label>
+                </div>
+
+                <hr>
+                <h6 class="text-primary"><i class="bi bi-signpost-2"></i> スタティック ルート</h6>
+                <div class="text-secondary small mb-2">
+                    この接続が UP の間だけ有効。デフォルト ゲートウェイは IPv4 設定欄を使用。
+                    ここで追加するのは「特定の宛先ネットワークへの追加経路」(例: VPN 経由のサブネット)。
+                </div>
+                <div id="conn-routes-list" class="mb-3"></div>
+                <div class="card border-0 bg-light-subtle">
+                    <div class="card-body p-2">
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-5">
+                                <label class="form-label small mb-1">宛先 (CIDR) <span class="text-danger">*</span></label>
+                                <input id="r-dest" type="text" class="form-control form-control-sm font-monospace"
+                                       placeholder="例: 10.0.0.0/24">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">ゲートウェイ <span class="text-danger">*</span></label>
+                                <input id="r-gateway" type="text" class="form-control form-control-sm font-monospace"
+                                       placeholder="例: 192.168.1.254">
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label small mb-1">メトリック</label>
+                                <input id="r-metric" type="number" class="form-control form-control-sm font-monospace"
+                                       placeholder="任意" min="0" max="4294967295">
+                            </div>
+                            <div class="col-md-1 d-grid">
+                                <button class="btn btn-outline-primary btn-sm" onclick="addRoute()" title="ルート追加">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="saveConnection()">
+                    <i class="bi bi-check2"></i> IPv4 設定を適用
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let connections = [];
+let devices = [];
+let editingConn = null;
+let connModal;
+let pppoeModal;
+let pppoeEditModal;
+let bridgeModal;
+let editingPppoeName = null;
+let currentWanType = 'unknown';
+let currentWanDevice = '';
+
+document.addEventListener('DOMContentLoaded', () => {
+    connModal = new bootstrap.Modal(document.getElementById('conn-modal'));
+    pppoeModal = new bootstrap.Modal(document.getElementById('pppoe-modal'));
+    pppoeEditModal = new bootstrap.Modal(document.getElementById('pppoe-edit-modal'));
+    bridgeModal = new bootstrap.Modal(document.getElementById('bridge-modal'));
+});
+
+async function refresh() {
+    const data = await api.get('/network/api/devices');
+    if (!data) return;
+    devices = data.devices || [];
+    renderDevices(devices);
+    connections = data.connections || [];
+    renderConnections();
+    loadWan();
+}
+
+async function loadWan() {
+    const wan = await api.get('/network/api/wan');
+    if (!wan) return;
+    currentWanType = wan.wan_type || 'unknown';
+    currentWanDevice = wan.device || wan.interface || wan.name || '';
+    const ifname = currentWanDevice;
+    const summary = ifname
+        ? `IF: <code>${escapeHtml(ifname)}</code>` +
+          (wan.ipv4 && wan.ipv4.addresses ? ` / addr: <code>${escapeHtml(wan.ipv4.addresses)}</code>` : '') +
+          (wan.wan_gateway ? ` / gw: <code>${escapeHtml(wan.wan_gateway)}</code>` : '')
+        : '<em>WAN 不明 (default route なし)</em>';
+    document.getElementById('wan-summary').innerHTML = `[${escapeHtml(currentWanType)}] ${summary}`;
+    document.getElementById('wan-static').checked = currentWanType === 'static';
+    document.getElementById('wan-dhcp').checked = currentWanType === 'dhcp';
+    document.getElementById('wan-pppoe').checked = currentWanType === 'pppoe';
+}
+
+async function onWanApply() {
+    const selected = document.querySelector('input[name="wan-type"]:checked')?.value;
+    if (!selected) return toast('WAN 種別を選択してください', true);
+    const wan = await api.get('/network/api/wan');
+    if (!wan) return;
+
+    if (selected === 'pppoe') {
+        if (currentWanType === 'pppoe' && wan.name) {
+            // Existing PPPoE -> edit
+            openPppoeEdit(wan.name);
+        } else {
+            // Different type -> create new PPPoE (parent IF from current WAN)
+            openPppoeModal();
+            // pre-select the WAN IF if listed
+            if (wan.device) {
+                const sel = document.getElementById('pe-ifname');
+                for (const opt of sel.options) {
+                    if (opt.value === wan.device) { sel.value = wan.device; break; }
+                }
+            }
+        }
+    } else {
+        // static / dhcp: open the standard connection edit modal for current WAN
+        if (wan.name) {
+            await editConnection(wan.name);
+            // Force method to the desired one
+            document.getElementById('n-method').value = selected === 'static' ? 'manual' : 'auto';
+            onMethodChange();
+        } else {
+            toast('現在の WAN プロファイルを特定できません。下の接続一覧から個別に編集してください。', true);
+        }
+    }
+}
+
+async function openPppoeEdit(name) {
+    const detail = await api.get(`/network/api/connections/${encodeURIComponent(name)}`);
+    if (!detail) return;
+    if (detail.type !== 'pppoe') return toast('この接続は PPPoE ではありません', true);
+    editingPppoeName = name;
+    document.getElementById('pee-name').value = name;
+    document.getElementById('pee-user').value = (detail.pppoe || {}).username || '';
+    document.getElementById('pee-pass').value = '';
+    document.getElementById('pee-mtu').value = (detail.pppoe || {}).mtu || '';
+    document.getElementById('pee-parent').textContent = (detail.pppoe || {}).parent || detail.interface || '—';
+    pppoeEditModal.show();
+}
+
+async function submitPppoeEdit() {
+    if (!editingPppoeName) return;
+    const payload = {
+        username: document.getElementById('pee-user').value.trim(),
+        password: document.getElementById('pee-pass').value || undefined,
+        mtu: document.getElementById('pee-mtu').value.trim() || undefined,
+    };
+    const res = await api.send(
+        `/network/api/connections/${encodeURIComponent(editingPppoeName)}/pppoe`,
+        'PUT', payload);
+    if (res && res.ok) {
+        toast(`PPPoE "${editingPppoeName}" 更新 (${(res.changed || []).join(', ') || 'no change'})`);
+        pppoeEditModal.hide();
+        refresh();
+    } else if (res) {
+        toast(res.error || '失敗', true);
+    }
+}
+
+function openBridgeModal() {
+    document.getElementById('br-name').value = 'br-lan';
+    document.getElementById('br-ifname').value = '';
+    document.getElementById('br-address').value = '';
+    document.getElementById('br-dns').value = '';
+    document.getElementById('br-stp').checked = true;
+    document.getElementById('br-stp-priority').value = '32768';
+    document.getElementById('br-forward-delay').value = '4';
+    document.getElementById('br-hello-time').value = '2';
+    document.getElementById('br-autoconnect').checked = true;
+    document.getElementById('br-activate').checked = true;
+    // Build member checkboxes from ethernet devices, excluding WAN
+    const candidates = devices.filter(d => d.type === 'ethernet' && d.device !== currentWanDevice);
+    const wrap = document.getElementById('br-members');
+    if (candidates.length === 0) {
+        wrap.innerHTML = '<div class="text-secondary small">ブリッジ可能な ethernet IF がありません (WAN を除く)</div>';
+    } else {
+        wrap.innerHTML = candidates.map(d => `
+            <div class="form-check">
+                <input class="form-check-input br-member" type="checkbox" value="${escapeHtml(d.device)}" id="br-m-${escapeHtml(d.device)}">
+                <label class="form-check-label font-monospace" for="br-m-${escapeHtml(d.device)}">
+                    ${escapeHtml(d.device)} <span class="text-secondary small">(${(d.ipv4 || []).join(', ') || 'no IP'}, ${escapeHtml(d.state)})</span>
+                </label>
+            </div>`).join('');
+    }
+    bridgeModal.show();
+}
+
+async function submitBridge() {
+    const members = Array.from(document.querySelectorAll('.br-member:checked')).map(c => c.value);
+    if (members.length === 0) return toast('メンバーを 1 つ以上選択してください', true);
+    const payload = {
+        name: document.getElementById('br-name').value.trim(),
+        ifname: document.getElementById('br-ifname').value.trim() || undefined,
+        members,
+        address: document.getElementById('br-address').value.trim(),
+        dns: document.getElementById('br-dns').value.split(',').map(s => s.trim()).filter(Boolean),
+        stp: document.getElementById('br-stp').checked,
+        stp_priority: parseInt(document.getElementById('br-stp-priority').value, 10) || 32768,
+        forward_delay: parseInt(document.getElementById('br-forward-delay').value, 10) || 4,
+        hello_time: parseInt(document.getElementById('br-hello-time').value, 10) || 2,
+        autoconnect: document.getElementById('br-autoconnect').checked,
+        activate: document.getElementById('br-activate').checked,
+    };
+    if (!payload.name) return toast('Bridge 名は必須', true);
+    if (!confirm(`Bridge "${payload.name}" を作成しますか?\n\nメンバー: ${members.join(', ')}\nLAN IP: ${payload.address || '(無し)'}\nSTP: ${payload.stp ? 'ON (priority=' + payload.stp_priority + ')' : 'OFF'}`)) return;
+    const res = await api.send('/network/api/connections/bridge', 'POST', payload);
+    if (!res) return;
+    if (res.ok) {
+        toast(`Bridge "${payload.name}" を作成しました`);
+        bridgeModal.hide();
+        refresh();
+    } else {
+        toast('失敗: ' + (res.error || ''), true);
+    }
+}
+
+function openPppoeModal() {
+    document.getElementById('pe-name').value = 'wan-pppoe';
+    document.getElementById('pe-user').value = '';
+    document.getElementById('pe-pass').value = '';
+    document.getElementById('pe-service').value = '';
+    document.getElementById('pe-mtu').value = '1454';
+    document.getElementById('pe-autoconnect').checked = true;
+    document.getElementById('pe-activate').checked = true;
+    const sel = document.getElementById('pe-ifname');
+    sel.innerHTML = devices
+        .filter(d => d.type === 'ethernet')
+        .map(d => `<option value="${escapeHtml(d.device)}">${escapeHtml(d.device)} (${(d.ipv4 || []).join(', ') || 'no IP'})</option>`)
+        .join('') || '<option value="">(ethernet なし)</option>';
+    pppoeModal.show();
+}
+
+async function submitPppoe() {
+    const payload = {
+        name: document.getElementById('pe-name').value.trim(),
+        ifname: document.getElementById('pe-ifname').value.trim(),
+        username: document.getElementById('pe-user').value.trim(),
+        password: document.getElementById('pe-pass').value,
+        service: document.getElementById('pe-service').value.trim(),
+        mtu: document.getElementById('pe-mtu').value.trim() || null,
+        autoconnect: document.getElementById('pe-autoconnect').checked,
+        activate: document.getElementById('pe-activate').checked,
+        mss_clamp: document.getElementById('pe-mss-clamp').checked,
+    };
+    if (!payload.name || !payload.ifname || !payload.username || !payload.password) {
+        return toast('必須項目を入力してください', true);
+    }
+    if (!confirm(`PPPoE 接続 "${payload.name}" を作成しますか?\n親 IF: ${payload.ifname}\nアクティブ化: ${payload.activate ? 'はい' : 'いいえ'}`)) return;
+    const res = await api.send('/network/api/connections/pppoe', 'POST', payload);
+    if (!res) return;
+    if (res.ok) {
+        toast(`PPPoE 接続 "${payload.name}" を作成しました`);
+        pppoeModal.hide();
+        refresh();
+    } else {
+        toast(`失敗: ${res.error || ''}`, true);
+    }
+}
+
+function stateBadge(state) {
+    const map = {
+        'connected':    'bg-success-subtle text-success-emphasis',
+        'connecting':   'bg-warning-subtle text-warning-emphasis',
+        'disconnected': 'bg-secondary-subtle text-secondary-emphasis',
+        'unavailable':  'bg-danger-subtle text-danger-emphasis',
+    };
+    const cls = map[state] || 'bg-light text-secondary';
+    return `<span class="badge ${cls}">${escapeHtml(state)}</span>`;
+}
+
+function renderDevices(devices) {
+    const tbody = document.getElementById('device-tbody');
+    tbody.innerHTML = devices.length === 0
+        ? '<tr><td colspan="7" class="text-center text-secondary py-4">デバイス未検出</td></tr>'
+        : devices.map(d => {
+            const v4 = (d.ipv4 || []).length
+                ? (d.ipv4 || []).map(a => `<span class="badge bg-primary-subtle text-primary-emphasis font-monospace me-1">${escapeHtml(a)}</span>`).join('')
+                : '<span class="text-secondary small">—</span>';
+            return `<tr>
+                <td class="fw-semibold font-monospace">${escapeHtml(d.device)}</td>
+                <td>${escapeHtml(d.type)}</td>
+                <td>${stateBadge(d.state)}</td>
+                <td>${v4}</td>
+                <td class="font-monospace small text-secondary">${d.mac ? escapeHtml(d.mac) : '—'}</td>
+                <td class="font-monospace small text-secondary">${d.mtu || '—'}</td>
+                <td class="font-monospace small">${d.connection ? escapeHtml(d.connection) : '<span class="text-secondary">—</span>'}</td>
+            </tr>`;
+        }).join('');
+}
+
+function renderConnections() {
+    const tbody = document.getElementById('conn-tbody');
+    tbody.innerHTML = connections.length === 0
+        ? '<tr><td colspan="4" class="text-center text-secondary py-4">接続未登録</td></tr>'
+        : connections.map(c => {
+            const editBtn = c.type === 'pppoe'
+                ? `<button class="btn btn-sm btn-outline-primary" onclick="openPppoeEdit('${escapeJs(c.name)}')">
+                       <i class="bi bi-pencil"></i> 編集
+                   </button>`
+                : `<button class="btn btn-sm btn-outline-primary" onclick="editConnection('${escapeJs(c.name)}')">
+                       <i class="bi bi-pencil"></i> 編集
+                   </button>`;
+            return `<tr>
+                <td class="fw-semibold">${escapeHtml(c.name)}</td>
+                <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${escapeHtml(c.type)}</span></td>
+                <td class="font-monospace small">${c.device ? escapeHtml(c.device) : '<span class="text-secondary">未接続</span>'}</td>
+                <td class="d-flex gap-1">
+                    ${editBtn}
+                    <button class="btn btn-sm btn-outline-success" onclick="upConnection('${escapeJs(c.name)}')">
+                        <i class="bi bi-arrow-up-circle"></i> up
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="downConnection('${escapeJs(c.name)}')">
+                        <i class="bi bi-arrow-down-circle"></i> down
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteConnection('${escapeJs(c.name)}')">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+}
+
+async function deleteConnection(name) {
+    if (!confirm(`接続プロファイル "${name}" を削除しますか? (nmcli connection delete)`)) return;
+    const res = await api.send(`/network/api/connections/${encodeURIComponent(name)}`, 'DELETE');
+    if (res && res.ok) { toast(`${name} 削除`); refresh(); }
+    else if (res) toast(`失敗: ${res.output || ''}`, true);
+}
+
+function escapeJs(s) {
+    return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function editConnection(name) {
+    const detail = await api.get(`/network/api/connections/${encodeURIComponent(name)}`);
+    if (!detail) return;
+    editingConn = name;
+    document.getElementById('conn-modal-title').textContent = `接続編集: ${name}`;
+    const ipv4 = detail.ipv4 || {};
+    document.getElementById('n-method').value = ipv4.method || 'manual';
+    document.getElementById('n-address').value = ipv4.addresses || '';
+    document.getElementById('n-gateway').value = ipv4.gateway || '';
+    document.getElementById('n-dns').value = ipv4.dns || '';
+    onMethodChange();
+
+    const live = detail.live || {};
+    document.getElementById('conn-detail-summary').innerHTML = `
+        <div class="row g-2 small">
+            <div class="col-sm-6"><strong>type:</strong> <span class="font-monospace">${escapeHtml(detail.type)}</span></div>
+            <div class="col-sm-6"><strong>uuid:</strong> <span class="font-monospace">${escapeHtml(detail.uuid)}</span></div>
+            <div class="col-sm-6"><strong>interface:</strong> <span class="font-monospace">${escapeHtml(detail.interface || '—')}</span></div>
+            <div class="col-sm-6"><strong>autoconnect:</strong> ${detail.autoconnect ? 'yes' : 'no'}</div>
+            <div class="col-12"><strong>現在の IP:</strong> <span class="font-monospace">${escapeHtml(live.ip4_address || '—')}</span> via <span class="font-monospace">${escapeHtml(live.ip4_gateway || '—')}</span></div>
+            <div class="col-12"><strong>現在の DNS:</strong> <span class="font-monospace">${(live.ip4_dns || []).map(escapeHtml).join(', ') || '—'}</span></div>
+        </div>`;
+    renderRoutes(detail.routes || []);
+    document.getElementById('r-dest').value = '';
+    document.getElementById('r-gateway').value = '';
+    document.getElementById('r-metric').value = '';
+    connModal.show();
+}
+
+function renderRoutes(routes) {
+    const wrap = document.getElementById('conn-routes-list');
+    if (!routes || routes.length === 0) {
+        wrap.innerHTML = '<div class="text-secondary small">スタティック ルート未登録</div>';
+        return;
+    }
+    wrap.innerHTML = `
+        <table class="table table-sm mb-0">
+            <thead class="table-light">
+                <tr><th>宛先</th><th>ゲートウェイ</th><th style="width:90px">メトリック</th><th style="width:60px"></th></tr>
+            </thead>
+            <tbody>
+                ${routes.map((r, i) => `
+                    <tr>
+                        <td class="font-monospace small">${escapeHtml(r.dest)}</td>
+                        <td class="font-monospace small">${escapeHtml(r.gateway || '<span class="text-secondary">link</span>')}</td>
+                        <td class="font-monospace small">${r.metric ?? '<span class="text-secondary">—</span>'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-danger" onclick="deleteRoute(${i})" title="削除">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </td>
+                    </tr>`).join('')}
+            </tbody>
+        </table>`;
+}
+
+async function _reloadRoutes() {
+    if (!editingConn) return;
+    const detail = await api.get(`/network/api/connections/${encodeURIComponent(editingConn)}/routes`);
+    if (detail) renderRoutes(detail.routes || []);
+}
+
+async function addRoute() {
+    if (!editingConn) return;
+    const payload = {
+        dest:    document.getElementById('r-dest').value.trim(),
+        gateway: document.getElementById('r-gateway').value.trim(),
+        metric:  document.getElementById('r-metric').value.trim() || null,
+    };
+    if (!payload.dest || !payload.gateway) {
+        return toast('宛先 (CIDR) とゲートウェイは必須です', true);
+    }
+    const res = await api.send(
+        `/network/api/connections/${encodeURIComponent(editingConn)}/routes`,
+        'POST', payload);
+    if (!res) return;
+    if (res.ok) {
+        toast(res.warning ? `追加 (${res.warning})` : 'ルートを追加');
+        document.getElementById('r-dest').value = '';
+        document.getElementById('r-gateway').value = '';
+        document.getElementById('r-metric').value = '';
+        _reloadRoutes();
+    } else if (res.error) {
+        toast(res.error, true);
+    }
+}
+
+async function deleteRoute(idx) {
+    if (!editingConn) return;
+    if (!confirm('このルートを削除しますか?')) return;
+    const res = await api.send(
+        `/network/api/connections/${encodeURIComponent(editingConn)}/routes/${idx}`,
+        'DELETE');
+    if (!res) return;
+    if (res.ok) {
+        toast(res.warning ? `削除 (${res.warning})` : 'ルートを削除');
+        _reloadRoutes();
+    } else if (res.error) {
+        toast(res.error, true);
+    }
+}
+
+function onMethodChange() {
+    const method = document.getElementById('n-method').value;
+    document.getElementById('n-manual-fields').style.display = method === 'manual' ? '' : 'none';
+}
+
+async function saveConnection() {
+    const payload = {
+        method: document.getElementById('n-method').value,
+        address: document.getElementById('n-address').value.trim(),
+        gateway: document.getElementById('n-gateway').value.trim(),
+        dns: document.getElementById('n-dns').value.split(',').map(s => s.trim()).filter(Boolean),
+        activate: document.getElementById('n-activate').checked,
+    };
+    const res = await api.send(`/network/api/connections/${encodeURIComponent(editingConn)}`, 'PUT', payload);
+    if (res && res.ok) {
+        toast('適用しました');
+        connModal.hide();
+        refresh();
+    }
+}
+
+async function upConnection(name) {
+    const res = await api.send(`/network/api/connections/${encodeURIComponent(name)}/up`, 'POST');
+    if (res) { toast(res.ok ? 'up しました' : ('失敗: ' + res.output), !res.ok); refresh(); }
+}
+async function downConnection(name) {
+    if (!confirm(`${name} を down しますか?`)) return;
+    const res = await api.send(`/network/api/connections/${encodeURIComponent(name)}/down`, 'POST');
+    if (res) { toast(res.ok ? 'down しました' : ('失敗: ' + res.output), !res.ok); refresh(); }
+}
+
+refresh();
+</script>
+{% endblock %}

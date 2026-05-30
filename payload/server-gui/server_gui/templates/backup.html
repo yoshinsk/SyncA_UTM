@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}バックアップ — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-archive text-primary"></i> バックアップ / リストア
+    </h1>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="createBackup()">
+            <i class="bi bi-plus-lg"></i> 新規バックアップ
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-warning d-flex align-items-center gap-2 small">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    <div>
+        バックアップには <strong>WireGuard 秘密鍵</strong>・<strong>管理 UI 認証情報</strong>・<strong>IPsec PSK</strong> が含まれます。<br>
+        ダウンロードしたファイルは安全な場所に保管してください (オフライン推奨)。
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-clock-history text-secondary"></i>
+        <strong>バックアップ一覧</strong>
+        <span class="text-secondary small" id="store-path"></span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>ファイル名</th>
+                        <th style="width:120px">サイズ</th>
+                        <th style="width:200px">作成日時</th>
+                        <th style="width:240px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="backup-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-arrow-counterclockwise text-secondary"></i>
+        <strong>リストア (アップロード)</strong>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-danger small">
+            <i class="bi bi-exclamation-octagon-fill"></i>
+            リストアは <strong>既存設定ファイルを上書きします</strong>。
+            上書き前の元ファイルは <code>/var/lib/server-gui/pre-restore/&lt;日時&gt;/</code> に退避されます。
+            サービスは自動再起動されません — 必要に応じて各タブから個別にリロードしてください。
+        </div>
+        <form id="restore-form">
+            <div class="mb-3">
+                <label class="form-label">バックアップファイル (.tar.gz)</label>
+                <input id="restore-file" type="file" class="form-control" accept=".tar.gz,.tgz">
+            </div>
+            <div class="row g-2 small mb-3">
+                <div class="col-12"><strong class="small">対象セクション:</strong></div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-sg" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-sg">/etc/server-gui/ (管理 JSON / 認証)</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-nginx" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-nginx">vhost-*.conf (GUI 管理 nginx)</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-dns" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-dns">dnsmasq.d/server-gui.conf</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-wg" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-wg">/etc/wireguard/*.conf</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-fw" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-fw">/etc/firewalld/ (zones / ipsets)</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-network" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-network">NetworkManager profiles</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-fail2ban" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-fail2ban">fail2ban</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-letsencrypt" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-letsencrypt">Let's Encrypt / certbot</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-systemd" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-systemd">systemd units/timers</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-server-app" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-server-app">server-gui app</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-wgui" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-wgui">wireguard-ui app/db</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-state" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-state">server-gui runtime state</label></div>
+                </div>
+            </div>
+            <button type="button" class="btn btn-danger" onclick="restoreUpload()">
+                <i class="bi bi-arrow-counterclockwise"></i> リストア実行
+            </button>
+        </form>
+        <div id="restore-result" class="mt-3 d-none">
+            <h6>結果</h6>
+            <pre id="restore-output" class="bg-dark text-light p-2 small" style="max-height:300px;overflow:auto"></pre>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+async function refresh() {
+    const data = await api.get('/backup/api/list');
+    if (!data) return;
+    document.getElementById('store-path').textContent = data.store ? `(${data.store})` : '';
+    const tbody = document.getElementById('backup-tbody');
+    const items = data.backups || [];
+    tbody.innerHTML = items.length === 0
+        ? '<tr><td colspan="4" class="text-center text-secondary py-3">バックアップなし</td></tr>'
+        : items.map(b => `
+            <tr>
+                <td class="font-monospace small">${escapeHtml(b.name)}</td>
+                <td class="font-monospace small">${formatBytes(b.size)}</td>
+                <td class="small text-secondary">${new Date(b.mtime * 1000).toLocaleString('ja-JP')}</td>
+                <td class="d-flex gap-1">
+                    <a class="btn btn-sm btn-outline-primary" href="/backup/api/download/${encodeURIComponent(b.name)}" title="ダウンロード">
+                        <i class="bi bi-download"></i>
+                    </a>
+                    <button class="btn btn-sm btn-outline-warning" onclick="restoreStored('${escapeJs(b.name)}')" title="このバックアップで復元">
+                        <i class="bi bi-arrow-counterclockwise"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteBackup('${escapeJs(b.name)}')" title="削除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`).join('');
+}
+
+function formatBytes(n) {
+    if (!n) return '0';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + units[i];
+}
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function createBackup() {
+    const res = await api.send('/backup/api/create', 'POST', {});
+    if (!res) return;
+    if (res.ok) {
+        toast(`バックアップ作成: ${res.name} (${formatBytes(res.size)})`);
+        refresh();
+    } else {
+        toast('失敗: ' + (res.error || 'unknown'), true);
+    }
+}
+
+async function deleteBackup(name) {
+    if (!confirm(`${name} を削除しますか?`)) return;
+    const res = await api.send(`/backup/api/delete/${encodeURIComponent(name)}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+function _sectionPayload() {
+    return {
+        include_server_gui: document.getElementById('rs-sg').checked,
+        include_nginx:      document.getElementById('rs-nginx').checked,
+        include_dnsmasq:    document.getElementById('rs-dns').checked,
+        include_wireguard:  document.getElementById('rs-wg').checked,
+        include_firewalld:  document.getElementById('rs-fw').checked,
+        include_network: document.getElementById('rs-network').checked,
+        include_fail2ban: document.getElementById('rs-fail2ban').checked,
+        include_letsencrypt: document.getElementById('rs-letsencrypt').checked,
+        include_systemd: document.getElementById('rs-systemd').checked,
+        include_server_gui_app: document.getElementById('rs-server-app').checked,
+        include_wireguard_ui: document.getElementById('rs-wgui').checked,
+        include_server_gui_state: document.getElementById('rs-state').checked,
+    };
+}
+
+function _showRestoreResult(res) {
+    const div = document.getElementById('restore-result');
+    div.classList.remove('d-none');
+    document.getElementById('restore-output').textContent = JSON.stringify(res, null, 2);
+}
+
+async function restoreStored(name) {
+    if (!confirm(`バックアップ "${name}" から復元しますか?\n\n既存設定は /var/lib/server-gui/pre-restore/ に退避されます。`)) return;
+    const payload = { name, ..._sectionPayload() };
+    const res = await api.send('/backup/api/restore', 'POST', payload);
+    if (!res) return;
+    _showRestoreResult(res);
+    toast(res.ok ? '復元完了' : '一部失敗 — 結果を確認', !res.ok);
+}
+
+async function restoreUpload() {
+    const file = document.getElementById('restore-file').files[0];
+    if (!file) return toast('ファイルを選択してください', true);
+    if (!confirm(`${file.name} (${formatBytes(file.size)}) で復元しますか?\n\n既存設定は退避されます。`)) return;
+    const form = new FormData();
+    form.append('archive', file);
+    const sections = _sectionPayload();
+    for (const k in sections) form.append(k, sections[k] ? 'true' : 'false');
+    try {
+        const r = await fetch('/backup/api/restore', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': csrfToken },
+            credentials: 'same-origin',
+            body: form,
+        });
+        const res = await r.json();
+        _showRestoreResult(res);
+        toast(res.ok ? '復元完了' : '一部失敗 — 結果を確認', !res.ok);
+    } catch (e) {
+        toast('通信エラー: ' + e.message, true);
+    }
+}
+
+refresh();
+</script>
+{% endblock %}

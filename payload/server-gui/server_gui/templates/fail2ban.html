@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% block title %}fail2ban - SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-slash-circle text-primary"></i> fail2ban
+    </h1>
+    <div class="d-flex gap-2 align-items-center">
+        <span id="f2b-status-badge"></span>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()" title="再読み込み">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+    </div>
+</div>
+
+<div id="install-banner" class="alert alert-warning d-none">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    fail2ban がインストールされていません。
+    <button class="btn btn-sm btn-warning ms-2" onclick="installFail2ban()">
+        <i class="bi bi-download"></i> インストール
+    </button>
+    <code class="ms-2 small">dnf install -y fail2ban-server fail2ban-firewalld</code>
+</div>
+
+<div id="defaults-banner" class="alert alert-primary d-none">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <i class="bi bi-shield-plus"></i>
+            <strong>jail がまだ設定されていません。</strong>
+            標準 jail を <code>/etc/fail2ban/jail.local</code> に作成できます。
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="installDefaults(false)">
+            <i class="bi bi-magic"></i> 標準 jail を作成
+        </button>
+    </div>
+    <div class="small text-secondary mt-2">
+        sshd、nginx-http-auth、server-gui-auth、recidive を有効化します。
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-5">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+                <strong><i class="bi bi-radar"></i> 公開ポートから自動構成</strong>
+                <button class="btn btn-sm btn-outline-primary" onclick="syncOpenPorts()">
+                    <i class="bi bi-shield-plus"></i> 同期
+                </button>
+            </div>
+            <div class="card-body small">
+                <p class="text-secondary mb-2">
+                    firewalld の公開サービスとポートを読み取り、SSH・nginx認証・GUIログインの fail2ban jail を自動生成します。
+                </p>
+                <div id="sync-summary" class="small text-secondary">未実行</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+                <strong><i class="bi bi-ban"></i> Ban 一覧</strong>
+                <button class="btn btn-sm btn-outline-secondary" onclick="loadBans()">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>IP</th>
+                                <th>jail</th>
+                                <th>理由</th>
+                                <th class="text-end">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ban-list">
+                            <tr><td colspan="4" class="text-secondary small p-3">読み込み中</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="jails-wrap"></div>
+
+<div class="modal fade" id="jail-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title font-monospace" id="jail-modal-title"></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-ban"></i> Ban されている IP</h6>
+                        <ul class="list-group list-group-flush small" id="jm-banned"></ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6><i class="bi bi-shield-check"></i> ignoreip (Ban 対象外)</h6>
+                        <ul class="list-group list-group-flush small mb-2" id="jm-ignoreip"></ul>
+                        <div class="input-group input-group-sm">
+                            <input id="jm-ignoreip-input" class="form-control font-monospace" placeholder="192.168.0.0/24">
+                            <button class="btn btn-primary" onclick="addIgnoreip()" title="追加"><i class="bi bi-plus"></i></button>
+                        </div>
+                    </div>
+                </div>
+                <hr>
+                <h6>詳細</h6>
+                <pre class="bg-light p-2 small" id="jm-detail"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let jailModal = null;
+let openedJail = null;
+document.addEventListener('DOMContentLoaded', () => {
+    jailModal = new bootstrap.Modal(document.getElementById('jail-modal'));
+});
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function refresh() {
+    const st = await api.get('/fail2ban/api/status');
+    if (!st) return;
+    const badge = document.getElementById('f2b-status-badge');
+    const installBanner = document.getElementById('install-banner');
+    const defaultsBanner = document.getElementById('defaults-banner');
+    const wrap = document.getElementById('jails-wrap');
+    if (!st.installed) {
+        badge.innerHTML = '<span class="badge bg-secondary-subtle text-secondary-emphasis">not installed</span>';
+        installBanner.classList.remove('d-none');
+        defaultsBanner.classList.add('d-none');
+        wrap.innerHTML = '';
+        renderBans([]);
+        return;
+    }
+    installBanner.classList.add('d-none');
+    badge.innerHTML = st.active
+        ? `<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> active ${escapeHtml(st.version || '')}</span>`
+        : `<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> inactive</span>`;
+
+    const data = await api.get('/fail2ban/api/jails');
+    if (!data) return;
+    const jails = data.jails || [];
+    defaultsBanner.classList.toggle('d-none', jails.length > 0);
+    wrap.innerHTML = jails.length === 0
+        ? ''
+        : `<div class="row g-3">${jails.map(j => `
+            <div class="col-md-6 col-xl-4">
+                <div class="card border-0 shadow-sm h-100">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+                        <strong><i class="bi bi-shield-lock"></i> ${escapeHtml(j.name)}</strong>
+                        <button class="btn btn-sm btn-outline-primary" onclick="openJail('${escapeJs(j.name)}')">詳細</button>
+                    </div>
+                    <div class="card-body small">
+                        <div class="row text-center mb-2">
+                            <div class="col-6">
+                                <div class="text-secondary">現在 Ban</div>
+                                <div class="fs-4 fw-semibold ${j.currently_banned > 0 ? 'text-danger' : ''}">${j.currently_banned}</div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-secondary">累計 Ban</div>
+                                <div class="fs-4 fw-semibold">${j.total_banned}</div>
+                            </div>
+                        </div>
+                        <div class="small">
+                            <div class="text-secondary">filter: <code>${escapeHtml(j.filter || '-')}</code></div>
+                            <div class="text-secondary">log: <code class="text-break">${escapeHtml((j.file_list || []).join(', ') || j.journal_matches || '-')}</code></div>
+                            <div class="text-secondary">failed: ${j.currently_failed} 現在 / ${j.total_failed} 累計</div>
+                        </div>
+                    </div>
+                </div>
+            </div>`).join('')}</div>`;
+    await loadBans();
+}
+
+async function installDefaults(force) {
+    const conf = force
+        ? '既存の jail.local を上書きします。.bak バックアップを残します。よろしいですか?'
+        : '/etc/fail2ban/jail.local を作成して fail2ban を reload します。よろしいですか?';
+    if (!confirm(conf)) return;
+    const res = await api.send('/fail2ban/api/install-defaults', 'POST', { force: !!force });
+    if (!res) return;
+    if (res.ok) {
+        toast(`標準 jail を設定: ${res.jails_enabled.join(', ')}`);
+        refresh();
+    } else if (res.status === undefined && res.existing_first_lines) {
+        if (confirm('server-gui が作成したものではない jail.local が見つかりました。\n\n上書きしますか?')) {
+            installDefaults(true);
+        }
+    } else {
+        toast(res.error || '失敗しました', true);
+    }
+}
+
+async function installFail2ban() {
+    if (!confirm('fail2ban-server / fail2ban-firewalld を dnf でインストールしますか?')) return;
+    const res = await api.send('/fail2ban/api/install', 'POST', {});
+    if (!res) return;
+    toast(res.ok ? 'インストール完了' : 'インストール失敗', !res.ok);
+    refresh();
+}
+
+async function syncOpenPorts() {
+    if (!confirm('firewalld の公開ポートから fail2ban jail を自動構成しますか?')) return;
+    const res = await api.send('/fail2ban/api/sync-open-ports', 'POST', {});
+    if (!res) return;
+    renderSyncSummary(res);
+    toast(res.ok ? '公開ポートから jail を同期しました' : (res.error || '同期に失敗しました'), !res.ok);
+    refresh();
+}
+
+function renderSyncSummary(res) {
+    const target = document.getElementById('sync-summary');
+    const unsupported = (res.unsupported || []).map(u =>
+        `<li><code>${escapeHtml(u.service)}</code>: ${escapeHtml(u.reason)}</li>`).join('');
+    target.innerHTML = `
+        <div>有効化: <code>${escapeHtml((res.jails_enabled || []).join(', ') || '-')}</code></div>
+        <div>検出サービス: <code>${escapeHtml((res.services || []).join(', ') || '-')}</code></div>
+        <div>検出ポート: <code>${escapeHtml((res.ports || []).join(', ') || '-')}</code></div>
+        ${unsupported ? `<div class="mt-2 text-warning-emphasis">未対応:<ul class="mb-0">${unsupported}</ul></div>` : ''}
+    `;
+}
+
+async function loadBans() {
+    const data = await api.get('/fail2ban/api/bans');
+    if (!data) return;
+    renderBans(data.bans || []);
+}
+
+function renderBans(bans) {
+    const body = document.getElementById('ban-list');
+    body.innerHTML = bans.length === 0
+        ? '<tr><td colspan="4" class="text-secondary small p-3">現在 Ban されている IP はありません。</td></tr>'
+        : bans.map(b => `
+            <tr>
+                <td><code>${escapeHtml(b.ip)}</code></td>
+                <td><code>${escapeHtml(b.jail)}</code></td>
+                <td class="small text-break">${escapeHtml(b.reason || '')}</td>
+                <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-success" onclick="unbanFromJail('${escapeJs(b.jail)}', '${escapeJs(b.ip)}')">解除</button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="banToIgnore('${escapeJs(b.jail)}', '${escapeJs(b.ip)}')">ignoreipへ</button>
+                </td>
+            </tr>`).join('');
+}
+
+async function openJail(name) {
+    openedJail = name;
+    const j = await api.get(`/fail2ban/api/jails/${encodeURIComponent(name)}`);
+    if (!j) return;
+    document.getElementById('jail-modal-title').innerHTML =
+        `jail: <span class="font-monospace">${escapeHtml(name)}</span>` +
+        ` <small class="text-secondary ms-2">filter: ${escapeHtml(j.filter || name)}</small>`;
+    const banList = document.getElementById('jm-banned');
+    banList.innerHTML = (j.banned_ips || []).length === 0
+        ? '<li class="list-group-item text-secondary">なし</li>'
+        : j.banned_ips.map(ip => `
+            <li class="list-group-item d-flex justify-content-between align-items-center gap-2">
+                <code>${escapeHtml(ip)}</code>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-success" onclick="unban('${escapeJs(ip)}')">解除</button>
+                    <button class="btn btn-outline-primary" onclick="banToIgnore('${escapeJs(name)}', '${escapeJs(ip)}')">ignoreipへ</button>
+                </div>
+            </li>`).join('');
+    const igList = document.getElementById('jm-ignoreip');
+    igList.innerHTML = (j.ignoreip || []).length === 0
+        ? '<li class="list-group-item text-secondary">なし</li>'
+        : j.ignoreip.map(ip => `
+            <li class="list-group-item d-flex justify-content-between align-items-center gap-2">
+                <code>${escapeHtml(ip)}</code>
+                <button class="btn btn-sm btn-outline-danger" onclick="removeIgnoreip('${escapeJs(ip)}')" title="削除">
+                    <i class="bi bi-x"></i>
+                </button>
+            </li>`).join('');
+    document.getElementById('jm-detail').textContent = JSON.stringify({
+        currently_failed: j.currently_failed,
+        total_failed: j.total_failed,
+        currently_banned: j.currently_banned,
+        total_banned: j.total_banned,
+        file_list: j.file_list,
+        journal_matches: j.journal_matches,
+        actions: j.actions,
+    }, null, 2);
+    jailModal.show();
+}
+
+async function unban(ip) {
+    await unbanFromJail(openedJail, ip);
+    if (openedJail) openJail(openedJail);
+}
+
+async function unbanFromJail(jail, ip) {
+    if (!confirm(`${ip} の ban を解除しますか?`)) return;
+    const res = await api.send(`/fail2ban/api/jails/${encodeURIComponent(jail)}/unban`, 'POST', { ip });
+    if (res && res.ok) {
+        toast(`${ip} を解除しました`);
+        loadBans();
+    } else if (res) {
+        toast(res.output || '失敗しました', true);
+    }
+}
+
+async function banToIgnore(jail, ip) {
+    if (!confirm(`${ip} を ${jail} の ignoreip に移行し、ban を解除しますか?`)) return;
+    const res = await api.send(`/fail2ban/api/jails/${encodeURIComponent(jail)}/ban-to-ignore`, 'POST', { ip });
+    if (res && res.ok) {
+        toast(`${ip} を ignoreip に移行しました`);
+        loadBans();
+        if (openedJail === jail) openJail(jail);
+    } else if (res) {
+        toast(res.output || res.unban_output || '失敗しました', true);
+    }
+}
+
+async function addIgnoreip() {
+    const ip = document.getElementById('jm-ignoreip-input').value.trim();
+    if (!ip) return;
+    const res = await api.send(`/fail2ban/api/jails/${encodeURIComponent(openedJail)}/ignoreip`, 'POST', { ip });
+    if (res && res.ok) {
+        document.getElementById('jm-ignoreip-input').value = '';
+        toast(`${ip} を ignoreip に追加しました`);
+        openJail(openedJail);
+    } else if (res) {
+        toast(res.output || '失敗しました', true);
+    }
+}
+
+async function removeIgnoreip(ip) {
+    if (!confirm(`${ip} を ignoreip から外しますか?`)) return;
+    const res = await api.send(`/fail2ban/api/jails/${encodeURIComponent(openedJail)}/ignoreip`, 'DELETE', { ip });
+    if (res && res.ok) {
+        toast(`${ip} を ignoreip から削除しました`);
+        openJail(openedJail);
+    } else if (res) {
+        toast(res.output || '失敗しました', true);
+    }
+}
+
+refresh();
+</script>
+{% endblock %}

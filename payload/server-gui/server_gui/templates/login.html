@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}ログイン — SyncA UTM{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-5 col-lg-4">
+        <div class="card shadow-sm border-0">
+            <div class="card-body p-4">
+                <div class="text-center mb-4">
+                    <i class="bi bi-shield-lock-fill text-primary" style="font-size: 3rem;"></i>
+                    <h1 class="h4 mt-2 mb-0 fw-semibold">SyncA UTM</h1>
+                    <p class="text-secondary small mb-0">Unified Threat Management</p>
+                </div>
+                {% if error %}
+                <div class="alert alert-danger d-flex align-items-center gap-2 py-2 small" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill"></i>
+                    <div>{{ error }}</div>
+                </div>
+                {% endif %}
+                <form method="POST" novalidate>
+                    <div class="mb-3">
+                        <label for="username" class="form-label">ユーザー名</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-person"></i></span>
+                            <input id="username" name="username" type="text" class="form-control" required autofocus autocomplete="username">
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <label for="password" class="form-label">パスワード</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-key"></i></span>
+                            <input id="password" name="password" type="password" class="form-control" required autocomplete="current-password">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 d-flex align-items-center justify-content-center gap-2">
+                        <i class="bi bi-box-arrow-in-right"></i> ログイン
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

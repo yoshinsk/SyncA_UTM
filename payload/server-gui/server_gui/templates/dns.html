@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}DNS — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-signpost-split text-primary"></i> DNS (dnsmasq)
+    </h1>
+    <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+        <i class="bi bi-arrow-clockwise"></i> 再読込
+    </button>
+</div>
+
+<!-- Host records -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-hdd-network text-secondary"></i>
+        <strong>ホストレコード (A)</strong>
+        <span class="text-secondary small">ドメイン → IP の固定マッピング</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>ドメイン</th>
+                        <th>IP</th>
+                        <th style="width:80px"></th>
+                    </tr>
+                </thead>
+                <tbody id="host-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-5">
+                    <label class="form-label small mb-0">ドメイン</label>
+                    <input id="h-domain" class="form-control form-control-sm" placeholder="server.local">
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label small mb-0">IP アドレス</label>
+                    <input id="h-ip" class="form-control form-control-sm font-monospace" placeholder="192.168.1.50">
+                </div>
+                <div class="col-sm-3">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addHost()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CNAMEs -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-arrow-left-right text-secondary"></i>
+        <strong>CNAME (別名)</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>別名 (alias)</th><th>本来のドメイン (target)</th><th style="width:80px"></th></tr>
+                </thead>
+                <tbody id="cname-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-4">
+                    <input id="c-alias" class="form-control form-control-sm" placeholder="www.local">
+                </div>
+                <div class="col-sm-4">
+                    <input id="c-target" class="form-control form-control-sm" placeholder="server.local">
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addCname()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Upstream forwarders -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-cloud-arrow-up text-secondary"></i>
+        <strong>上流 DNS</strong>
+        <span class="text-secondary small">特定ドメインを別の DNS にフォワード(空欄なら既定の上流)</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>ドメイン (任意)</th><th>転送先 DNS</th><th style="width:80px"></th></tr>
+                </thead>
+                <tbody id="up-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-4">
+                    <input id="u-domain" class="form-control form-control-sm" placeholder="(空欄) または internal.example.jp">
+                </div>
+                <div class="col-sm-4">
+                    <input id="u-server" class="form-control form-control-sm font-monospace" placeholder="8.8.8.8">
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addUpstream()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let dns = { hosts: [], cnames: [], upstream: [] };
+
+async function refresh() {
+    const data = await api.get('/dns/api/records');
+    if (!data) return;
+    dns = data.dns || { hosts: [], cnames: [], upstream: [] };
+    renderHosts();
+    renderCnames();
+    renderUpstream();
+}
+
+function renderHosts() {
+    const tbody = document.getElementById('host-tbody');
+    tbody.innerHTML = (dns.hosts || []).length === 0
+        ? '<tr><td colspan="3" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dns.hosts.map(h => `
+            <tr>
+                <td class="font-monospace">${escapeHtml(h.domain)}</td>
+                <td class="font-monospace">${escapeHtml(h.ip)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteHost('${h.id}')">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`).join('');
+}
+function renderCnames() {
+    const tbody = document.getElementById('cname-tbody');
+    tbody.innerHTML = (dns.cnames || []).length === 0
+        ? '<tr><td colspan="3" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dns.cnames.map(h => `
+            <tr>
+                <td class="font-monospace">${escapeHtml(h.alias)}</td>
+                <td class="font-monospace">${escapeHtml(h.target)}</td>
+                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteCname('${h.id}')"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+function renderUpstream() {
+    const tbody = document.getElementById('up-tbody');
+    tbody.innerHTML = (dns.upstream || []).length === 0
+        ? '<tr><td colspan="3" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dns.upstream.map(h => `
+            <tr>
+                <td class="font-monospace">${h.domain ? escapeHtml(h.domain) : '<span class="text-secondary">(全ドメイン)</span>'}</td>
+                <td class="font-monospace">${escapeHtml(h.server)}</td>
+                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteUpstream('${h.id}')"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+
+async function addHost() {
+    const domain = document.getElementById('h-domain').value.trim();
+    const ip = document.getElementById('h-ip').value.trim();
+    if (!domain || !ip) return toast('ドメインと IP を入力', true);
+    const res = await api.send('/dns/api/hosts', 'POST', { domain, ip });
+    if (res && res.ok) {
+        document.getElementById('h-domain').value = '';
+        document.getElementById('h-ip').value = '';
+        toast('追加しました');
+        refresh();
+    } else if (res) toast(res.error || 'failed', true);
+}
+async function deleteHost(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dns/api/hosts/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function addCname() {
+    const alias = document.getElementById('c-alias').value.trim();
+    const target = document.getElementById('c-target').value.trim();
+    if (!alias || !target) return toast('alias / target を入力', true);
+    const res = await api.send('/dns/api/cnames', 'POST', { alias, target });
+    if (res && res.ok) {
+        document.getElementById('c-alias').value = '';
+        document.getElementById('c-target').value = '';
+        toast('追加しました');
+        refresh();
+    } else if (res) toast(res.error || 'failed', true);
+}
+async function deleteCname(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dns/api/cnames/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function addUpstream() {
+    const domain = document.getElementById('u-domain').value.trim();
+    const server = document.getElementById('u-server').value.trim();
+    if (!server) return toast('転送先 DNS を入力', true);
+    const res = await api.send('/dns/api/upstream', 'POST', { domain, server });
+    if (res && res.ok) {
+        document.getElementById('u-domain').value = '';
+        document.getElementById('u-server').value = '';
+        toast('追加しました');
+        refresh();
+    } else if (res) toast(res.error || 'failed', true);
+}
+async function deleteUpstream(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dns/api/upstream/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+refresh();
+</script>
+{% endblock %}

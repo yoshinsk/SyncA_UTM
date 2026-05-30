@@ -1,0 +1,136 @@
+#!/opt/server-gui/venv/bin/python
+"""payload/server-gui/bin/geoip-update - Refresh firewalld GeoIP ipsets.
+
+For each non-adopted entry in /etc/server-gui/geoip.json, downloads the latest
+CIDR list from ipdeny.com and replaces the firewalld ipset entries.
+"""
+from __future__ import annotations
+
+import datetime
+import ipaddress
+import json
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path("/etc/server-gui/geoip.json")
+LOG = Path("/var/log/server-gui/geoip.log")
+TMP_DIR = Path("/var/tmp/server-gui")
+IPSET_DIR = Path("/etc/firewalld/ipsets")
+IPDENY_URL = "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+LOG.parent.mkdir(parents=True, exist_ok=True)
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')} {msg}\n")
+
+
+def _run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _validated_cidrs(text: str) -> list[str]:
+    # Normalize the downloaded feed before writing firewalld XML. This rejects
+    # malformed lines while preserving the network strings firewalld expects.
+    cidrs: list[str] = []
+    for line in text.splitlines():
+        value = line.strip()
+        if not value or value.startswith("#") or "/" not in value:
+            continue
+        cidrs.append(str(ipaddress.ip_network(value, strict=False)))
+    return sorted(set(cidrs), key=lambda item: (
+        ipaddress.ip_network(item).version,
+        ipaddress.ip_network(item).network_address,
+    ))
+
+
+def _write_ipset_xml(ipset_name: str, cidrs: list[str]) -> None:
+    # Replacing the XML file avoids thousands of individual firewall-cmd
+    # remove-entry calls, which can hold firewalld busy for a long time.
+    IPSET_DIR.mkdir(parents=True, exist_ok=True)
+    content = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<ipset type="hash:net">',
+        '  <option name="family" value="inet"/>',
+    ]
+    content.extend(f"  <entry>{cidr}</entry>" for cidr in cidrs)
+    content.append("</ipset>")
+    tmp = IPSET_DIR / f".{ipset_name}.xml.new"
+    dst = IPSET_DIR / f"{ipset_name}.xml"
+    tmp.write_text("\n".join(content) + "\n", encoding="utf-8")
+    tmp.chmod(0o640)
+    tmp.replace(dst)
+
+
+def _refresh(country: dict) -> str:
+    code = country["code"].lower()
+    ipset_name = country["ipset"]
+    url = IPDENY_URL.format(cc=code)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "server-gui-geoip/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            text = r.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"download failed: {e}") from e
+
+    cidrs = _validated_cidrs(text)
+    if not cidrs:
+        raise RuntimeError("no CIDRs returned")
+
+    list_file = TMP_DIR / f"{code}.zone"
+    list_file.write_text("\n".join(cidrs) + "\n", encoding="utf-8")
+
+    _write_ipset_xml(ipset_name, cidrs)
+    reload = _run(["firewall-cmd", "--reload"])
+    if reload.returncode != 0:
+        raise RuntimeError(f"reload failed: {reload.stderr.strip()}")
+
+    # Update the JSON record
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    return f"{ipset_name}: {len(cidrs)} entries (updated {now})"
+
+
+def main() -> int:
+    if not CONFIG.exists():
+        _log("no /etc/server-gui/geoip.json; nothing to do")
+        return 0
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        _log(f"config unreadable: {e}")
+        return 1
+    countries = data.get("countries", [])
+    if not countries:
+        _log("no countries managed; nothing to do")
+        return 0
+
+    updated_any = False
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    for entry in countries:
+        # Adopted entries point at admin-managed ipsets — leave them alone
+        if entry.get("adopted"):
+            _log(f"SKIP {entry['code']} (adopted)")
+            continue
+        try:
+            msg = _refresh(entry)
+            entry["last_updated"] = now
+            entry["entry_count"] = int(msg.split(":")[1].split()[0]) if ":" in msg else entry.get("entry_count", 0)
+            updated_any = True
+            _log(f"OK   {entry['code']}: {msg}")
+        except Exception as e:
+            _log(f"FAIL {entry['code']}: {e}")
+
+    if updated_any:
+        tmp = CONFIG.with_suffix(".json.new")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(CONFIG)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

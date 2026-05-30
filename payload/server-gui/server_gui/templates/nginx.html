@@ -1,0 +1,868 @@
+{% extends "base.html" %}
+{% block title %}Nginx — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-arrow-left-right text-primary"></i> Nginx リバースプロキシ
+    </h1>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary btn-sm" onclick="runTest()">
+            <i class="bi bi-check2-square"></i> nginx -t
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+            <i class="bi bi-arrow-clockwise"></i> 再読込
+        </button>
+    </div>
+</div>
+
+<!-- Backends -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-server text-secondary"></i>
+            <strong>バックエンドホスト</strong>
+            <span class="text-secondary small">vhost から参照する内部サーバの定義</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openBackendModal()">
+            <i class="bi bi-plus-lg"></i> 新規バックエンド
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>scheme</th>
+                        <th>host</th>
+                        <th style="width:90px">port</th>
+                        <th style="width:160px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="backend-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Vhosts -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-globe text-secondary"></i>
+            <strong>Vhost (リバースプロキシ)</strong>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openVhostModal()">
+            <i class="bi bi-plus-lg"></i> 新規 vhost
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>listen</th>
+                        <th>server_name</th>
+                        <th>→ backend</th>
+                        <th style="width:160px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="vhost-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Unmanaged -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-file-earmark-text text-secondary"></i>
+        <strong>手書き設定 (管理対象外)</strong>
+    </div>
+    <div class="card-body">
+        <p class="text-secondary small mb-2">
+            <code>/etc/nginx/conf.d/</code> 配下で <code>vhost-*.conf</code> 以外のファイルは GUI 管理外です。
+            手で書いた既存設定はそのまま動作します。GUI 管理に移行する場合は同等の vhost を新規作成して旧ファイルを手動削除してください。
+        </p>
+        <ul id="unmanaged-list" class="list-group list-group-flush"></ul>
+    </div>
+</div>
+
+<!-- ========== Backend Modal ========== -->
+<div class="modal fade" id="backend-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="backend-modal-title">バックエンド追加</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">名前 (識別子)</label>
+                    <input id="b-name" type="text" class="form-control" placeholder="例: cyzo">
+                    <div class="form-text">英数字 + <code>_</code> <code>-</code>。先頭はアルファベット。</div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-4">
+                        <label class="form-label">scheme</label>
+                        <select id="b-scheme" class="form-select">
+                            <option value="http">http</option>
+                            <option value="https">https</option>
+                        </select>
+                    </div>
+                    <div class="col-8">
+                        <label class="form-label">host / IP</label>
+                        <input id="b-host" type="text" class="form-control" placeholder="127.0.0.1 または example.com">
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <label class="form-label">port</label>
+                    <input id="b-port" type="number" class="form-control" value="80" min="1" max="65535">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="saveBackend()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== Vhost Modal ========== -->
+<div class="modal fade" id="vhost-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="vhost-modal-title">Vhost 追加</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-md-8">
+                        <label class="form-label">vhost 名 (ファイル名に使用)</label>
+                        <input id="v-name" type="text" class="form-control" placeholder="例: cyzo-main">
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input id="v-enabled" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="v-enabled">有効</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">server_name (スペース区切り)</label>
+                    <input id="v-server-names" type="text" class="form-control" placeholder="example.com www.example.com">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Listen 設定</label>
+                    <div id="v-listens" class="d-flex flex-column gap-2"></div>
+                    <button type="button" class="btn btn-link btn-sm p-0 mt-2" onclick="addListenRow()">
+                        <i class="bi bi-plus-circle"></i> listen 追加
+                    </button>
+                </div>
+                <div id="v-ssl-section" class="d-none border-start border-primary border-3 ps-3 mb-3">
+                    <h6 class="text-primary"><i class="bi bi-shield-check"></i> SSL 設定</h6>
+                    <div class="mb-2">
+                        <label class="form-label small">取得済み証明書から選択</label>
+                        <select id="v-ssl-select" class="form-select form-select-sm" onchange="onCertSelectChange()">
+                            <option value="">-- 選択 --</option>
+                            <option value="__custom__">[カスタムパスを入力]</option>
+                        </select>
+                        <div class="form-text">
+                            <i class="bi bi-info-circle"></i>
+                            証明書は <a href="/certs/">証明書タブ</a> で管理。新規取得は次の Sprint で対応予定。
+                        </div>
+                    </div>
+                    <div id="v-ssl-info" class="alert alert-light small mb-2 d-none"></div>
+                    <div id="v-ssl-custom" class="d-none">
+                        <div class="mb-2">
+                            <label class="form-label small">証明書 (fullchain)</label>
+                            <input id="v-ssl-cert" type="text" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/letsencrypt/live/&lt;fqdn&gt;/fullchain.pem">
+                        </div>
+                        <div>
+                            <label class="form-label small">秘密鍵</label>
+                            <input id="v-ssl-key" type="text" class="form-control form-control-sm font-monospace"
+                                   placeholder="/etc/letsencrypt/live/&lt;fqdn&gt;/privkey.pem">
+                        </div>
+                    </div>
+                    <!-- Hidden inputs always carry the resolved paths (kept in sync with select) -->
+                    <input id="v-ssl-cert-resolved" type="hidden">
+                    <input id="v-ssl-key-resolved"  type="hidden">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">バックエンド (location /)</label>
+                    <select id="v-backend" class="form-select"></select>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input id="v-websocket" type="checkbox" class="form-check-input">
+                            <label class="form-check-label" for="v-websocket">WebSocket 対応</label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">client_max_body_size</label>
+                        <input id="v-body-size" type="text" class="form-control" value="10m">
+                    </div>
+                </div>
+                <div>
+                    <label class="form-label">set_real_ip_from (カンマ区切り、空欄可)</label>
+                    <input id="v-real-ip" type="text" class="form-control" placeholder="10.101.10.0/24">
+                </div>
+
+                <hr>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="text-secondary small mb-0">
+                        <i class="bi bi-shield-shaded"></i> WAF (Web Application Firewall)
+                    </h6>
+                    <div class="form-check form-switch mb-0">
+                        <input id="v-waf-enabled" type="checkbox" class="form-check-input" onchange="onWafToggle()">
+                        <label class="form-check-label" for="v-waf-enabled">有効</label>
+                    </div>
+                </div>
+                <div id="v-waf-section" class="d-none">
+                    <div class="alert alert-light border small">
+                        <i class="bi bi-info-circle"></i>
+                        nginx の <code>limit_req</code> / <code>allow</code>/<code>deny</code> / <code>map</code> /
+                        <code>geo</code> を組み合わせて実装。ModSecurity を有効にすると OWASP CRS による
+                        SQLi/XSS 検査も追加できます (別途インストール必要)。
+                    </div>
+
+                    <!-- ==== Sub-section 1: rate-limit / IP / method ==== -->
+                    <h6 class="text-secondary small mt-2 mb-2">
+                        <i class="bi bi-speedometer2"></i> レート制限 / IP / メソッド
+                    </h6>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">レート制限 (リクエスト/秒、IP 単位)</label>
+                            <input id="v-waf-rps" type="number" class="form-control form-control-sm font-monospace"
+                                   placeholder="0 = 無効、例: 10">
+                            <div class="form-text"><code>limit_req_zone</code> を生成し IP 別にレート制限。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">burst (連続許容数)</label>
+                            <input id="v-waf-burst" type="number" class="form-control form-control-sm font-monospace"
+                                   placeholder="0 = なし、例: 20">
+                            <div class="form-text">バーストを許容する数。これを超えると 503 を返す。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">IP 許可リスト (CIDR、改行/カンマ区切り)</label>
+                            <textarea id="v-waf-allow" class="form-control form-control-sm font-monospace" rows="2"
+                                      placeholder="例: 10.0.0.0/8&#10;192.168.1.0/24"></textarea>
+                            <div class="form-text">指定した CIDR <strong>のみ許可</strong>。他は全拒否。</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">IP 拒否リスト (CIDR、改行/カンマ区切り)</label>
+                            <textarea id="v-waf-deny" class="form-control form-control-sm font-monospace" rows="2"
+                                      placeholder="例: 1.2.3.0/24"></textarea>
+                            <div class="form-text">指定 CIDR を拒否。許可リストより優先。</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small mb-1">許可 HTTP メソッド (空欄なら全て許可)</label>
+                            <div class="d-flex flex-wrap gap-2" id="v-waf-methods-wrap"></div>
+                            <div class="form-text">少なくとも 1 つチェックすると、それ以外のメソッドは 403 を返す。</div>
+                        </div>
+                    </div>
+
+                    <!-- ==== Sub-section 2: User-Agent ==== -->
+                    <hr class="my-3">
+                    <h6 class="text-secondary small mt-2 mb-2">
+                        <i class="bi bi-robot"></i> User-Agent ブロック
+                    </h6>
+                    <div class="form-check mb-2">
+                        <input id="v-waf-empty-ua" type="checkbox" class="form-check-input">
+                        <label class="form-check-label small" for="v-waf-empty-ua">
+                            空の User-Agent (UA なし) を拒否
+                        </label>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-1">ボット カテゴリ プリセット</label>
+                        <div id="v-waf-bot-cats" class="d-flex flex-column gap-1">
+                            <div class="text-secondary small">読み込み中...</div>
+                        </div>
+                        <div class="form-text">
+                            選択したカテゴリの既知パターン (sqlmap / nikto / 等) を <code>map</code> で 403 化。
+                        </div>
+                    </div>
+                    <div>
+                        <label class="form-label small mb-1">追加の UA パターン (1行1パターン、nginx 正規表現、大文字小文字無視)</label>
+                        <textarea id="v-waf-ua-patterns" class="form-control form-control-sm font-monospace" rows="2"
+                                  placeholder="例: badcrawler&#10;myscanner/[0-9]+"></textarea>
+                    </div>
+
+                    <!-- ==== Sub-section 3: Attack patterns ==== -->
+                    <hr class="my-3">
+                    <h6 class="text-secondary small mt-2 mb-2">
+                        <i class="bi bi-bug"></i> 攻撃パターン検出 (URL/クエリ)
+                    </h6>
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input id="v-waf-sqli" type="checkbox" class="form-check-input">
+                                <label class="form-check-label small" for="v-waf-sqli">SQL インジェクション</label>
+                            </div>
+                            <div class="form-text small">union select / 1=1 / sleep() 等</div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input id="v-waf-xss" type="checkbox" class="form-check-input">
+                                <label class="form-check-label small" for="v-waf-xss">XSS</label>
+                            </div>
+                            <div class="form-text small">&lt;script&gt; / on*= / javascript: 等</div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input id="v-waf-pt" type="checkbox" class="form-check-input">
+                                <label class="form-check-label small" for="v-waf-pt">ディレクトリトラバーサル</label>
+                            </div>
+                            <div class="form-text small">../ / %2e%2e / /etc/passwd 等</div>
+                        </div>
+                    </div>
+                    <div class="alert alert-warning small mt-2 mb-0 py-2">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        誤検知 (false positive) が出る可能性があります。アプリの正常な挙動を確認しつつ有効化してください。
+                    </div>
+
+                    <!-- ==== Sub-section 4: Geo allow ==== -->
+                    <hr class="my-3">
+                    <h6 class="text-secondary small mt-2 mb-2">
+                        <i class="bi bi-globe-asia-australia"></i> 国別アクセス制限 (Geo 連携)
+                    </h6>
+                    <div class="mb-2">
+                        <label class="form-label small mb-1">許可する国 (firewalld ipset から取得)</label>
+                        <div id="v-waf-countries" class="d-flex flex-wrap gap-2">
+                            <div class="text-secondary small">読み込み中...</div>
+                        </div>
+                        <div class="form-text">
+                            選択すると <strong>その国のみ許可</strong>。何も選択しなければ Geo 制限なし。
+                            国別 IP リストは <a href="/geoip/">GeoIP タブ</a> でインポートします。
+                        </div>
+                    </div>
+
+                    <!-- ==== Sub-section 5: ModSecurity ==== -->
+                    <hr class="my-3">
+                    <h6 class="text-secondary small mt-2 mb-2">
+                        <i class="bi bi-shield-lock"></i> ModSecurity (OWASP CRS)
+                    </h6>
+                    <div class="form-check mb-1">
+                        <input id="v-waf-modsec" type="checkbox" class="form-check-input" disabled>
+                        <label class="form-check-label small" for="v-waf-modsec">
+                            この vhost で ModSecurity を有効化
+                        </label>
+                    </div>
+                    <div id="v-waf-modsec-status" class="form-text small">読み込み中...</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="saveVhost()">
+                    <i class="bi bi-check2"></i> 保存して適用
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let backends = [];
+let vhosts = [];
+let availableCerts = [];
+let wafStatus = { bot_categories: [], available_countries: [], modsecurity_available: false };
+let editingBackendId = null;
+let editingVhostId = null;
+let backendModal, vhostModal;
+
+document.addEventListener('DOMContentLoaded', () => {
+    backendModal = new bootstrap.Modal(document.getElementById('backend-modal'));
+    vhostModal   = new bootstrap.Modal(document.getElementById('vhost-modal'));
+});
+
+async function refresh() {
+    await loadCerts();
+    await loadWafStatus();
+    const data = await api.get('/nginx/api/vhosts');
+    if (!data) return;
+    backends = data.backends || [];
+    vhosts = data.vhosts || [];
+    renderBackends();
+    renderVhosts();
+    renderUnmanaged(data.unmanaged || []);
+}
+
+async function loadWafStatus() {
+    const data = await api.get('/nginx/api/waf-status');
+    if (data) wafStatus = data;
+}
+
+async function loadCerts() {
+    const data = await api.get('/certs/api/certificates');
+    availableCerts = (data && data.certificates) || [];
+}
+
+function populateCertSelect(currentCertPath) {
+    const sel = document.getElementById('v-ssl-select');
+    const opts = ['<option value="">-- 選択 --</option>'];
+    for (const c of availableCerts) {
+        const expiry = c.days_remaining !== null && c.days_remaining !== undefined
+            ? ` — 残り ${c.days_remaining} 日`
+            : '';
+        const label = `${c.name} (${c.subject || c.name})${expiry}`;
+        opts.push(`<option value="${escapeHtml(c.cert_path)}|${escapeHtml(c.key_path)}">${escapeHtml(label)}</option>`);
+    }
+    opts.push('<option value="__custom__">[カスタムパスを入力]</option>');
+    sel.innerHTML = opts.join('');
+
+    // Pre-select if currentCertPath matches one
+    if (currentCertPath) {
+        const match = availableCerts.find(c => c.cert_path === currentCertPath);
+        if (match) {
+            sel.value = `${match.cert_path}|${match.key_path}`;
+        } else {
+            sel.value = '__custom__';
+        }
+        onCertSelectChange();
+    } else {
+        sel.value = '';
+        onCertSelectChange();
+    }
+}
+
+function onCertSelectChange() {
+    const sel = document.getElementById('v-ssl-select');
+    const val = sel.value;
+    const customDiv = document.getElementById('v-ssl-custom');
+    const infoDiv = document.getElementById('v-ssl-info');
+    const certResolved = document.getElementById('v-ssl-cert-resolved');
+    const keyResolved  = document.getElementById('v-ssl-key-resolved');
+
+    if (val === '__custom__') {
+        customDiv.classList.remove('d-none');
+        infoDiv.classList.add('d-none');
+        // resolved hidden values mirror custom inputs (read at save time)
+        certResolved.value = '';
+        keyResolved.value = '';
+    } else if (val === '' || !val) {
+        customDiv.classList.add('d-none');
+        infoDiv.classList.add('d-none');
+        certResolved.value = '';
+        keyResolved.value = '';
+    } else {
+        customDiv.classList.add('d-none');
+        const [certPath, keyPath] = val.split('|');
+        certResolved.value = certPath;
+        keyResolved.value = keyPath;
+        const match = availableCerts.find(c => c.cert_path === certPath);
+        if (match) {
+            const sans = (match.sans || []).join(', ');
+            const days = match.days_remaining;
+            let daysCls = 'text-success';
+            if (days !== null && days !== undefined) {
+                if (days < 7) daysCls = 'text-danger';
+                else if (days < 30) daysCls = 'text-warning';
+            }
+            infoDiv.innerHTML = `
+                <div><strong>CN:</strong> <span class="font-monospace">${escapeHtml(match.subject || '—')}</span></div>
+                <div><strong>SAN:</strong> <span class="font-monospace">${escapeHtml(sans || '—')}</span></div>
+                <div><strong>有効期限:</strong> <span class="font-monospace">${escapeHtml(match.not_after || '—')}</span>
+                     ${days !== null && days !== undefined ? `<span class="${daysCls} fw-semibold ms-2">(残り ${days} 日)</span>` : ''}</div>
+                <div><strong>発行元:</strong> <span class="font-monospace small text-secondary">${escapeHtml(match.issuer || '—')}</span></div>
+                <div><strong>パス:</strong> <code class="small">${escapeHtml(certPath)}</code></div>
+            `;
+            infoDiv.classList.remove('d-none');
+        } else {
+            infoDiv.classList.add('d-none');
+        }
+    }
+}
+
+function renderBackends() {
+    const tbody = document.getElementById('backend-tbody');
+    tbody.innerHTML = backends.length === 0
+        ? '<tr><td colspan="5" class="text-center text-secondary py-4">バックエンド未登録</td></tr>'
+        : backends.map(b => `
+            <tr>
+                <td class="fw-semibold">${escapeHtml(b.name)}</td>
+                <td><span class="badge bg-secondary-subtle text-secondary-emphasis font-monospace">${escapeHtml(b.scheme)}</span></td>
+                <td class="font-monospace">${escapeHtml(b.host)}</td>
+                <td class="font-monospace">${b.port}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="editBackend('${b.id}')">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteBackend('${b.id}')">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`).join('');
+}
+
+function renderVhosts() {
+    const tbody = document.getElementById('vhost-tbody');
+    tbody.innerHTML = vhosts.length === 0
+        ? '<tr><td colspan="5" class="text-center text-secondary py-4">vhost 未登録</td></tr>'
+        : vhosts.map(v => {
+            const listen = v.listens.map(l => {
+                const badge = l.ssl ? 'bg-success-subtle text-success-emphasis' : 'bg-secondary-subtle text-secondary-emphasis';
+                const flags = [];
+                if (l.ssl) flags.push('ssl');
+                if (l.default_server) flags.push('default');
+                return `<span class="badge ${badge} font-monospace me-1">${l.port}${flags.length ? ' ' + flags.join(',') : ''}</span>`;
+            }).join('');
+            const backendId = v.locations[0]?.backend_id;
+            const backend = backends.find(b => b.id === backendId);
+            const backendStr = backend
+                ? `<span class="font-monospace small">${escapeHtml(backend.name)}<br><span class="text-secondary">${escapeHtml(backend.scheme)}://${escapeHtml(backend.host)}:${backend.port}</span></span>`
+                : '<span class="text-danger small">未設定</span>';
+            const dimmed = v.enabled ? '' : 'opacity-50';
+            const statusBadge = v.enabled
+                ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">有効</span>'
+                : '<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">無効</span>';
+            return `<tr class="${dimmed}">
+                <td class="fw-semibold">${escapeHtml(v.name)}${statusBadge}</td>
+                <td>${listen}</td>
+                <td class="font-monospace small">${escapeHtml(v.server_names.join(' '))}</td>
+                <td>${backendStr}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="editVhost('${v.id}')">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteVhost('${v.id}')">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+}
+
+function renderUnmanaged(items) {
+    const ul = document.getElementById('unmanaged-list');
+    ul.innerHTML = items.length === 0
+        ? '<li class="list-group-item text-secondary">なし</li>'
+        : items.map(it => `
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+                <span>
+                    <span class="font-monospace">${escapeHtml(it.name)}</span>
+                    <span class="text-secondary small ms-2">(${it.size} bytes)</span>
+                </span>
+                <button class="btn btn-sm btn-outline-primary" onclick="importVhost('${escapeJsLocal(it.name)}')">
+                    <i class="bi bi-arrow-down-left-square"></i> 取り込み
+                </button>
+            </li>`).join('');
+}
+
+function escapeJsLocal(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function importVhost(filename) {
+    if (!confirm(`${filename} を GUI 管理に取り込みますか?\n\n動作:\n  1. 設定をパース\n  2. proxy_pass からバックエンドを自動作成/再利用\n  3. ${filename} を ${filename}.imported にリネーム (nginx は読込まなくなる)\n  4. vhost-*.conf を再生成 + nginx -t + reload\n  5. 失敗時は全て元に戻す`)) return;
+    const res = await api.send('/nginx/api/import', 'POST', { file: filename });
+    if (res && res.vhost) {
+        toast(`取り込みました: ${res.vhost.name}`);
+        refresh();
+    } else if (res) {
+        toast(res.error || '取り込み失敗', true);
+    }
+}
+
+/* ----- backend modal ----- */
+function openBackendModal() {
+    editingBackendId = null;
+    document.getElementById('backend-modal-title').textContent = 'バックエンド追加';
+    document.getElementById('b-name').value = '';
+    document.getElementById('b-scheme').value = 'http';
+    document.getElementById('b-host').value = '';
+    document.getElementById('b-port').value = '80';
+    backendModal.show();
+}
+function editBackend(id) {
+    const b = backends.find(x => x.id === id);
+    if (!b) return;
+    editingBackendId = id;
+    document.getElementById('backend-modal-title').textContent = `バックエンド編集: ${b.name}`;
+    document.getElementById('b-name').value = b.name;
+    document.getElementById('b-scheme').value = b.scheme;
+    document.getElementById('b-host').value = b.host;
+    document.getElementById('b-port').value = b.port;
+    backendModal.show();
+}
+async function saveBackend() {
+    const payload = {
+        name: document.getElementById('b-name').value.trim(),
+        scheme: document.getElementById('b-scheme').value,
+        host: document.getElementById('b-host').value.trim(),
+        port: parseInt(document.getElementById('b-port').value, 10),
+    };
+    const url = editingBackendId ? `/nginx/api/backends/${editingBackendId}` : '/nginx/api/backends';
+    const method = editingBackendId ? 'PUT' : 'POST';
+    const data = await api.send(url, method, payload);
+    if (data) {
+        toast(editingBackendId ? '更新しました' : '追加しました');
+        backendModal.hide();
+        refresh();
+    }
+}
+async function deleteBackend(id) {
+    if (!confirm('このバックエンドを削除しますか?')) return;
+    const data = await api.send(`/nginx/api/backends/${id}`, 'DELETE');
+    if (data) { toast('削除しました'); refresh(); }
+}
+
+/* ----- vhost modal ----- */
+function addListenRow(port = 443, ssl = true, http2 = true, ds = false) {
+    const container = document.getElementById('v-listens');
+    const div = document.createElement('div');
+    div.className = 'd-flex align-items-center gap-2 flex-wrap';
+    div.innerHTML = `
+        <input type="number" value="${port}" min="1" max="65535" class="form-control form-control-sm listen-port" style="width:100px">
+        <div class="form-check"><input type="checkbox" class="form-check-input listen-ssl" ${ssl ? 'checked' : ''}><label class="form-check-label small ms-1">ssl</label></div>
+        <div class="form-check"><input type="checkbox" class="form-check-input listen-http2" ${http2 ? 'checked' : ''}><label class="form-check-label small ms-1">http2</label></div>
+        <div class="form-check"><input type="checkbox" class="form-check-input listen-default" ${ds ? 'checked' : ''}><label class="form-check-label small ms-1">default_server</label></div>
+        <button type="button" class="btn btn-sm btn-link text-danger p-0 ms-2" onclick="this.parentElement.remove(); updateSslVisibility();" title="削除">
+            <i class="bi bi-x-circle"></i>
+        </button>`;
+    container.appendChild(div);
+    div.querySelector('.listen-ssl').addEventListener('change', updateSslVisibility);
+    updateSslVisibility();
+}
+function updateSslVisibility() {
+    const anySsl = Array.from(document.querySelectorAll('.listen-ssl')).some(c => c.checked);
+    document.getElementById('v-ssl-section').classList.toggle('d-none', !anySsl);
+}
+const WAF_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
+
+function renderWafMethods(selected) {
+    const wrap = document.getElementById('v-waf-methods-wrap');
+    const set = new Set(selected || []);
+    wrap.innerHTML = WAF_METHODS.map(m => `
+        <div class="form-check form-check-inline">
+            <input class="form-check-input v-waf-method" type="checkbox" value="${m}" id="v-waf-m-${m}"
+                   ${set.has(m) ? 'checked' : ''}>
+            <label class="form-check-label small font-monospace" for="v-waf-m-${m}">${m}</label>
+        </div>`).join('');
+}
+
+function onWafToggle() {
+    const on = document.getElementById('v-waf-enabled').checked;
+    document.getElementById('v-waf-section').classList.toggle('d-none', !on);
+}
+
+function renderWafBotCategories(selected) {
+    const wrap = document.getElementById('v-waf-bot-cats');
+    const set = new Set(selected || []);
+    const cats = wafStatus.bot_categories || [];
+    if (!cats.length) {
+        wrap.innerHTML = '<div class="text-secondary small">カテゴリが見つかりません</div>';
+        return;
+    }
+    wrap.innerHTML = cats.map(c => `
+        <div class="form-check">
+            <input class="form-check-input v-waf-bot-cat" type="checkbox" value="${escapeHtml(c.id)}"
+                   id="v-waf-bc-${escapeHtml(c.id)}" ${set.has(c.id) ? 'checked' : ''}>
+            <label class="form-check-label small" for="v-waf-bc-${escapeHtml(c.id)}">
+                ${escapeHtml(c.label)}
+                <span class="text-secondary">(${c.count} 件)</span>
+            </label>
+        </div>`).join('');
+}
+
+function renderWafCountries(selected) {
+    const wrap = document.getElementById('v-waf-countries');
+    const set = new Set((selected || []).map(s => String(s).toLowerCase()));
+    const ccs = wafStatus.available_countries || [];
+    if (!ccs.length) {
+        wrap.innerHTML = '<div class="text-secondary small">利用可能な国別 IP セットがありません (GeoIP タブからインポートしてください)</div>';
+        return;
+    }
+    wrap.innerHTML = ccs.map(cc => `
+        <div class="form-check form-check-inline">
+            <input class="form-check-input v-waf-cc" type="checkbox" value="${escapeHtml(cc)}"
+                   id="v-waf-cc-${escapeHtml(cc)}" ${set.has(cc) ? 'checked' : ''}>
+            <label class="form-check-label small font-monospace" for="v-waf-cc-${escapeHtml(cc)}">
+                ${escapeHtml(cc.toUpperCase())}
+            </label>
+        </div>`).join('');
+}
+
+function renderWafModsec(enabled) {
+    const cb = document.getElementById('v-waf-modsec');
+    const status = document.getElementById('v-waf-modsec-status');
+    if (wafStatus.modsecurity_available) {
+        cb.disabled = false;
+        cb.checked = !!enabled;
+        const rulesExist = wafStatus.modsecurity_rules_file_exists;
+        const rulesFile = wafStatus.modsecurity_rules_file || '/etc/nginx/modsec/main.conf';
+        status.innerHTML = `
+            <i class="bi bi-check-circle text-success"></i>
+            ModSecurity モジュール利用可。
+            ルール ファイル <code>${escapeHtml(rulesFile)}</code>
+            ${rulesExist
+                ? '<span class="text-success">存在</span>'
+                : '<span class="text-warning">未作成 — OWASP CRS の <code>main.conf</code> を配置してください</span>'};
+        `;
+    } else {
+        cb.disabled = true;
+        cb.checked = false;
+        status.innerHTML = `
+            <i class="bi bi-exclamation-circle text-warning"></i>
+            ModSecurity 動的モジュールが見つかりません。
+            <code>dnf install nginx-mod-modsecurity</code> 等でインストールし、
+            <code>nginx.conf</code> から <code>load_module</code> してください。
+        `;
+    }
+}
+
+function populateWaf(waf) {
+    waf = waf || {};
+    document.getElementById('v-waf-enabled').checked = !!waf.enabled;
+    document.getElementById('v-waf-rps').value = waf.rate_limit_rps || '';
+    document.getElementById('v-waf-burst').value = waf.rate_limit_burst || '';
+    document.getElementById('v-waf-allow').value = (waf.ip_allow || []).join('\n');
+    document.getElementById('v-waf-deny').value = (waf.ip_deny || []).join('\n');
+    renderWafMethods(waf.allowed_methods || []);
+    document.getElementById('v-waf-empty-ua').checked = !!waf.block_empty_ua;
+    renderWafBotCategories(waf.blocked_ua_categories || []);
+    document.getElementById('v-waf-ua-patterns').value = (waf.blocked_ua_patterns || []).join('\n');
+    document.getElementById('v-waf-sqli').checked = !!waf.block_sql_injection;
+    document.getElementById('v-waf-xss').checked = !!waf.block_xss;
+    document.getElementById('v-waf-pt').checked = !!waf.block_path_traversal;
+    renderWafCountries(waf.geo_allow_countries || []);
+    renderWafModsec(!!waf.modsecurity);
+    onWafToggle();
+}
+
+function collectWaf() {
+    const methods = Array.from(document.querySelectorAll('.v-waf-method:checked')).map(c => c.value);
+    const cats = Array.from(document.querySelectorAll('.v-waf-bot-cat:checked')).map(c => c.value);
+    const ccs = Array.from(document.querySelectorAll('.v-waf-cc:checked')).map(c => c.value);
+    return {
+        enabled: document.getElementById('v-waf-enabled').checked,
+        rate_limit_rps: parseInt(document.getElementById('v-waf-rps').value, 10) || 0,
+        rate_limit_burst: parseInt(document.getElementById('v-waf-burst').value, 10) || 0,
+        ip_allow: document.getElementById('v-waf-allow').value
+            .split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
+        ip_deny: document.getElementById('v-waf-deny').value
+            .split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
+        allowed_methods: methods,
+        block_empty_ua: document.getElementById('v-waf-empty-ua').checked,
+        blocked_ua_patterns: document.getElementById('v-waf-ua-patterns').value
+            .split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+        blocked_ua_categories: cats,
+        block_sql_injection: document.getElementById('v-waf-sqli').checked,
+        block_xss: document.getElementById('v-waf-xss').checked,
+        block_path_traversal: document.getElementById('v-waf-pt').checked,
+        geo_allow_countries: ccs,
+        modsecurity: document.getElementById('v-waf-modsec').checked,
+    };
+}
+
+function openVhostModal() {
+    editingVhostId = null;
+    document.getElementById('vhost-modal-title').textContent = 'Vhost 追加';
+    document.getElementById('v-name').value = '';
+    document.getElementById('v-enabled').checked = true;
+    document.getElementById('v-server-names').value = '';
+    document.getElementById('v-ssl-cert').value = '';
+    document.getElementById('v-ssl-key').value = '';
+    document.getElementById('v-websocket').checked = false;
+    document.getElementById('v-body-size').value = '10m';
+    document.getElementById('v-real-ip').value = '';
+    document.getElementById('v-listens').innerHTML = '';
+    addListenRow(443, true, true, false);
+    populateBackendSelect();
+    populateCertSelect(null);
+    populateWaf(null);
+    vhostModal.show();
+}
+function populateBackendSelect(selectedId) {
+    const sel = document.getElementById('v-backend');
+    sel.innerHTML = '<option value="">-- 選択 --</option>' +
+        backends.map(b =>
+            `<option value="${b.id}" ${b.id === selectedId ? 'selected' : ''}>${escapeHtml(b.name)} (${escapeHtml(b.scheme)}://${escapeHtml(b.host)}:${b.port})</option>`
+        ).join('');
+}
+function editVhost(id) {
+    const v = vhosts.find(x => x.id === id);
+    if (!v) return;
+    editingVhostId = id;
+    document.getElementById('vhost-modal-title').textContent = `Vhost 編集: ${v.name}`;
+    document.getElementById('v-name').value = v.name;
+    document.getElementById('v-enabled').checked = v.enabled;
+    document.getElementById('v-server-names').value = v.server_names.join(' ');
+    document.getElementById('v-ssl-cert').value = v.ssl?.cert_path || '';
+    document.getElementById('v-ssl-key').value = v.ssl?.key_path || '';
+    document.getElementById('v-body-size').value = v.client_max_body_size || '1m';
+    document.getElementById('v-real-ip').value = (v.set_real_ip_from || []).join(', ');
+    const loc0 = v.locations[0] || {};
+    document.getElementById('v-websocket').checked = !!loc0.websocket;
+    document.getElementById('v-listens').innerHTML = '';
+    v.listens.forEach(l => addListenRow(l.port, l.ssl, l.http2, l.default_server));
+    populateBackendSelect(loc0.backend_id);
+    populateCertSelect(v.ssl?.cert_path || null);
+    populateWaf(v.waf || null);
+    vhostModal.show();
+}
+function collectListens() {
+    return Array.from(document.querySelectorAll('#v-listens > div')).map(row => ({
+        port: parseInt(row.querySelector('.listen-port').value, 10),
+        ssl: row.querySelector('.listen-ssl').checked,
+        http2: row.querySelector('.listen-http2').checked,
+        default_server: row.querySelector('.listen-default').checked,
+    }));
+}
+async function saveVhost() {
+    const listens = collectListens();
+    const anySsl = listens.some(l => l.ssl);
+    // Resolve cert/key paths: dropdown selection (hidden) OR custom inputs
+    const sel = document.getElementById('v-ssl-select').value;
+    let certPath, keyPath;
+    if (sel === '__custom__') {
+        certPath = document.getElementById('v-ssl-cert').value.trim();
+        keyPath  = document.getElementById('v-ssl-key').value.trim();
+    } else {
+        certPath = document.getElementById('v-ssl-cert-resolved').value;
+        keyPath  = document.getElementById('v-ssl-key-resolved').value;
+    }
+    const payload = {
+        name: document.getElementById('v-name').value.trim(),
+        enabled: document.getElementById('v-enabled').checked,
+        server_names: document.getElementById('v-server-names').value.trim().split(/\s+/).filter(Boolean),
+        listens,
+        ssl: anySsl ? { cert_path: certPath, key_path: keyPath } : null,
+        waf: collectWaf(),
+        client_max_body_size: document.getElementById('v-body-size').value.trim() || '1m',
+        set_real_ip_from: document.getElementById('v-real-ip').value.split(',').map(s => s.trim()).filter(Boolean),
+        locations: [{
+            path: '/',
+            type: 'proxy',
+            backend_id: document.getElementById('v-backend').value || null,
+            websocket: document.getElementById('v-websocket').checked,
+        }],
+    };
+    const url = editingVhostId ? `/nginx/api/vhosts/${editingVhostId}` : '/nginx/api/vhosts';
+    const method = editingVhostId ? 'PUT' : 'POST';
+    const data = await api.send(url, method, payload);
+    if (data) {
+        toast(editingVhostId ? '更新・適用しました' : '追加・適用しました');
+        vhostModal.hide();
+        refresh();
+    }
+}
+async function deleteVhost(id) {
+    if (!confirm('この vhost を削除して nginx をリロードしますか?')) return;
+    const data = await api.send(`/nginx/api/vhosts/${id}`, 'DELETE');
+    if (data) { toast('削除しました'); refresh(); }
+}
+async function runTest() {
+    const data = await api.get('/nginx/api/test');
+    if (!data) return;
+    if (data.ok) toast('nginx -t OK');
+    else toast('nginx -t 失敗: ' + (data.stderr || 'unknown'), true);
+}
+
+refresh();
+</script>
+{% endblock %}

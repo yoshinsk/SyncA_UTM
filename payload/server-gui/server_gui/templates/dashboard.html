@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}ダッシュボード — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-speedometer2 text-primary"></i> ダッシュボード
+    </h1>
+    <button class="btn btn-outline-secondary btn-sm" onclick="loadStatus()">
+        <i class="bi bi-arrow-clockwise"></i> 更新
+    </button>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-center gap-2 text-secondary small mb-1">
+                    <i class="bi bi-pc-display"></i> ホスト名
+                </div>
+                <div class="fs-5 fw-semibold text-truncate font-monospace" id="d-hostname">—</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-center gap-2 text-secondary small mb-1">
+                    <i class="bi bi-window"></i> OS
+                </div>
+                <div class="fs-6 fw-semibold text-truncate" id="d-os">—</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-center gap-2 text-secondary small mb-1">
+                    <i class="bi bi-cpu"></i> カーネル
+                </div>
+                <div class="fs-6 fw-semibold text-truncate font-monospace" id="d-kernel">—</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-center gap-2 text-secondary small mb-1">
+                    <i class="bi bi-clock-history"></i> 稼働時間
+                </div>
+                <div class="fs-6 fw-semibold font-monospace" id="d-uptime-short">—</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white border-bottom">
+                <i class="bi bi-clock"></i> uptime
+            </div>
+            <div class="card-body p-0">
+                <pre class="console-output mb-0" id="d-uptime">Loading...</pre>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white border-bottom">
+                <i class="bi bi-memory"></i> メモリ使用量
+            </div>
+            <div class="card-body p-0">
+                <pre class="console-output mb-0" id="d-memory">Loading...</pre>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white border-bottom">
+                <i class="bi bi-hdd"></i> ディスク使用量 (/)
+            </div>
+            <div class="card-body p-0">
+                <pre class="console-output mb-0" id="d-disk">Loading...</pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadStatus() {
+    const data = await api.get('/system/api/status');
+    if (!data) return;
+    document.getElementById('d-hostname').textContent = data.hostname || '—';
+    document.getElementById('d-os').textContent = data.os || '—';
+    document.getElementById('d-kernel').textContent = data.kernel || '—';
+    document.getElementById('d-uptime').textContent = data.uptime || '—';
+    document.getElementById('d-memory').textContent = data.memory || '—';
+    document.getElementById('d-disk').textContent = data.disk || '—';
+    const m = (data.uptime || '').match(/up\s+([^,]+(?:,[^,]+)?),/);
+    document.getElementById('d-uptime-short').textContent = m ? m[1].trim() : '—';
+}
+loadStatus();
+</script>
+{% endblock %}

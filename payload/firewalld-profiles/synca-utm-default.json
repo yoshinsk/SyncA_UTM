@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "profile_id": "synca-utm-default",
+  "description": "Default variable-based Firewalld profile for SyncA UTM installations.",
+  "variables": {
+    "wan_interface": "wan0",
+    "lan_interfaces": [
+      "lan0"
+    ],
+    "optional_lan_interfaces": [],
+    "wireguard_interface": "wg0",
+    "lan_cidr": "192.168.100.0/24",
+    "admin_lan_cidr": "192.168.100.0/24",
+    "ipsec_remote_cidr": "192.168.200.0/24",
+    "management_public_source": "",
+    "sip_backend_address": ""
+  },
+  "managed_ipsets": [
+    {
+      "name": "jp-ipv4",
+      "family": "inet",
+      "type": "hash:net",
+      "source": "first-online-geoip-refresh",
+      "default_managed_country": true
+    },
+    {
+      "name": "cn-ipv4",
+      "family": "inet",
+      "type": "hash:net",
+      "source": "first-online-geoip-refresh"
+    },
+    {
+      "name": "kr-ipv4",
+      "family": "inet",
+      "type": "hash:net",
+      "source": "first-online-geoip-refresh"
+    },
+    {
+      "name": "kp-ipv4",
+      "family": "inet",
+      "type": "hash:net",
+      "source": "first-online-geoip-refresh"
+    }
+  ],
+  "services": [
+    {
+      "name": "sip-custom",
+      "short": "SIP-Custom",
+      "description": "Optional custom SIP service. Enable only when a SIP backend address is configured.",
+      "ports": [
+        {
+          "protocol": "tcp",
+          "port": "48060"
+        },
+        {
+          "protocol": "udp",
+          "port": "48060"
+        }
+      ],
+      "modules": [
+        "nf_conntrack_sip"
+      ]
+    }
+  ],
+  "default_zone": "public",
+  "zones": {
+    "drop": {
+      "target": "DROP",
+      "sources": [
+        "ipset:cn-ipv4",
+        "ipset:kr-ipv4"
+      ],
+      "forward": true
+    },
+    "japan": {
+      "target": "default",
+      "sources": [
+        "${management_public_source}",
+        "ipset:jp-ipv4"
+      ],
+      "services": [
+        "dns",
+        "http",
+        "https",
+        "ipsec",
+        "ssh",
+        "wireguard"
+      ],
+      "ports": [
+        "4444/tcp",
+        "5011/tcp"
+      ],
+      "masquerade": true,
+      "forward_ports": []
+    },
+    "public": {
+      "target": "DROP",
+      "interfaces": [
+        "${wan_interface}"
+      ],
+      "forward": true,
+      "masquerade": true
+    },
+    "trusted": {
+      "target": "ACCEPT",
+      "interfaces": [
+        "${lan_interfaces}",
+        "${wireguard_interface}"
+      ],
+      "sources": [
+        "${ipsec_remote_cidr}",
+        "${admin_lan_cidr}"
+      ],
+      "services": [
+        "dhcp"
+      ],
+      "forward": true
+    }
+  },
+  "direct_rules": [
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${lan_interface} -o ${wan_interface} -j ACCEPT",
+      "expand_for": "lan_interfaces"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${optional_lan_interface} -o ${wan_interface} -j ACCEPT",
+      "expand_for": "optional_lan_interfaces"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${wan_interface} -o ${lan_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+      "expand_for": "lan_interfaces"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${wan_interface} -o ${optional_lan_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+      "expand_for": "optional_lan_interfaces"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${wireguard_interface} -o ${wan_interface} -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ${wan_interface} -o ${wireguard_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-s ${lan_cidr} -d ${ipsec_remote_cidr} -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "filter",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-s ${ipsec_remote_cidr} -d ${lan_cidr} -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "nat",
+      "chain": "POSTROUTING",
+      "priority": 0,
+      "args": "-d ${ipsec_remote_cidr} -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "nat",
+      "chain": "POSTROUTING",
+      "priority": 1,
+      "args": "-o ${wan_interface} -j MASQUERADE"
+    }
+  ],
+  "first_online_actions": [
+    "create-empty-managed-ipsets-before-firewalld-reload",
+    "refresh-geoip-ipsets",
+    "set-default-managed-country-to-jp-ipv4"
+  ]
+}

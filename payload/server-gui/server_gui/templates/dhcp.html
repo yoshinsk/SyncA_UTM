@@ -1,0 +1,403 @@
+{% extends "base.html" %}
+{% block title %}DHCP — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-diagram-3 text-primary"></i> DHCP (dnsmasq)
+    </h1>
+    <button class="btn btn-outline-secondary btn-sm" onclick="refresh()">
+        <i class="bi bi-arrow-clockwise"></i> 再読込
+    </button>
+</div>
+
+<!-- Ranges -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-bezier text-secondary"></i>
+        <strong>DHCP レンジ</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>インターフェース</th><th>開始 IP</th><th>終了 IP</th>
+                        <th>netmask</th><th>lease</th><th style="width:80px"></th>
+                    </tr>
+                </thead>
+                <tbody id="range-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">interface (任意)</label>
+                    <input id="r-if" class="form-control form-control-sm font-monospace" placeholder="ens4">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">開始 IP</label>
+                    <input id="r-start" class="form-control form-control-sm font-monospace" placeholder="192.168.1.100">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">終了 IP</label>
+                    <input id="r-end" class="form-control form-control-sm font-monospace" placeholder="192.168.1.200">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">netmask (任意)</label>
+                    <input id="r-netmask" class="form-control form-control-sm font-monospace" placeholder="255.255.255.0">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">lease</label>
+                    <input id="r-lease" class="form-control form-control-sm font-monospace" value="12h">
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addRange()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Static reservations -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-pin-angle text-secondary"></i>
+        <strong>固定 IP 割当 (MAC ベース)</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>MAC</th><th>IP</th><th>ホスト名</th><th>lease</th>
+                        <th style="width:80px"></th>
+                    </tr>
+                </thead>
+                <tbody id="static-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-3">
+                    <label class="form-label small mb-0">MAC</label>
+                    <input id="s-mac" class="form-control form-control-sm font-monospace" placeholder="00:11:22:33:44:55">
+                </div>
+                <div class="col-sm-3">
+                    <label class="form-label small mb-0">IP</label>
+                    <input id="s-ip" class="form-control form-control-sm font-monospace" placeholder="192.168.1.10">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">hostname (任意)</label>
+                    <input id="s-host" class="form-control form-control-sm" placeholder="myhost">
+                </div>
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">lease (任意)</label>
+                    <input id="s-lease" class="form-control form-control-sm font-monospace" placeholder="infinite">
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addStatic()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- DHCP options -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-gear text-secondary"></i>
+        <strong>DHCP オプション</strong>
+        <span class="text-secondary small">router / dns-server / ntp-server / tftp-server 等</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>option</th><th>value</th><th>tag (任意)</th><th style="width:80px"></th></tr>
+                </thead>
+                <tbody id="option-tbody"></tbody>
+            </table>
+        </div>
+        <div class="border-top p-3 bg-light">
+            <div class="row g-2 align-items-end">
+                <div class="col-sm-3">
+                    <label class="form-label small mb-0">option (名前 or 番号)</label>
+                    <input id="o-option" class="form-control form-control-sm font-monospace"
+                           list="dhcp-option-datalist" placeholder="候補から選択 / 自由入力">
+                    <datalist id="dhcp-option-datalist">
+                        <option value="subnet-mask">サブネットマスク (1)</option>
+                        <option value="router">デフォルトゲートウェイ (3)</option>
+                        <option value="dns-server">DNSサーバ (6)</option>
+                        <option value="hostname">ホスト名 (12)</option>
+                        <option value="domain-name">ドメイン名 (15)</option>
+                        <option value="interface-mtu">MTU (26)</option>
+                        <option value="broadcast">ブロードキャスト (28)</option>
+                        <option value="ntp-server">NTPサーバ (42)</option>
+                        <option value="lease-time">リース時間 (51)</option>
+                        <option value="tftp-server">TFTPサーバ (66)</option>
+                        <option value="bootfile-name">起動ファイル名 (67)</option>
+                        <option value="smtp-server">SMTPサーバ (69)</option>
+                        <option value="pop3-server">POP3サーバ (70)</option>
+                        <option value="user-class">ユーザクラス (77)</option>
+                        <option value="domain-search">DNSサーチドメイン (119)</option>
+                        <option value="sip-server">SIPサーバ (120)</option>
+                        <option value="classless-static-route">クラスレス静的ルート (121)</option>
+                        <option value="vlan-id">VLAN ID (132)</option>
+                        <option value="150">Cisco TFTP (150)</option>
+                    </datalist>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label small mb-0">value</label>
+                    <input id="o-value" class="form-control form-control-sm font-monospace" placeholder="例: 192.168.1.1 / tftp.example.com">
+                </div>
+                <div class="col-sm-3">
+                    <label class="form-label small mb-0">tag (任意)</label>
+                    <input id="o-tag" class="form-control form-control-sm font-monospace">
+                </div>
+                <div class="col-sm-2">
+                    <button class="btn btn-primary btn-sm w-100" onclick="addOption()"><i class="bi bi-plus"></i> 追加</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Existing (unmanaged) config from other dnsmasq.d files -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-file-earmark-text text-secondary"></i>
+            <strong>既存の dnsmasq 設定 (管理対象外)</strong>
+            <span class="text-secondary small">/etc/dnsmasq.conf + /etc/dnsmasq.d/ (server-gui.conf 以外)</span>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadExisting()">
+            <i class="bi bi-arrow-clockwise"></i> 再スキャン
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div id="existing-sources" class="px-3 pt-2 small text-secondary"></div>
+        <div class="px-3 pt-3"><h6 class="small text-secondary mb-2">dhcp-range</h6></div>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0 small">
+                <thead class="table-light">
+                    <tr><th style="width:20%">source</th><th>raw</th><th style="width:120px"></th></tr>
+                </thead>
+                <tbody id="existing-ranges"></tbody>
+            </table>
+        </div>
+        <div class="px-3 pt-3"><h6 class="small text-secondary mb-2">dhcp-host</h6></div>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0 small">
+                <thead class="table-light">
+                    <tr><th style="width:20%">source</th><th>raw</th><th style="width:120px"></th></tr>
+                </thead>
+                <tbody id="existing-static"></tbody>
+            </table>
+        </div>
+        <div class="px-3 pt-3"><h6 class="small text-secondary mb-2">dhcp-option</h6></div>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0 small">
+                <thead class="table-light">
+                    <tr><th style="width:20%">source</th><th>raw</th><th style="width:120px"></th></tr>
+                </thead>
+                <tbody id="existing-options"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Active leases -->
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-receipt text-secondary"></i>
+            <strong>現在のリース</strong>
+            <span class="text-secondary small">/var/lib/misc/dnsmasq.leases</span>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadLeases()">
+            <i class="bi bi-arrow-clockwise"></i> 更新
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>失効 (epoch)</th><th>MAC</th><th>IP</th><th>ホスト名</th><th>client-id</th></tr>
+                </thead>
+                <tbody id="lease-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let dhcp = { ranges: [], static_hosts: [], options: [] };
+
+async function refresh() {
+    const data = await api.get('/dhcp/api/config');
+    if (!data) return;
+    dhcp = data.dhcp || { ranges: [], static_hosts: [], options: [] };
+    renderRanges();
+    renderStatic();
+    renderOptions();
+    loadLeases();
+    loadExisting();
+}
+
+async function loadExisting() {
+    const data = await api.get('/dhcp/api/existing');
+    if (!data) return;
+    const fmt = (rows, tbodyId, kind) => {
+        const tbody = document.getElementById(tbodyId);
+        tbody.innerHTML = rows.length === 0
+            ? '<tr><td colspan="3" class="text-center text-secondary py-2">なし</td></tr>'
+            : rows.map(r => `
+                <tr>
+                    <td class="font-monospace text-secondary" style="width:20%">${escapeHtml(r.source)}</td>
+                    <td class="font-monospace text-break">${escapeHtml(r.raw)}</td>
+                    <td style="width:120px">
+                        <button class="btn btn-sm btn-outline-primary" onclick="importExisting('${kind}', '${escapeJs(r.raw)}')">
+                            <i class="bi bi-box-arrow-in-down"></i> 取り込み
+                        </button>
+                    </td>
+                </tr>`).join('');
+    };
+    fmt(data.ranges || [], 'existing-ranges', 'range');
+    fmt(data.static_hosts || [], 'existing-static', 'host');
+    fmt(data.options || [], 'existing-options', 'option');
+    const srcDiv = document.getElementById('existing-sources');
+    const sources = data.sources || [];
+    srcDiv.innerHTML = sources.length === 0
+        ? '<em>スキャン対象なし</em>'
+        : 'スキャン対象: ' + sources.map(s => `<code>${escapeHtml(s.name)}</code>`).join(', ');
+}
+
+function renderRanges() {
+    const tbody = document.getElementById('range-tbody');
+    tbody.innerHTML = (dhcp.ranges || []).length === 0
+        ? '<tr><td colspan="6" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dhcp.ranges.map(r => `
+            <tr>
+                <td class="font-monospace">${r.interface ? escapeHtml(r.interface) : '<span class="text-secondary">—</span>'}</td>
+                <td class="font-monospace">${escapeHtml(r.start)}</td>
+                <td class="font-monospace">${escapeHtml(r.end)}</td>
+                <td class="font-monospace">${r.netmask ? escapeHtml(r.netmask) : '<span class="text-secondary">—</span>'}</td>
+                <td class="font-monospace">${escapeHtml(r.lease)}</td>
+                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteRange('${r.id}')"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+function renderStatic() {
+    const tbody = document.getElementById('static-tbody');
+    tbody.innerHTML = (dhcp.static_hosts || []).length === 0
+        ? '<tr><td colspan="5" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dhcp.static_hosts.map(h => `
+            <tr>
+                <td class="font-monospace">${escapeHtml(h.mac)}</td>
+                <td class="font-monospace">${escapeHtml(h.ip)}</td>
+                <td class="font-monospace">${escapeHtml(h.hostname || '—')}</td>
+                <td class="font-monospace">${escapeHtml(h.lease || '—')}</td>
+                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteStatic('${h.id}')"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+function renderOptions() {
+    const tbody = document.getElementById('option-tbody');
+    tbody.innerHTML = (dhcp.options || []).length === 0
+        ? '<tr><td colspan="4" class="text-center text-secondary py-3">未登録</td></tr>'
+        : dhcp.options.map(o => `
+            <tr>
+                <td class="font-monospace">${escapeHtml(o.option)}</td>
+                <td class="font-monospace">${escapeHtml(o.value)}</td>
+                <td class="font-monospace">${escapeHtml(o.tag || '—')}</td>
+                <td><button class="btn btn-sm btn-outline-danger" onclick="deleteOption('${o.id}')"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+async function loadLeases() {
+    const data = await api.get('/dhcp/api/leases');
+    if (!data) return;
+    const leases = data.leases || [];
+    const tbody = document.getElementById('lease-tbody');
+    tbody.innerHTML = leases.length === 0
+        ? `<tr><td colspan="5" class="text-center text-secondary py-3">${escapeHtml(data.note || data.error || 'リースなし')}</td></tr>`
+        : leases.map(l => `
+            <tr>
+                <td class="font-monospace small">${escapeHtml(l.expires)}</td>
+                <td class="font-monospace">${escapeHtml(l.mac)}</td>
+                <td class="font-monospace">${escapeHtml(l.ip)}</td>
+                <td class="font-monospace">${escapeHtml(l.hostname)}</td>
+                <td class="font-monospace small text-secondary">${escapeHtml(l.client_id)}</td>
+            </tr>`).join('');
+}
+
+async function addRange() {
+    const payload = {
+        interface: document.getElementById('r-if').value.trim(),
+        start: document.getElementById('r-start').value.trim(),
+        end: document.getElementById('r-end').value.trim(),
+        netmask: document.getElementById('r-netmask').value.trim(),
+        lease: document.getElementById('r-lease').value.trim() || '12h',
+    };
+    if (!payload.start || !payload.end) return toast('開始・終了 IP を入力', true);
+    const res = await api.send('/dhcp/api/ranges', 'POST', payload);
+    if (res && res.ok) { toast('追加しました'); refresh(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function deleteRange(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dhcp/api/ranges/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function addStatic() {
+    const payload = {
+        mac: document.getElementById('s-mac').value.trim(),
+        ip: document.getElementById('s-ip').value.trim(),
+        hostname: document.getElementById('s-host').value.trim(),
+        lease: document.getElementById('s-lease').value.trim(),
+    };
+    if (!payload.mac || !payload.ip) return toast('MAC と IP を入力', true);
+    const res = await api.send('/dhcp/api/static-hosts', 'POST', payload);
+    if (res && res.ok) { toast('追加しました'); refresh(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function deleteStatic(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dhcp/api/static-hosts/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+async function addOption() {
+    const payload = {
+        option: document.getElementById('o-option').value.trim(),
+        value: document.getElementById('o-value').value.trim(),
+        tag: document.getElementById('o-tag').value.trim(),
+    };
+    if (!payload.option || !payload.value) return toast('option と value を入力', true);
+    const res = await api.send('/dhcp/api/options', 'POST', payload);
+    if (res && res.ok) { toast('追加しました'); refresh(); }
+    else if (res) toast(res.error || 'failed', true);
+}
+async function deleteOption(id) {
+    if (!confirm('削除しますか?')) return;
+    const res = await api.send(`/dhcp/api/options/${id}`, 'DELETE');
+    if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function importExisting(kind, raw) {
+    if (!confirm(`この ${kind} を GUI 管理に取り込みますか?\n\n${raw}\n\n注意: 元ファイル (/etc/dnsmasq.conf 等) のエントリは残るので、重複を避けるため手動でコメントアウトしてください。`)) return;
+    const res = await api.send('/dhcp/api/import', 'POST', { kind, raw });
+    if (res && res.ok) {
+        toast(`取り込み完了 (${kind})`);
+        refresh();
+    } else if (res) {
+        toast(res.error || '取り込み失敗', true);
+    }
+}
+
+refresh();
+</script>
+{% endblock %}

@@ -1,0 +1,5 @@
+Flask>=3.0,<4.0
+Werkzeug>=3.0,<4.0
+jsonschema>=4.0
+qrcode[pil]>=7.4
+gunicorn>=21.0
