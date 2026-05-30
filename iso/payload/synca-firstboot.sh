@@ -304,6 +304,7 @@ server {
     server_name ${server_name};
     ssl_certificate /etc/pki/server-gui/server-gui.crt;
     ssl_certificate_key /etc/pki/server-gui/server-gui.key;
+    client_max_body_size 64m;
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
         default_type "text/plain";

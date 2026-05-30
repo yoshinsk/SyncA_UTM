@@ -15,6 +15,7 @@ RPM_DIR_SRC="${RPM_DIR_SRC:-}"
 WGUI_BINARY="${WGUI_BINARY:-}"
 SYNC_PREPARE_ONLY="${SYNC_PREPARE_ONLY:-0}"
 SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-1}"
+SYNCA_PRIVATE_SMTP_DROPIN="${SYNCA_PRIVATE_SMTP_DROPIN:-}"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -76,6 +77,16 @@ copy_payload_files() {
     mkdir -p "${BUILD_DIR}/payload/synca/firewalld-profiles"
     install -m 0644 "${ROOT_DIR}/payload/firewalld-profiles/synca-utm-default.json" \
         "${BUILD_DIR}/payload/synca/firewalld-profiles/synca-utm-default.json"
+    if [[ -n "$SYNCA_PRIVATE_SMTP_DROPIN" ]]; then
+        if [[ ! -f "$SYNCA_PRIVATE_SMTP_DROPIN" ]]; then
+            echo "SYNCA_PRIVATE_SMTP_DROPIN does not exist: $SYNCA_PRIVATE_SMTP_DROPIN" >&2
+            exit 1
+        fi
+        mkdir -p "${BUILD_DIR}/payload/synca/private"
+        install -m 0600 "$SYNCA_PRIVATE_SMTP_DROPIN" \
+            "${BUILD_DIR}/payload/synca/private/server-gui-ddns-smtp.conf"
+        echo "Included private SMTP drop-in for internal ISO."
+    fi
     if [[ -n "$WGUI_BINARY" ]]; then
         install -m 0755 "$WGUI_BINARY" "${BUILD_DIR}/payload/synca/wireguard-ui"
     fi

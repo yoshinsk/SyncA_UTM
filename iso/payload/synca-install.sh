@@ -66,6 +66,20 @@ install_firewalld_profile() {
     fi
 }
 
+install_private_overrides() {
+    # Internal ISO builds may ship private systemd drop-ins from the build host.
+    # The public repository never stores these files.
+    local smtp_dropin="${INSTALLER_DIR}/private/server-gui-ddns-smtp.conf"
+    if [[ -f "$smtp_dropin" ]]; then
+        install -d -m 0750 /etc/systemd/system/server-gui.service.d
+        install -d -m 0750 /etc/systemd/system/server-gui-ddns.service.d
+        install -m 0600 "$smtp_dropin" \
+            /etc/systemd/system/server-gui.service.d/30-ddns-pin-smtp.conf
+        install -m 0600 "$smtp_dropin" \
+            /etc/systemd/system/server-gui-ddns.service.d/30-ddns-pin-smtp.conf
+    fi
+}
+
 write_systemd_units() {
     cat > /etc/systemd/system/server-gui.service <<'UNIT'
 [Unit]
@@ -191,6 +205,7 @@ main() {
     install_firewalld_profile
     install -m 0755 "${INSTALLER_DIR}/synca-firstboot.sh" /opt/synca-installer/synca-firstboot.sh
     write_systemd_units
+    install_private_overrides
     systemctl daemon-reload
 }
 

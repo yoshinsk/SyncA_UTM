@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 evidence/
 output/
+private/
 *.tar.gz
 *.tgz
 *.zip
@@ -16,3 +17,6 @@ output/
 *.p12
 *.pfx
 *.nmconnection
+*.secret
+*.secret.env
+server-gui-ddns-smtp.conf
