@@ -47,7 +47,15 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 - DDNS登録前に `dig @ns1.ddnsft.com <host>.ddnsft.com A +short` で既存登録を確認する。
 - 既に登録されているホスト名は通常登録を拒否する。
 - 自身で運用中のホスト名を上書きする場合のみ、4桁数字PINを入力すると登録を許可する。
-- 4桁PINは `syncautm@nsksys.com` にメール送信する。ISOには `bind-utils` と `/usr/sbin/sendmail` 互換MTAを同梱する。
+- 4桁PINは `syncautm@nsksys.com` にメール送信する。保存時に既存ホスト名を検出した場合はPINを自動発行する。
+- ISOには `bind-utils` と `/usr/sbin/sendmail` 互換MTAを同梱する。
+- 25/tcpで外部MXへ直接配送できない環境があるため、PINメールはSMTP submission設定も利用可能にする。
+  - `SYNCA_DDNS_PIN_SMTP_HOST`
+  - `SYNCA_DDNS_PIN_SMTP_PORT`
+  - `SYNCA_DDNS_PIN_SMTP_USER`
+  - `SYNCA_DDNS_PIN_SMTP_PASS`
+  - `SYNCA_DDNS_PIN_SMTP_FROM`
+  - `SYNCA_DDNS_PIN_SMTP_SSL`
 - DDNS認証ユーザーとパスワードは必要なサービスの場合のみ保存する。`ddnsft.com` の既定プリセットには認証情報を埋め込まない。
 - WAN IP確定後、登録済みDDNSプロバイダがある場合だけDDNS更新を行い、FQDN到達確認後にLet's Encrypt取得へ進む。
 

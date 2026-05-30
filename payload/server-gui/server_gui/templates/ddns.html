@@ -177,6 +177,7 @@
 let pModal = null;
 let editingId = null;
 let state = null;
+const DDNSFT_TEMPLATE = 'https://update.ddnsft.com/update/update.php?host={account}&dm={domain}&ip={ip}';
 
 document.addEventListener('DOMContentLoaded', () => {
     pModal = new bootstrap.Modal(document.getElementById('p-modal'));
@@ -215,7 +216,8 @@ function _applyHideAuth(hide) {
 function _isDdnsftForm() {
     const preset = document.getElementById('pe-preset-type').value;
     const domain = document.getElementById('pe-domain').value.trim().toLowerCase();
-    return preset === 'ddnsft' || domain === 'ddnsft.com';
+    const template = document.getElementById('pe-template').value.trim().toLowerCase();
+    return preset === 'ddnsft' || domain === 'ddnsft.com' || template.includes('update.ddnsft.com');
 }
 
 function _toggleDdnsftGuard() {
@@ -273,12 +275,12 @@ function openProviderModal(p) {
     document.getElementById('p-modal-title').textContent = p ? `プロバイダ編集: ${p.name}` : 'プロバイダ追加';
     document.getElementById('pe-name').value = p ? p.name : '';
     document.getElementById('pe-enabled').checked = p ? p.enabled : true;
-    document.getElementById('pe-template').value = p ? p.template : '';
+    document.getElementById('pe-template').value = p ? p.template : DDNSFT_TEMPLATE;
     document.getElementById('pe-account').value = p ? (p.account || '') : '';
-    document.getElementById('pe-domain').value = p ? (p.domain || '') : '';
+    document.getElementById('pe-domain').value = p ? (p.domain || '') : 'ddnsft.com';
     document.getElementById('pe-user').value = p ? (p.auth_user || '') : '';
     document.getElementById('pe-pass').value = p ? (p.auth_pass || '') : '';  // '***' on edit
-    document.getElementById('pe-preset-type').value = p ? (p.preset_type || 'custom') : 'custom';
+    document.getElementById('pe-preset-type').value = p ? (p.preset_type || 'custom') : 'ddnsft';
     document.getElementById('pe-overwrite-pin').value = '';
     document.getElementById('pe-ddnsft-guard-text').innerHTML = '保存時に <code>dig @ns1.ddnsft.com</code> で既存ホスト名を確認します。既に登録済みの場合、上書きにはメール送信された4桁PINが必要です。';
     // For known hide_auth presets, hide on edit too
@@ -301,13 +303,46 @@ async function submitProvider() {
     };
     if (!payload.name || !payload.template) return toast('名前と URL テンプレートは必須', true);
     if (!payload.account) return toast('account / host は必須', true);
-    const res = editingId
-        ? await api.send(`/ddns/api/providers/${editingId}`, 'PUT', payload)
-        : await api.send('/ddns/api/providers', 'POST', payload);
+    const res = await sendProvider(payload);
     if (!res) return;
     toast(editingId ? '更新しました' : '追加しました');
     pModal.hide();
     refresh();
+}
+
+async function sendProvider(payload) {
+    const url = editingId ? `/ddns/api/providers/${editingId}` : '/ddns/api/providers';
+    const method = editingId ? 'PUT' : 'POST';
+    try {
+        const response = await fetch(url, {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload),
+        });
+        let body = null;
+        try { body = await response.json(); } catch (_) {}
+        if (response.ok) return body;
+        if (body && body.requires_pin) {
+            document.getElementById('pe-preset-type').value = 'ddnsft';
+            document.getElementById('pe-domain').value = 'ddnsft.com';
+            _toggleDdnsftGuard();
+            const text = body.pin_sent
+                ? `${escapeHtml(body.fqdn)} は登録済みです。4桁PINを ${escapeHtml(body.sent_to)} に送信しました。有効期限: ${escapeHtml(body.expires_at || '')}`
+                : `${escapeHtml(body.fqdn || payload.account + '.ddnsft.com')} は登録済みです。上書きする場合は4桁PINを入力してください。`;
+            document.getElementById('pe-ddnsft-guard-text').innerHTML = `<span class="text-danger fw-semibold">${text}</span>`;
+            toast(body.error || '既存ホスト名です。PINを入力してください。', true);
+            return null;
+        }
+        toast((body && body.error) || `HTTP ${response.status}`, true);
+        return null;
+    } catch (e) {
+        toast('通信エラー: ' + e.message, true);
+        return null;
+    }
 }
 
 async function checkDdnsftHost() {

@@ -45,9 +45,11 @@ import logging
 import os
 import re
 import secrets
+import smtplib
 import urllib.error
 import urllib.request
 import uuid
+from email.message import EmailMessage
 from pathlib import Path
 
 from flask import Blueprint, Flask, current_app, jsonify, render_template, request
@@ -69,6 +71,12 @@ DDNSFT_DOMAIN = "ddnsft.com"
 DDNSFT_NS = "ns1.ddnsft.com"
 PIN_RECIPIENT = os.environ.get("SYNCA_DDNS_PIN_RECIPIENT", "syncautm@nsksys.com")
 PIN_TTL_SECONDS = int(os.environ.get("SYNCA_DDNS_PIN_TTL_SECONDS", "600"))
+SMTP_HOST = os.environ.get("SYNCA_DDNS_PIN_SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SYNCA_DDNS_PIN_SMTP_PORT", "465"))
+SMTP_USER = os.environ.get("SYNCA_DDNS_PIN_SMTP_USER", "")
+SMTP_PASS = os.environ.get("SYNCA_DDNS_PIN_SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SYNCA_DDNS_PIN_SMTP_FROM", "synca-utm@localhost")
+SMTP_SSL = os.environ.get("SYNCA_DDNS_PIN_SMTP_SSL", "1") not in ("0", "false", "False")
 
 # Built-in presets. Selecting one auto-fills the provider form. Credentials
 # baked in here are *defaults* — the admin can override them via the API once
@@ -360,34 +368,12 @@ def request_overwrite_pin():
     if not result["exists"]:
         return jsonify({"error": f"{fqdn} は未登録です。PINは不要です。"}), 400
 
-    pin = f"{secrets.randbelow(10000):04d}"
-    salt = secrets.token_hex(16)
-    now = _dt.datetime.now()
-    expires_at = now + _dt.timedelta(seconds=PIN_TTL_SECONDS)
-    message = (
-        "To: " + PIN_RECIPIENT + "\n"
-        "From: synca-utm@localhost\n"
-        "Subject: SyncA UTM DDNS overwrite PIN\n"
-        "Content-Type: text/plain; charset=UTF-8\n\n"
-        f"DDNSホスト名: {fqdn}\n"
-        f"上書き許可PIN: {pin}\n"
-        f"有効期限: {expires_at.isoformat(timespec='seconds')}\n"
-    )
-    sent = run(["/usr/sbin/sendmail", "-t"], stdin=message, timeout=10)
-    if not sent.ok:
-        return jsonify({"error": f"PINメール送信に失敗しました: {sent.stderr or sent.stdout}"}), 502
-
     with _store().transaction(MODULE_NAME, _default()) as data:
-        data["overwrite_pin"] = {
-            "fqdn": fqdn,
-            "salt": salt,
-            "pin_hash": _pin_hash(pin, salt),
-            "expires_at": expires_at.isoformat(timespec="seconds"),
-            "requested_at": now.isoformat(timespec="seconds"),
-            "sent_to": PIN_RECIPIENT,
-        }
-    return jsonify({"ok": True, "fqdn": fqdn, "sent_to": PIN_RECIPIENT,
-                    "expires_at": expires_at.isoformat(timespec="seconds")})
+        try:
+            issued = _issue_overwrite_pin(data, fqdn)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, **issued})
 
 
 # ---- helpers -----------------------------------------------------------
@@ -480,12 +466,94 @@ def _validate_ddnsft_overwrite_pin_if_needed(data: dict, new: dict, current: dic
         return None
     if _verify_overwrite_pin(data, fqdn, pin):
         return None
+    try:
+        issued = _issue_overwrite_pin(data, fqdn)
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "requires_pin": True, "fqdn": fqdn,
+                        "records": result["records"]}), 502
     return jsonify({
-        "error": f"{fqdn} は既にDDNSに登録されています。上書きする場合は4桁PINを入力してください。",
+        "error": f"{fqdn} は既にDDNSに登録されています。4桁PINを {PIN_RECIPIENT} に送信しました。",
         "requires_pin": True,
+        "pin_sent": True,
         "fqdn": fqdn,
         "records": result["records"],
+        **issued,
     }), 409
+
+
+def _issue_overwrite_pin(data: dict, fqdn: str) -> dict:
+    stored = data.get("overwrite_pin") or {}
+    if stored.get("fqdn") == fqdn:
+        try:
+            expires_at = _dt.datetime.fromisoformat(stored.get("expires_at", ""))
+        except ValueError:
+            expires_at = _dt.datetime.min
+        if expires_at > _dt.datetime.now():
+            return {
+                "fqdn": fqdn,
+                "sent_to": stored.get("sent_to") or PIN_RECIPIENT,
+                "expires_at": stored.get("expires_at"),
+                "pin_already_issued": True,
+            }
+
+    pin = f"{secrets.randbelow(10000):04d}"
+    salt = secrets.token_hex(16)
+    now = _dt.datetime.now()
+    expires_at = now + _dt.timedelta(seconds=PIN_TTL_SECONDS)
+    _send_pin_email(fqdn, pin, expires_at)
+    data["overwrite_pin"] = {
+        "fqdn": fqdn,
+        "salt": salt,
+        "pin_hash": _pin_hash(pin, salt),
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "requested_at": now.isoformat(timespec="seconds"),
+        "sent_to": PIN_RECIPIENT,
+    }
+    return {
+        "fqdn": fqdn,
+        "sent_to": PIN_RECIPIENT,
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "pin_already_issued": False,
+    }
+
+
+def _send_pin_email(fqdn: str, pin: str, expires_at: _dt.datetime) -> None:
+    subject = "SyncA UTM DDNS overwrite PIN"
+    body = (
+        f"DDNSホスト名: {fqdn}\n"
+        f"上書き許可PIN: {pin}\n"
+        f"有効期限: {expires_at.isoformat(timespec='seconds')}\n"
+    )
+    if SMTP_HOST:
+        msg = EmailMessage()
+        msg["To"] = PIN_RECIPIENT
+        msg["From"] = SMTP_FROM
+        msg["Subject"] = subject
+        msg.set_content(body)
+        try:
+            if SMTP_SSL:
+                server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)
+            else:
+                server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+                server.starttls()
+            with server:
+                if SMTP_USER:
+                    server.login(SMTP_USER, SMTP_PASS)
+                server.send_message(msg)
+            return
+        except Exception as e:
+            raise RuntimeError(f"PINメール送信に失敗しました(SMTP): {e}") from e
+
+    message = (
+        "To: " + PIN_RECIPIENT + "\n"
+        "From: " + SMTP_FROM + "\n"
+        "Subject: " + subject + "\n"
+        "Content-Type: text/plain; charset=UTF-8\n\n"
+        + body
+    )
+    sent = run(["/usr/sbin/sendmail", "-t"], stdin=message, timeout=10)
+    if not sent.ok:
+        raise RuntimeError(f"PINメール送信に失敗しました(sendmail): {sent.stderr or sent.stdout}")
 
 
 def _pin_hash(pin: str, salt: str) -> str:
