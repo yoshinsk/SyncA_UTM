@@ -50,6 +50,7 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 - 4桁PINは `syncautm@nsksys.com` にメール送信する。保存時に既存ホスト名を検出した場合はPINを自動発行する。
 - ISOには `bind-utils` と `/usr/sbin/sendmail` 互換MTAを同梱する。
 - 25/tcpで外部MXへ直接配送できない環境があるため、PINメールはSMTP submission設定も利用可能にする。
+- SMTP認証情報は公開GitHubやISO内の固定値として内包しない。初回設定または出荷時設定で、実機ローカルのsystemd drop-inまたはsystemd credentialに保存する。
   - `SYNCA_DDNS_PIN_SMTP_HOST`
   - `SYNCA_DDNS_PIN_SMTP_PORT`
   - `SYNCA_DDNS_PIN_SMTP_USER`
