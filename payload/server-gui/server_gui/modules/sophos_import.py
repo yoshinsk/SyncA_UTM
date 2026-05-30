@@ -161,6 +161,7 @@ def _build_plan(xml_bytes: bytes) -> dict:
     header = root.find("header")
     nodes = root.find("nodes")
     objects = _collect_objects(root)
+    object_index = _object_index(root)
     supported = []
     unsupported_counts: dict[str, int] = {}
     remote_access_count = 0
@@ -196,6 +197,8 @@ def _build_plan(xml_bytes: bytes) -> dict:
             "secret_fields_detected": secret_count,
         },
         "supported": supported[:500],
+        "ui_preview": _build_ui_preview(object_index),
+        "object_index": object_index,
         "unsupported_counts": dict(sorted(unsupported_counts.items())),
         "notes": [
             "Remote access settings are intentionally ignored.",
@@ -232,6 +235,32 @@ def _collect_objects(root: ET.Element) -> list[dict]:
     return out
 
 
+def _object_index(root: ET.Element) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for element in root.iter():
+        if element.attrib.get("object") != "1":
+            continue
+        out[element.tag] = {
+            "tag": element.tag,
+            "descr": (element.findtext("descr") or "").strip(),
+            "fields": _field_map(element),
+        }
+    return out
+
+
+def _field_map(element: ET.Element) -> dict[str, str]:
+    content = element.find("content")
+    if content is None:
+        return {}
+    fields: dict[str, str] = {}
+    for child in list(content):
+        key = (child.findtext("descr") or child.tag).strip()
+        value = (child.findtext("content") or "").strip()
+        if key:
+            fields[key] = value
+    return fields
+
+
 def _direct_contents(element: ET.Element) -> list[str]:
     values: list[str] = []
     for content in element.findall("content"):
@@ -239,6 +268,179 @@ def _direct_contents(element: ET.Element) -> list[str]:
         if text:
             values.append(text)
     return values
+
+
+def _build_ui_preview(index: dict[str, dict]) -> dict:
+    return {
+        "network": _preview_network(index),
+        "strongswan": _preview_ipsec(index),
+        "nginx": _preview_nginx(index),
+        "certificates": _preview_certificates(index),
+    }
+
+
+def _preview_network(index: dict[str, dict]) -> list[dict]:
+    rows = []
+    for ref, obj in sorted(index.items()):
+        f = obj.get("fields", {})
+        if "interface hardware" not in f or "primary address" not in f:
+            continue
+        primary = _resolve_address(index, f.get("primary address", ""))
+        secondary = [_resolve_address(index, r) for r in _split_refs(f.get("additional addresses", ""))]
+        secondary = [v for v in secondary if v]
+        if f.get("username") or f.get("password"):
+            mode = "PPPoE"
+            form = {
+                "WAN type": "PPPoE",
+                "Connection name": f.get("name", ""),
+                "PPPoE user": f.get("username", ""),
+                "PPPoE password": f.get("password", ""),
+                "MTU": f.get("maximum transmission unit", ""),
+                "External IP": "not required for PPPoE; Sophos reference was " + (primary or "empty"),
+            }
+        else:
+            mode = "Static / LAN"
+            form = {
+                "Connection name": f.get("name", ""),
+                "IPv4 address": primary,
+                "Secondary IPv4 addresses": ", ".join(secondary),
+                "VLAN tag": f.get("VLAN tag", ""),
+                "MTU": f.get("maximum transmission unit", ""),
+            }
+        rows.append({"ref": ref, "mode": mode, "enabled": f.get("status switch") == "1", "form": form})
+    return rows
+
+
+def _preview_ipsec(index: dict[str, dict]) -> list[dict]:
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "IPsec site-to-site connection":
+            continue
+        f = obj.get("fields", {})
+        if not f.get("name"):
+            continue
+        gw = _fields(index, f.get("remote gateway", ""))
+        auth = _fields(index, gw.get("peer authentication configuration", ""))
+        policy = _fields(index, f.get("policy", ""))
+        local_networks = [_resolve_network(index, r) for r in _split_refs(f.get("network list", ""))]
+        remote_networks = [_resolve_network(index, r) for r in _split_refs(gw.get("remote subnet list", ""))]
+        form = {
+            "Tunnel name": f.get("name", ""),
+            "Enabled": "yes" if f.get("status switch") == "1" else "no",
+            "Local interface": _name(index, f.get("interface", "")),
+            "Remote gateway": _resolve_host(index, gw.get("remote host address", "")),
+            "Local subnets": ", ".join(v for v in local_networks if v),
+            "Remote subnets": ", ".join(v for v in remote_networks if v),
+            "Pre-shared key": auth.get("preshared key", ""),
+            "Local ID": auth.get("VPN ID", ""),
+            "IKE encryption": policy.get("IKE SA encryption algorithm", ""),
+            "IKE hash": policy.get("IKE SA authentication algorithm", ""),
+            "IKE DH group": policy.get("IKE SA Diffie-Hellman group", ""),
+            "ESP encryption": policy.get("IPsec SA encryption algorithm", ""),
+            "ESP hash": policy.get("IPsec SA authentication algorithm", ""),
+            "PFS group": policy.get("IPsec SA PFS Diffie-Hellman group", ""),
+            "Auto firewall rule": "yes" if f.get("auto-packetfilter rule switch") == "1" else "no",
+        }
+        rows.append({"ref": ref, "form": form})
+    return rows
+
+
+def _preview_nginx(index: dict[str, dict]) -> list[dict]:
+    backends_by_name = {}
+    for ref, obj in index.items():
+        if obj.get("descr") != "real webserver":
+            continue
+        f = obj.get("fields", {})
+        backends_by_name[f.get("name", "")] = (ref, f)
+
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "virtual webserver":
+            continue
+        f = obj.get("fields", {})
+        backend_ref, backend = backends_by_name.get(f.get("name", ""), ("", {}))
+        backend_scheme = "https" if backend.get("SSL switch") == "1" else "http"
+        backend_host = _resolve_host(index, backend.get("host", ""))
+        backend_port = backend.get("port", "")
+        form = {
+            "Vhost name": f.get("name", ""),
+            "Enabled": "yes" if f.get("status switch") == "1" else "no",
+            "Public hostnames": f.get("domain list", ""),
+            "Listen scheme": f.get("type", ""),
+            "Listen port": f.get("port", ""),
+            "Backend name": backend.get("name", ""),
+            "Backend URL": f"{backend_scheme}://{backend_host}:{backend_port}" if backend else "",
+            "Preserve host header": "yes" if f.get("switch to preserve host header") == "1" else "no",
+            "Redirect HTTP to HTTPS": "yes" if f.get("implicit redirection from http to https switch") == "1" else "no",
+        }
+        rows.append({"ref": ref, "backend_ref": backend_ref, "form": form})
+    return rows
+
+
+def _preview_certificates(index: dict[str, dict]) -> list[dict]:
+    nginx_domains = set()
+    for obj in index.values():
+        if obj.get("descr") == "virtual webserver":
+            for value in re.split(r"[\s,]+", obj.get("fields", {}).get("domain list", "")):
+                if value:
+                    nginx_domains.add(value)
+
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "X509 certificate with private key":
+            continue
+        f = obj.get("fields", {})
+        name = f.get("name", "")
+        if "(X509 User Cert)" in name:
+            continue
+        usage = "Nginx candidate" if name in nginx_domains else "Reference only"
+        if "WebAdmin certificate" in name:
+            usage = "Skip: WebAdmin/management certificate"
+        rows.append({
+            "ref": ref,
+            "usage": usage,
+            "form": {
+                "Certificate name": name,
+                "Import private key": "yes" if f.get("private key") else "no",
+                "Import certificate": "yes" if f.get("certificate") else "no",
+            },
+        })
+    return rows
+
+
+def _fields(index: dict[str, dict], ref: str) -> dict[str, str]:
+    return index.get(ref, {}).get("fields", {})
+
+
+def _name(index: dict[str, dict], ref: str) -> str:
+    return _fields(index, ref).get("name", ref)
+
+
+def _resolve_address(index: dict[str, dict], ref: str) -> str:
+    f = _fields(index, ref)
+    addr = f.get("IPv4 address") or f.get("address")
+    mask = f.get("IPv4 netmask")
+    if addr and mask:
+        return f"{addr}/{mask}"
+    return addr or ref
+
+
+def _resolve_network(index: dict[str, dict], ref: str) -> str:
+    f = _fields(index, ref)
+    addr = f.get("IPv4 address")
+    mask = f.get("IPv4 netmask")
+    if addr and mask:
+        return f"{addr}/{mask}"
+    return f.get("name", ref)
+
+
+def _resolve_host(index: dict[str, dict], ref: str) -> str:
+    f = _fields(index, ref)
+    return f.get("hostname") or f.get("IPv4 address") or f.get("name") or ref
+
+
+def _split_refs(value: str) -> list[str]:
+    return [v for v in re.split(r"[\s,]+", value or "") if v]
 
 
 def _secret_fields(obj: dict) -> list[dict]:

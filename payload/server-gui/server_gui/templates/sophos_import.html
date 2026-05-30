@@ -77,6 +77,9 @@
         <div class="card-body">
             <div id="summary" class="mb-3"></div>
             <ul id="notes" class="small text-secondary"></ul>
+            <div id="synca-preview"></div>
+            <hr>
+            <div class="small text-secondary mb-2">Raw Sophos object preview</div>
             <div id="target-preview"></div>
             <details class="mt-3">
                 <summary class="small text-secondary">Raw JSON</summary>
@@ -193,9 +196,59 @@ function renderSophosPlan(data, title = '') {
             <div class="col-12"><strong>targets:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
         </div>`;
     document.getElementById('notes').innerHTML = (data.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+    renderSyncaPreview(data.ui_preview || {});
     renderTargetPreview(data.supported || []);
     document.getElementById('plan-json').textContent = JSON.stringify(data, null, 2);
     document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderSyncaPreview(preview) {
+    const sections = [
+        ['network', 'Network tab preview'],
+        ['strongswan', 'StrongSwan tab preview'],
+        ['nginx', 'Nginx reverse proxy preview'],
+        ['certificates', 'Certificate import preview'],
+    ];
+    document.getElementById('synca-preview').innerHTML = sections
+        .filter(([key]) => (preview[key] || []).length)
+        .map(([key, title]) => renderFormPreview(title, preview[key]))
+        .join('') || '<div class="alert alert-secondary small">No SyncA form preview is available for this plan. Re-save the XML with the current version to generate a detailed preview.</div>';
+}
+
+function renderFormPreview(title, rows) {
+    return `<div class="border rounded-2 mb-3">
+        <div class="bg-primary-subtle px-2 py-1 d-flex justify-content-between">
+            <strong>${escapeHtml(title)}</strong>
+            <span class="badge bg-primary">${rows.length}</span>
+        </div>
+        <div class="accordion accordion-flush">
+            ${rows.map((row, idx) => renderFormPreviewRow(title, row, idx)).join('')}
+        </div>
+    </div>`;
+}
+
+function renderFormPreviewRow(title, row, idx) {
+    const form = row.form || {};
+    const head = form['Tunnel name'] || form['Connection name'] || form['Vhost name'] || form['Certificate name'] || row.ref || `item ${idx + 1}`;
+    const rows = Object.entries(form).map(([k, v]) => `<tr>
+        <th class="small text-secondary" style="width:220px">${escapeHtml(k)}</th>
+        <td class="font-monospace small">${escapeHtml(v || '')}</td>
+    </tr>`).join('');
+    const id = `${title.replace(/[^A-Za-z0-9]/g, '')}-${idx}`;
+    return `<div class="accordion-item">
+        <h2 class="accordion-header">
+            <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#${id}">
+                <span class="fw-semibold">${escapeHtml(head)}</span>
+                ${row.mode ? `<span class="badge bg-secondary ms-2">${escapeHtml(row.mode)}</span>` : ''}
+                ${row.enabled === false ? '<span class="badge bg-warning-subtle text-warning-emphasis ms-2">disabled</span>' : ''}
+            </button>
+        </h2>
+        <div id="${id}" class="accordion-collapse collapse">
+            <div class="accordion-body p-0">
+                <table class="table table-sm mb-0"><tbody>${rows}</tbody></table>
+            </div>
+        </div>
+    </div>`;
 }
 
 function renderTargetPreview(items) {
