@@ -3,5 +3,7 @@
 
 # Installer and helper scripts are executed on Linux build/install hosts.
 *.sh text eol=lf
+*.ks text eol=lf
 iso/payload/* text eol=lf
+iso/kickstart/* text eol=lf
 scripts/* text eol=lf
