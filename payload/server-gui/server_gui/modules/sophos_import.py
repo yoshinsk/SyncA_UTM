@@ -201,9 +201,9 @@ def _build_plan(xml_bytes: bytes) -> dict:
         "object_index": object_index,
         "unsupported_counts": dict(sorted(unsupported_counts.items())),
         "notes": [
-            "Remote access settings are intentionally ignored.",
-            "Web proxy / webserver protection items are mapped to the Nginx migration target.",
-            "This endpoint creates a reviewable import plan; applying the plan should be done per target subsystem.",
+            "リモートアクセス設定は意図的に除外しています。",
+            "Web proxy / Webserver Protection は Nginx リバースプロキシ移行対象として扱います。",
+            "この画面では取込前の確認用プランを作成します。実適用は各機能ごとの変換ルール確認後に行います。",
         ],
     }
 
@@ -273,6 +273,7 @@ def _direct_contents(element: ET.Element) -> list[str]:
 def _build_ui_preview(index: dict[str, dict]) -> dict:
     return {
         "network": _preview_network(index),
+        "static_routes": _preview_static_routes(index),
         "strongswan": _preview_ipsec(index),
         "nginx": _preview_nginx(index),
         "certificates": _preview_certificates(index),
@@ -291,23 +292,53 @@ def _preview_network(index: dict[str, dict]) -> list[dict]:
         if f.get("username") or f.get("password"):
             mode = "PPPoE"
             form = {
-                "WAN type": "PPPoE",
-                "Connection name": f.get("name", ""),
-                "PPPoE user": f.get("username", ""),
-                "PPPoE password": f.get("password", ""),
+                "WAN種別": "PPPoE",
+                "接続名": f.get("name", ""),
+                "PPPoEユーザー": f.get("username", ""),
+                "PPPoEパスワード": f.get("password", ""),
                 "MTU": f.get("maximum transmission unit", ""),
-                "External IP": "not required for PPPoE; Sophos reference was " + (primary or "empty"),
+                "External IP": "PPPoEでは入力不要。Sophos側の参考値: " + (primary or "空"),
             }
         else:
             mode = "Static / LAN"
             form = {
-                "Connection name": f.get("name", ""),
-                "IPv4 address": primary,
-                "Secondary IPv4 addresses": ", ".join(secondary),
-                "VLAN tag": f.get("VLAN tag", ""),
+                "接続名": f.get("name", ""),
+                "IPv4アドレス": primary,
+                "セカンダリIPv4アドレス": ", ".join(secondary),
+                "VLANタグ": f.get("VLAN tag", ""),
                 "MTU": f.get("maximum transmission unit", ""),
             }
         rows.append({"ref": ref, "mode": mode, "enabled": f.get("status switch") == "1", "form": form})
+    return rows
+
+
+def _preview_static_routes(index: dict[str, dict]) -> list[dict]:
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "static route":
+            continue
+        f = obj.get("fields", {})
+        destination = _resolve_network(index, f.get("destination network", ""))
+        route_type = f.get("route type", "")
+        target_ref = f.get("target", "")
+        if route_type == "itf":
+            gateway = ""
+            interface = _name(index, target_ref)
+        else:
+            gateway = _resolve_host(index, target_ref)
+            interface = ""
+        rows.append({
+            "ref": ref,
+            "enabled": f.get("status switch") == "1",
+            "form": {
+                "宛先ネットワーク": destination,
+                "ゲートウェイ": gateway or "直接接続 / interface route",
+                "接続プロファイル": interface,
+                "メトリック": f.get("route metric", ""),
+                "Sophos route type": route_type,
+                "コメント": f.get("comment", ""),
+            },
+        })
     return rows
 
 
@@ -325,21 +356,21 @@ def _preview_ipsec(index: dict[str, dict]) -> list[dict]:
         local_networks = [_resolve_network(index, r) for r in _split_refs(f.get("network list", ""))]
         remote_networks = [_resolve_network(index, r) for r in _split_refs(gw.get("remote subnet list", ""))]
         form = {
-            "Tunnel name": f.get("name", ""),
-            "Enabled": "yes" if f.get("status switch") == "1" else "no",
-            "Local interface": _name(index, f.get("interface", "")),
-            "Remote gateway": _resolve_host(index, gw.get("remote host address", "")),
-            "Local subnets": ", ".join(v for v in local_networks if v),
-            "Remote subnets": ", ".join(v for v in remote_networks if v),
-            "Pre-shared key": auth.get("preshared key", ""),
-            "Local ID": auth.get("VPN ID", ""),
-            "IKE encryption": policy.get("IKE SA encryption algorithm", ""),
-            "IKE hash": policy.get("IKE SA authentication algorithm", ""),
-            "IKE DH group": policy.get("IKE SA Diffie-Hellman group", ""),
-            "ESP encryption": policy.get("IPsec SA encryption algorithm", ""),
-            "ESP hash": policy.get("IPsec SA authentication algorithm", ""),
-            "PFS group": policy.get("IPsec SA PFS Diffie-Hellman group", ""),
-            "Auto firewall rule": "yes" if f.get("auto-packetfilter rule switch") == "1" else "no",
+            "トンネル名": f.get("name", ""),
+            "有効": "はい" if f.get("status switch") == "1" else "いいえ",
+            "ローカルインターフェース": _name(index, f.get("interface", "")),
+            "対向ゲートウェイ": _resolve_host(index, gw.get("remote host address", "")),
+            "ローカルサブネット": ", ".join(v for v in local_networks if v),
+            "対向サブネット": ", ".join(v for v in remote_networks if v),
+            "事前共有鍵(PSK)": auth.get("preshared key", ""),
+            "ローカルID": auth.get("VPN ID", ""),
+            "IKE暗号": policy.get("IKE SA encryption algorithm", ""),
+            "IKEハッシュ": policy.get("IKE SA authentication algorithm", ""),
+            "IKE DHグループ": policy.get("IKE SA Diffie-Hellman group", ""),
+            "ESP暗号": policy.get("IPsec SA encryption algorithm", ""),
+            "ESPハッシュ": policy.get("IPsec SA authentication algorithm", ""),
+            "PFSグループ": policy.get("IPsec SA PFS Diffie-Hellman group", ""),
+            "Firewall自動許可": "はい" if f.get("auto-packetfilter rule switch") == "1" else "いいえ",
         }
         rows.append({"ref": ref, "form": form})
     return rows
@@ -363,15 +394,15 @@ def _preview_nginx(index: dict[str, dict]) -> list[dict]:
         backend_host = _resolve_host(index, backend.get("host", ""))
         backend_port = backend.get("port", "")
         form = {
-            "Vhost name": f.get("name", ""),
-            "Enabled": "yes" if f.get("status switch") == "1" else "no",
-            "Public hostnames": f.get("domain list", ""),
-            "Listen scheme": f.get("type", ""),
-            "Listen port": f.get("port", ""),
-            "Backend name": backend.get("name", ""),
-            "Backend URL": f"{backend_scheme}://{backend_host}:{backend_port}" if backend else "",
-            "Preserve host header": "yes" if f.get("switch to preserve host header") == "1" else "no",
-            "Redirect HTTP to HTTPS": "yes" if f.get("implicit redirection from http to https switch") == "1" else "no",
+            "vhost名": f.get("name", ""),
+            "有効": "はい" if f.get("status switch") == "1" else "いいえ",
+            "公開ホスト名": f.get("domain list", ""),
+            "待受スキーム": f.get("type", ""),
+            "待受ポート": f.get("port", ""),
+            "バックエンド名": backend.get("name", ""),
+            "バックエンドURL": f"{backend_scheme}://{backend_host}:{backend_port}" if backend else "",
+            "Hostヘッダ維持": "はい" if f.get("switch to preserve host header") == "1" else "いいえ",
+            "HTTPからHTTPSへリダイレクト": "はい" if f.get("implicit redirection from http to https switch") == "1" else "いいえ",
         }
         rows.append({"ref": ref, "backend_ref": backend_ref, "form": form})
     return rows
@@ -393,16 +424,16 @@ def _preview_certificates(index: dict[str, dict]) -> list[dict]:
         name = f.get("name", "")
         if "(X509 User Cert)" in name:
             continue
-        usage = "Nginx candidate" if name in nginx_domains else "Reference only"
+        usage = "Nginx候補" if name in nginx_domains else "参考のみ"
         if "WebAdmin certificate" in name:
-            usage = "Skip: WebAdmin/management certificate"
+            usage = "除外: WebAdmin/管理証明書"
         rows.append({
             "ref": ref,
             "usage": usage,
             "form": {
-                "Certificate name": name,
-                "Import private key": "yes" if f.get("private key") else "no",
-                "Import certificate": "yes" if f.get("certificate") else "no",
+                "証明書名": name,
+                "秘密鍵の取込": "はい" if f.get("private key") else "いいえ",
+                "証明書の取込": "はい" if f.get("certificate") else "いいえ",
             },
         })
     return rows

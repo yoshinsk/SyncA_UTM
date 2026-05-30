@@ -1,25 +1,25 @@
 {% extends "base.html" %}
-{% block title %}Sophos Import - SyncA UTM{% endblock %}
+{% block title %}Sophos取込 - SyncA UTM{% endblock %}
 {% block content %}
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h1 class="h3 mb-0 d-flex align-items-center gap-2">
-        <i class="bi bi-box-arrow-in-down text-primary"></i> Sophos SG UTM Import
+        <i class="bi bi-box-arrow-in-down text-primary"></i> Sophos SG UTM 取込
     </h1>
     <button id="reload-plans-btn" type="button" class="btn btn-outline-secondary btn-sm">
-        <i class="bi bi-arrow-clockwise"></i> Reload plans
+        <i class="bi bi-arrow-clockwise"></i> プラン再読込
     </button>
 </div>
 
 <div class="alert alert-warning small">
-    Sophos XML import is parsed into a reviewable plan first. Remote access settings are ignored.
-    Web proxy / Webserver Protection entries are treated as Nginx migration targets.
+    Sophos XMLを解析し、SyncA UTMの各GUI画面に入力する値として確認できるプレビューを作成します。
+    リモートアクセス設定は除外し、Web proxy / Webserver ProtectionはNginxリバースプロキシの移行対象として扱います。
 </div>
 
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-filetype-xml text-secondary"></i>
-        <strong>XML Upload</strong>
+        <strong>XML読込</strong>
     </div>
     <div class="card-body">
         <div class="row g-2 align-items-end">
@@ -29,12 +29,12 @@
             </div>
             <div class="col-md-2">
                 <button id="preview-btn" type="button" class="btn btn-outline-primary w-100">
-                    <i class="bi bi-search"></i> Analyze
+                    <i class="bi bi-search"></i> 解析
                 </button>
             </div>
             <div class="col-md-2">
                 <button id="save-btn" type="button" class="btn btn-primary w-100">
-                    <i class="bi bi-save"></i> Save plan
+                    <i class="bi bi-save"></i> プラン保存
                 </button>
             </div>
         </div>
@@ -45,23 +45,23 @@
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-list-check text-secondary"></i>
-        <strong>Saved Plans</strong>
+        <strong>保存済みプラン</strong>
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-sm align-middle mb-0">
                 <thead>
                 <tr>
-                    <th>Plan</th>
+                    <th>プラン</th>
                     <th>Release</th>
-                    <th>Supported</th>
-                    <th>Secrets</th>
-                    <th>Updated</th>
+                    <th>対応数</th>
+                    <th>秘密情報</th>
+                    <th>更新日時</th>
                     <th></th>
                 </tr>
                 </thead>
                 <tbody id="plans-body">
-                <tr><td colspan="6" class="text-secondary small p-3">Loading...</td></tr>
+                <tr><td colspan="6" class="text-secondary small p-3">読込中...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -71,7 +71,7 @@
 <div id="result" class="d-none">
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
-            <strong>Import Preview</strong>
+            <strong>取込プレビュー</strong>
             <span id="preview-title" class="text-secondary small"></span>
         </div>
         <div class="card-body">
@@ -79,7 +79,7 @@
             <ul id="notes" class="small text-secondary"></ul>
             <div id="synca-preview"></div>
             <hr>
-            <div class="small text-secondary mb-2">Raw Sophos object preview</div>
+            <div class="small text-secondary mb-2">Sophosオブジェクト詳細</div>
             <div id="target-preview"></div>
             <details class="mt-3">
                 <summary class="small text-secondary">Raw JSON</summary>
@@ -120,7 +120,7 @@ function showImportError(message) {
 
 async function sendSophosXml(path) {
     const file = document.getElementById('xml-file').files[0];
-    if (!file) throw new Error('Select an XML file.');
+    if (!file) throw new Error('XMLファイルを選択してください。');
     const form = new FormData();
     form.append('xml', file);
     const response = await fetch(path, {
@@ -133,7 +133,7 @@ async function sendSophosXml(path) {
     try {
         data = await response.json();
     } catch (e) {
-        throw new Error(`Response is not JSON. HTTP ${response.status}`);
+        throw new Error(`サーバ応答をJSONとして読めませんでした。HTTP ${response.status}`);
     }
     if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
@@ -141,12 +141,12 @@ async function sendSophosXml(path) {
 
 async function loadSavedPlans() {
     const body = document.getElementById('plans-body');
-    body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">Loading...</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">読込中...</td></tr>';
     try {
         const data = await api.get('/sophos-import/api/plans');
         const plans = data?.plans || [];
         if (!plans.length) {
-            body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">No saved plans.</td></tr>';
+            body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">保存済みプランはありません。</td></tr>';
             return;
         }
         body.innerHTML = plans.map(p => {
@@ -159,7 +159,7 @@ async function loadSavedPlans() {
                 <td class="small text-secondary">${escapeHtml(p.mtime || '')}</td>
                 <td class="text-end">
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadPlan('${escapeJs(p.name)}')">
-                        <i class="bi bi-eye"></i> Preview
+                        <i class="bi bi-eye"></i> プレビュー
                     </button>
                 </td>
             </tr>`;
@@ -170,11 +170,11 @@ async function loadSavedPlans() {
 }
 
 async function loadPlan(name) {
-    setImportBusy(true, `Loading ${name}...`);
+    setImportBusy(true, `${name} を読み込んでいます...`);
     try {
         const data = await api.get(`/sophos-import/api/plans/${encodeURIComponent(name)}`);
         renderSophosPlan(data, name);
-        setImportBusy(false, `Loaded: ${name}`);
+        setImportBusy(false, `読み込みました: ${name}`);
     } catch (e) {
         showImportError(e.message || String(e));
     } finally {
@@ -185,15 +185,15 @@ async function loadPlan(name) {
 
 function renderSophosPlan(data, title = '') {
     document.getElementById('result').classList.remove('d-none');
-    document.getElementById('preview-title').textContent = title || 'Unsaved preview';
+    document.getElementById('preview-title').textContent = title || '未保存プレビュー';
     const summary = data.summary || {};
     document.getElementById('summary').innerHTML = `
         <div class="row g-2 small">
             <div class="col-md-3"><strong>release:</strong> <code>${escapeHtml((data.format || {}).release || '-')}</code></div>
-            <div class="col-md-3"><strong>supported:</strong> ${summary.supported_items || 0}</div>
-            <div class="col-md-3"><strong>remote access ignored:</strong> ${summary.remote_access_ignored || 0}</div>
-            <div class="col-md-3"><strong>secret fields:</strong> ${summary.secret_fields_detected || 0}</div>
-            <div class="col-12"><strong>targets:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
+            <div class="col-md-3"><strong>対応対象:</strong> ${summary.supported_items || 0}</div>
+            <div class="col-md-3"><strong>リモートアクセス除外:</strong> ${summary.remote_access_ignored || 0}</div>
+            <div class="col-md-3"><strong>秘密情報:</strong> ${summary.secret_fields_detected || 0}</div>
+            <div class="col-12"><strong>分類:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
         </div>`;
     document.getElementById('notes').innerHTML = (data.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
     renderSyncaPreview(data.ui_preview || {});
@@ -204,15 +204,16 @@ function renderSophosPlan(data, title = '') {
 
 function renderSyncaPreview(preview) {
     const sections = [
-        ['network', 'Network tab preview'],
-        ['strongswan', 'StrongSwan tab preview'],
-        ['nginx', 'Nginx reverse proxy preview'],
-        ['certificates', 'Certificate import preview'],
+        ['network', 'ネットワークタブ: インターフェース'],
+        ['static_routes', 'ネットワークタブ: スタティックルート'],
+        ['strongswan', 'StrongSwanタブ: Site-to-Site VPN'],
+        ['nginx', 'Nginxタブ: リバースプロキシ'],
+        ['certificates', '証明書タブ: 取込候補'],
     ];
     document.getElementById('synca-preview').innerHTML = sections
         .filter(([key]) => (preview[key] || []).length)
         .map(([key, title]) => renderFormPreview(title, preview[key]))
-        .join('') || '<div class="alert alert-secondary small">No SyncA form preview is available for this plan. Re-save the XML with the current version to generate a detailed preview.</div>';
+        .join('') || '<div class="alert alert-secondary small">このプランにはSyncAフォームプレビューがありません。現在のバージョンでXMLを再解析または再保存してください。</div>';
 }
 
 function renderFormPreview(title, rows) {
@@ -229,7 +230,9 @@ function renderFormPreview(title, rows) {
 
 function renderFormPreviewRow(title, row, idx) {
     const form = row.form || {};
-    const head = form['Tunnel name'] || form['Connection name'] || form['Vhost name'] || form['Certificate name'] || row.ref || `item ${idx + 1}`;
+    const head = form['トンネル名'] || form['接続名'] || form['vhost名'] || form['証明書名'] ||
+        form['Tunnel name'] || form['Connection name'] || form['Vhost name'] || form['Certificate name'] ||
+        form['宛先ネットワーク'] || row.ref || `項目 ${idx + 1}`;
     const rows = Object.entries(form).map(([k, v]) => `<tr>
         <th class="small text-secondary" style="width:220px">${escapeHtml(k)}</th>
         <td class="font-monospace small">${escapeHtml(v || '')}</td>
@@ -240,7 +243,7 @@ function renderFormPreviewRow(title, row, idx) {
             <button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#${id}">
                 <span class="fw-semibold">${escapeHtml(head)}</span>
                 ${row.mode ? `<span class="badge bg-secondary ms-2">${escapeHtml(row.mode)}</span>` : ''}
-                ${row.enabled === false ? '<span class="badge bg-warning-subtle text-warning-emphasis ms-2">disabled</span>' : ''}
+                ${row.enabled === false ? '<span class="badge bg-warning-subtle text-warning-emphasis ms-2">無効</span>' : ''}
             </button>
         </h2>
         <div id="${id}" class="accordion-collapse collapse">
@@ -272,7 +275,7 @@ function renderTargetCard(target, items) {
             .join(', ');
         const contents = (item.contents || []).slice(0, 3).map(v => compact(v)).join(' / ');
         const secretBadge = (item.secrets || []).length
-            ? `<span class="badge bg-warning-subtle text-warning-emphasis ms-1">secret ${(item.secrets || []).length}</span>`
+            ? `<span class="badge bg-warning-subtle text-warning-emphasis ms-1">秘密情報 ${(item.secrets || []).length}</span>`
             : '';
         return `<tr>
             <td class="font-monospace small">${escapeHtml(item.tag || '')}</td>
@@ -282,7 +285,7 @@ function renderTargetCard(target, items) {
         </tr>`;
     }).join('');
     const more = items.length > 80
-        ? `<div class="text-secondary small px-2 pb-2">Showing first 80 of ${items.length} items.</div>`
+        ? `<div class="text-secondary small px-2 pb-2">${items.length}件中、先頭80件を表示しています。</div>`
         : '';
     return `<div class="border rounded-2 mb-3">
         <div class="bg-light px-2 py-1 d-flex justify-content-between">
@@ -291,7 +294,7 @@ function renderTargetCard(target, items) {
         </div>
         <div class="table-responsive">
             <table class="table table-sm mb-0">
-                <thead><tr><th>tag</th><th>description</th><th>attrs</th><th>values</th></tr></thead>
+                <thead><tr><th>tag</th><th>説明</th><th>属性</th><th>値</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>
@@ -311,11 +314,11 @@ function escapeJs(value) {
 async function runSophosImport(mode) {
     const isSave = mode === 'save';
     const path = isSave ? '/sophos-import/api/save-plan' : '/sophos-import/api/preview';
-    setImportBusy(true, isSave ? 'Saving import plan...' : 'Analyzing XML...');
+    setImportBusy(true, isSave ? '取込プランを保存しています...' : 'XMLを解析しています...');
     try {
         const data = await sendSophosXml(path);
         renderSophosPlan(data, isSave ? (data.path || '') : '');
-        setImportBusy(false, isSave ? `Saved: ${data.path}` : 'Analysis completed.');
+        setImportBusy(false, isSave ? `保存しました: ${data.path}` : '解析が完了しました。');
         if (isSave) loadSavedPlans();
     } catch (e) {
         showImportError(e.message || String(e));
