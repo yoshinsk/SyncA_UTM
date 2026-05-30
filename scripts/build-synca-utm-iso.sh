@@ -108,6 +108,28 @@ extract_boot_configs() {
 patch_isolinux() {
     local cfg="${BUILD_DIR}/bootcfg/isolinux/isolinux.cfg"
     [[ -f "$cfg" ]] || return 0
+    python3 - "$cfg" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+lines = []
+for line in text.splitlines():
+    stripped = line.lstrip()
+    if stripped.startswith("append "):
+        line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
+        line = re.sub(r"\s+inst\.repo=\S+", "", line)
+        if "inst.stage2=" in line and "inst.repo=" not in line:
+            line += " inst.repo=hd:LABEL=SYNCA_UTM_9"
+        if "rd.multipath=0" not in line:
+            line += " rd.multipath=0"
+        if "inst.nompath" not in line:
+            line += " inst.nompath"
+    lines.append(line)
+path.write_text("\n".join(lines) + "\n")
+PY
     if grep -q "Install SyncA UTM" "$cfg"; then
         return 0
     fi
@@ -115,21 +137,46 @@ patch_isolinux() {
 
 label synca-utm
   menu label Install SyncA UTM
+  menu default
   kernel vmlinuz
-  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.ks=cdrom:/ks/synca-utm.ks quiet
+  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
 CFG
 }
 
 patch_grub() {
     local cfg="${BUILD_DIR}/bootcfg/EFI/BOOT/grub.cfg"
     [[ -f "$cfg" ]] || return 0
+    python3 - "$cfg" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+lines = []
+for line in text.splitlines():
+    stripped = line.lstrip()
+    if stripped.startswith(("linux ", "linuxefi ")):
+        line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
+        line = re.sub(r"\s+inst\.repo=\S+", "", line)
+        if "inst.stage2=" in line and "inst.repo=" not in line:
+            line += " inst.repo=hd:LABEL=SYNCA_UTM_9"
+        if "rd.multipath=0" not in line:
+            line += " rd.multipath=0"
+        if "inst.nompath" not in line:
+            line += " inst.nompath"
+    lines.append(line)
+path.write_text("\n".join(lines) + "\n")
+PY
     if grep -q "Install SyncA UTM" "$cfg"; then
         return 0
     fi
     cat >> "$cfg" <<'CFG'
 
-menuentry 'Install SyncA UTM' --class fedora --class gnu-linux --class gnu --class os {
-    linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.ks=cdrom:/ks/synca-utm.ks quiet
+set default="synca-utm"
+
+menuentry 'Install SyncA UTM' --id synca-utm --class fedora --class gnu-linux --class gnu --class os {
+    linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
     initrdefi /images/pxeboot/initrd.img
 }
 CFG
