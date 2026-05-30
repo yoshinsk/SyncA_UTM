@@ -75,7 +75,7 @@ SMTP_HOST = os.environ.get("SYNCA_DDNS_PIN_SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SYNCA_DDNS_PIN_SMTP_PORT", "465"))
 SMTP_USER = os.environ.get("SYNCA_DDNS_PIN_SMTP_USER", "")
 SMTP_PASS = os.environ.get("SYNCA_DDNS_PIN_SMTP_PASS", "")
-SMTP_FROM = os.environ.get("SYNCA_DDNS_PIN_SMTP_FROM", "synca-utm@localhost")
+SMTP_FROM = os.environ.get("SYNCA_DDNS_PIN_SMTP_FROM", PIN_RECIPIENT)
 SMTP_SSL = os.environ.get("SYNCA_DDNS_PIN_SMTP_SSL", "1") not in ("0", "false", "False")
 
 # Built-in presets. Selecting one auto-fills the provider form. Credentials
@@ -551,7 +551,7 @@ def _send_pin_email(fqdn: str, pin: str, expires_at: _dt.datetime) -> None:
         "Content-Type: text/plain; charset=UTF-8\n\n"
         + body
     )
-    sent = run(["/usr/sbin/sendmail", "-t"], stdin=message, timeout=10)
+    sent = run(["/usr/sbin/sendmail", "-f", SMTP_FROM, "-t"], stdin=message, timeout=10)
     if not sent.ok:
         raise RuntimeError(f"PINメール送信に失敗しました(sendmail): {sent.stderr or sent.stdout}")
 
