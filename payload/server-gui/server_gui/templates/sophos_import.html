@@ -4,19 +4,22 @@
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h1 class="h3 mb-0 d-flex align-items-center gap-2">
-        <i class="bi bi-box-arrow-in-down text-primary"></i> Sophos SG UTM インポート
+        <i class="bi bi-box-arrow-in-down text-primary"></i> Sophos SG UTM Import
     </h1>
+    <button id="reload-plans-btn" type="button" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-clockwise"></i> Reload plans
+    </button>
 </div>
 
 <div class="alert alert-warning small">
-    Sophos XMLから復元可能な設定を解析します。リモートアクセス設定は除外します。
-    存在しない機能は無視し、Web proxy / Webserver Protection は Nginx 移行対象として扱います。
+    Sophos XML import is parsed into a reviewable plan first. Remote access settings are ignored.
+    Web proxy / Webserver Protection entries are treated as Nginx migration targets.
 </div>
 
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-filetype-xml text-secondary"></i>
-        <strong>XML 読み込み</strong>
+        <strong>XML Upload</strong>
     </div>
     <div class="card-body">
         <div class="row g-2 align-items-end">
@@ -26,12 +29,12 @@
             </div>
             <div class="col-md-2">
                 <button id="preview-btn" type="button" class="btn btn-outline-primary w-100">
-                    <i class="bi bi-search"></i> 解析
+                    <i class="bi bi-search"></i> Analyze
                 </button>
             </div>
             <div class="col-md-2">
                 <button id="save-btn" type="button" class="btn btn-primary w-100">
-                    <i class="bi bi-save"></i> プラン保存
+                    <i class="bi bi-save"></i> Save plan
                 </button>
             </div>
         </div>
@@ -39,12 +42,46 @@
     </div>
 </div>
 
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-list-check text-secondary"></i>
+        <strong>Saved Plans</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                <tr>
+                    <th>Plan</th>
+                    <th>Release</th>
+                    <th>Supported</th>
+                    <th>Secrets</th>
+                    <th>Updated</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody id="plans-body">
+                <tr><td colspan="6" class="text-secondary small p-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <div id="result" class="d-none">
     <div class="card border-0 shadow-sm mb-4">
-        <div class="card-header bg-white"><strong>解析結果</strong></div>
+        <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+            <strong>Import Preview</strong>
+            <span id="preview-title" class="text-secondary small"></span>
+        </div>
         <div class="card-body">
             <div id="summary" class="mb-3"></div>
-            <pre id="plan-json" class="bg-dark text-light small p-2" style="max-height:520px;overflow:auto"></pre>
+            <ul id="notes" class="small text-secondary"></ul>
+            <div id="target-preview"></div>
+            <details class="mt-3">
+                <summary class="small text-secondary">Raw JSON</summary>
+                <pre id="plan-json" class="bg-dark text-light small p-2 mt-2" style="max-height:520px;overflow:auto"></pre>
+            </details>
         </div>
     </div>
 </div>
@@ -55,14 +92,14 @@
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('preview-btn').addEventListener('click', () => runSophosImport('preview'));
     document.getElementById('save-btn').addEventListener('click', () => runSophosImport('save'));
+    document.getElementById('reload-plans-btn').addEventListener('click', loadSavedPlans);
+    loadSavedPlans();
 });
 
 function setImportBusy(isBusy, message = '') {
     const status = document.getElementById('import-status');
-    const previewBtn = document.getElementById('preview-btn');
-    const saveBtn = document.getElementById('save-btn');
-    previewBtn.disabled = isBusy;
-    saveBtn.disabled = isBusy;
+    document.getElementById('preview-btn').disabled = isBusy;
+    document.getElementById('save-btn').disabled = isBusy;
     if (message) {
         status.classList.remove('d-none', 'alert-danger', 'alert-info', 'alert-success');
         status.classList.add(isBusy ? 'alert-info' : 'alert-success');
@@ -80,9 +117,7 @@ function showImportError(message) {
 
 async function sendSophosXml(path) {
     const file = document.getElementById('xml-file').files[0];
-    if (!file) {
-        throw new Error('XMLファイルを選択してください');
-    }
+    if (!file) throw new Error('Select an XML file.');
     const form = new FormData();
     form.append('xml', file);
     const response = await fetch(path, {
@@ -95,36 +130,140 @@ async function sendSophosXml(path) {
     try {
         data = await response.json();
     } catch (e) {
-        throw new Error(`サーバ応答をJSONとして読めませんでした。HTTP ${response.status}`);
+        throw new Error(`Response is not JSON. HTTP ${response.status}`);
     }
-    if (!response.ok || data.error) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
 }
 
-function renderSophosPlan(data) {
+async function loadSavedPlans() {
+    const body = document.getElementById('plans-body');
+    body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">Loading...</td></tr>';
+    try {
+        const data = await api.get('/sophos-import/api/plans');
+        const plans = data?.plans || [];
+        if (!plans.length) {
+            body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">No saved plans.</td></tr>';
+            return;
+        }
+        body.innerHTML = plans.map(p => {
+            const summary = p.summary || {};
+            return `<tr>
+                <td class="font-monospace small">${escapeHtml(p.name)}</td>
+                <td><code>${escapeHtml((p.format || {}).release || '-')}</code></td>
+                <td>${summary.supported_items || 0}</td>
+                <td>${summary.secret_fields_detected || 0}</td>
+                <td class="small text-secondary">${escapeHtml(p.mtime || '')}</td>
+                <td class="text-end">
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadPlan('${escapeJs(p.name)}')">
+                        <i class="bi bi-eye"></i> Preview
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="6" class="text-danger small p-3">${escapeHtml(e.message || String(e))}</td></tr>`;
+    }
+}
+
+async function loadPlan(name) {
+    setImportBusy(true, `Loading ${name}...`);
+    try {
+        const data = await api.get(`/sophos-import/api/plans/${encodeURIComponent(name)}`);
+        renderSophosPlan(data, name);
+        setImportBusy(false, `Loaded: ${name}`);
+    } catch (e) {
+        showImportError(e.message || String(e));
+    } finally {
+        document.getElementById('preview-btn').disabled = false;
+        document.getElementById('save-btn').disabled = false;
+    }
+}
+
+function renderSophosPlan(data, title = '') {
     document.getElementById('result').classList.remove('d-none');
+    document.getElementById('preview-title').textContent = title || 'Unsaved preview';
     const summary = data.summary || {};
     document.getElementById('summary').innerHTML = `
         <div class="row g-2 small">
             <div class="col-md-3"><strong>release:</strong> <code>${escapeHtml((data.format || {}).release || '-')}</code></div>
-            <div class="col-md-3"><strong>対応対象:</strong> ${summary.supported_items || 0}</div>
-            <div class="col-md-3"><strong>remote access除外:</strong> ${summary.remote_access_ignored || 0}</div>
-            <div class="col-md-3"><strong>秘密情報検出:</strong> ${summary.secret_fields_detected || 0}</div>
-            <div class="col-12"><strong>分類:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
+            <div class="col-md-3"><strong>supported:</strong> ${summary.supported_items || 0}</div>
+            <div class="col-md-3"><strong>remote access ignored:</strong> ${summary.remote_access_ignored || 0}</div>
+            <div class="col-md-3"><strong>secret fields:</strong> ${summary.secret_fields_detected || 0}</div>
+            <div class="col-12"><strong>targets:</strong> <code>${escapeHtml(JSON.stringify(summary.supported_by_target || {}))}</code></div>
         </div>`;
+    document.getElementById('notes').innerHTML = (data.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+    renderTargetPreview(data.supported || []);
     document.getElementById('plan-json').textContent = JSON.stringify(data, null, 2);
+    document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderTargetPreview(items) {
+    const byTarget = {};
+    for (const item of items) {
+        const target = item.target || 'unknown';
+        if (!byTarget[target]) byTarget[target] = [];
+        byTarget[target].push(item);
+    }
+    const order = ['network', 'firewall', 'nginx', 'ipsec', 'certs', 'dns', 'dhcp'];
+    document.getElementById('target-preview').innerHTML = order
+        .filter(target => byTarget[target]?.length)
+        .map(target => renderTargetCard(target, byTarget[target]))
+        .join('');
+}
+
+function renderTargetCard(target, items) {
+    const rows = items.slice(0, 80).map(item => {
+        const attrs = Object.entries(item.attrs || {})
+            .map(([k, v]) => `${k}=${v}`)
+            .join(', ');
+        const contents = (item.contents || []).slice(0, 3).map(v => compact(v)).join(' / ');
+        const secretBadge = (item.secrets || []).length
+            ? `<span class="badge bg-warning-subtle text-warning-emphasis ms-1">secret ${(item.secrets || []).length}</span>`
+            : '';
+        return `<tr>
+            <td class="font-monospace small">${escapeHtml(item.tag || '')}</td>
+            <td>${escapeHtml(item.descr || '')}${secretBadge}</td>
+            <td class="small text-secondary">${escapeHtml(attrs)}</td>
+            <td class="small">${escapeHtml(contents)}</td>
+        </tr>`;
+    }).join('');
+    const more = items.length > 80
+        ? `<div class="text-secondary small px-2 pb-2">Showing first 80 of ${items.length} items.</div>`
+        : '';
+    return `<div class="border rounded-2 mb-3">
+        <div class="bg-light px-2 py-1 d-flex justify-content-between">
+            <strong>${escapeHtml(target)}</strong>
+            <span class="badge bg-secondary">${items.length}</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <thead><tr><th>tag</th><th>description</th><th>attrs</th><th>values</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        ${more}
+    </div>`;
+}
+
+function compact(value) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > 160 ? text.slice(0, 157) + '...' : text;
+}
+
+function escapeJs(value) {
+    return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '');
 }
 
 async function runSophosImport(mode) {
     const isSave = mode === 'save';
     const path = isSave ? '/sophos-import/api/save-plan' : '/sophos-import/api/preview';
-    setImportBusy(true, isSave ? '取込プランを保存しています...' : 'XMLを解析しています...');
+    setImportBusy(true, isSave ? 'Saving import plan...' : 'Analyzing XML...');
     try {
         const data = await sendSophosXml(path);
-        renderSophosPlan(data);
-        setImportBusy(false, isSave ? `保存しました: ${data.path}` : '解析が完了しました');
+        renderSophosPlan(data, isSave ? (data.path || '') : '');
+        setImportBusy(false, isSave ? `Saved: ${data.path}` : 'Analysis completed.');
+        if (isSave) loadSavedPlans();
     } catch (e) {
         showImportError(e.message || String(e));
     } finally {

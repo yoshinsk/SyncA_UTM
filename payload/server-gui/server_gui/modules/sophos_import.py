@@ -54,6 +54,7 @@ REMOTE_ACCESS_KEYWORDS = (
     "PPTP remote access",
 )
 SECRET_RE = re.compile(r"(password|preshared|pre-shared|private key|certificate|secret|psk)", re.I)
+PLAN_NAME_RE = re.compile(r"^sophos-import-plan-\d{8}-\d{6}\.json$")
 
 
 def register(app: Flask) -> None:
@@ -101,6 +102,45 @@ def save_plan():
     path.chmod(0o600)
     logger.info("sophos import plan saved: %s", path)
     return jsonify({"ok": True, "path": str(path), "summary": plan.get("summary", {})})
+
+
+@bp.route("/api/plans")
+@login_required
+def list_plans():
+    plans = []
+    if STORE_DIR.exists():
+        for path in sorted(STORE_DIR.glob("sophos-import-plan-*.json"), reverse=True):
+            if not PLAN_NAME_RE.match(path.name):
+                continue
+            try:
+                stat = path.stat()
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            plans.append({
+                "name": path.name,
+                "path": str(path),
+                "size": stat.st_size,
+                "mtime": _dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                "format": data.get("format", {}),
+                "summary": data.get("summary", {}),
+            })
+    return jsonify({"plans": plans})
+
+
+@bp.route("/api/plans/<name>")
+@login_required
+def get_plan(name: str):
+    if not PLAN_NAME_RE.match(name):
+        return jsonify({"error": "invalid plan name"}), 400
+    path = STORE_DIR / name
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return jsonify({"error": "plan not found"}), 404
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"plan JSON parse failed: {e}"}), 500
+    return jsonify(data)
 
 
 def _read_upload():
