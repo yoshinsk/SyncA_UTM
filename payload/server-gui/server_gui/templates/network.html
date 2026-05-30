@@ -7,6 +7,9 @@
         <i class="bi bi-hdd-network text-primary"></i> ネットワーク
     </h1>
     <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-primary btn-sm" onclick="openVlanModal()">
+            <i class="bi bi-tags"></i> VLAN 作成
+        </button>
         <button class="btn btn-primary btn-sm" onclick="openBridgeModal()">
             <i class="bi bi-diagram-2"></i> Bridge 作成
         </button>
@@ -113,6 +116,68 @@
                 </thead>
                 <tbody id="conn-tbody"></tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+<!-- VLAN create modal -->
+<div class="modal fade" id="vlan-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-tags"></i> VLAN 作成</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">接続名 <span class="text-danger">*</span></label>
+                        <input id="vlan-name" class="form-control font-monospace" placeholder="lan-vlan10">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">親インターフェース <span class="text-danger">*</span></label>
+                        <select id="vlan-parent" class="form-select font-monospace"></select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">VLAN ID <span class="text-danger">*</span></label>
+                        <input id="vlan-id" type="number" min="1" max="4094" class="form-control font-monospace" placeholder="10">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Interface名</label>
+                        <input id="vlan-ifname" class="form-control font-monospace" placeholder="未指定なら eth0.10">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">IPv4アドレス (CIDR)</label>
+                        <input id="vlan-address" class="form-control font-monospace" placeholder="例: 192.168.10.1/24">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">ゲートウェイ</label>
+                        <input id="vlan-gateway" class="form-control font-monospace" placeholder="通常LAN VLANでは空欄">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">DNS</label>
+                        <input id="vlan-dns" class="form-control font-monospace" placeholder="8.8.8.8, 1.1.1.1">
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="vlan-autoconnect" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="vlan-autoconnect">起動時に自動接続</label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="vlan-activate" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="vlan-activate">作成後すぐ有効化</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button class="btn btn-primary" onclick="submitVlan()">
+                    <i class="bi bi-check2"></i> VLAN 作成
+                </button>
+            </div>
         </div>
     </div>
 </div>
@@ -347,6 +412,11 @@
                         <input id="n-address" type="text" class="form-control font-monospace" placeholder="例: 192.168.1.1/24">
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">セカンダリIPv4アドレス (1行に1つ)</label>
+                        <textarea id="n-secondary-addresses" class="form-control font-monospace" rows="3"
+                                  placeholder="例: 192.168.1.2/24&#10;例: 192.168.1.3/24"></textarea>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">デフォルトゲートウェイ</label>
                         <input id="n-gateway" type="text" class="form-control font-monospace" placeholder="例: 192.168.1.254">
                     </div>
@@ -414,6 +484,7 @@ let connModal;
 let pppoeModal;
 let pppoeEditModal;
 let bridgeModal;
+let vlanModal;
 let editingPppoeName = null;
 let currentWanType = 'unknown';
 let currentWanDevice = '';
@@ -423,6 +494,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pppoeModal = new bootstrap.Modal(document.getElementById('pppoe-modal'));
     pppoeEditModal = new bootstrap.Modal(document.getElementById('pppoe-edit-modal'));
     bridgeModal = new bootstrap.Modal(document.getElementById('bridge-modal'));
+    vlanModal = new bootstrap.Modal(document.getElementById('vlan-modal'));
 });
 
 async function refresh() {
@@ -544,6 +616,50 @@ function openBridgeModal() {
             </div>`).join('');
     }
     bridgeModal.show();
+}
+
+function openVlanModal() {
+    document.getElementById('vlan-name').value = '';
+    document.getElementById('vlan-id').value = '';
+    document.getElementById('vlan-ifname').value = '';
+    document.getElementById('vlan-address').value = '';
+    document.getElementById('vlan-gateway').value = '';
+    document.getElementById('vlan-dns').value = '';
+    document.getElementById('vlan-autoconnect').checked = true;
+    document.getElementById('vlan-activate').checked = true;
+    const sel = document.getElementById('vlan-parent');
+    sel.innerHTML = devices
+        .filter(d => d.type === 'ethernet' || d.type === 'bridge')
+        .map(d => `<option value="${escapeHtml(d.device)}">${escapeHtml(d.device)} (${(d.ipv4 || []).join(', ') || 'no IP'})</option>`)
+        .join('') || '<option value="">(parent interfaceなし)</option>';
+    vlanModal.show();
+}
+
+async function submitVlan() {
+    const payload = {
+        name: document.getElementById('vlan-name').value.trim(),
+        parent: document.getElementById('vlan-parent').value.trim(),
+        vlan_id: document.getElementById('vlan-id').value.trim(),
+        ifname: document.getElementById('vlan-ifname').value.trim(),
+        address: document.getElementById('vlan-address').value.trim(),
+        gateway: document.getElementById('vlan-gateway').value.trim(),
+        dns: document.getElementById('vlan-dns').value.split(',').map(s => s.trim()).filter(Boolean),
+        autoconnect: document.getElementById('vlan-autoconnect').checked,
+        activate: document.getElementById('vlan-activate').checked,
+    };
+    if (!payload.name || !payload.parent || !payload.vlan_id) {
+        return toast('接続名、親インターフェース、VLAN IDは必須です', true);
+    }
+    if (!confirm(`VLAN "${payload.name}" を作成しますか?\nparent: ${payload.parent}\nVLAN ID: ${payload.vlan_id}\nIP: ${payload.address || '(なし)'}`)) return;
+    const res = await api.send('/network/api/connections/vlan', 'POST', payload);
+    if (!res) return;
+    if (res.ok) {
+        toast(`VLAN "${payload.name}" を作成しました`);
+        vlanModal.hide();
+        refresh();
+    } else {
+        toast(res.error || 'VLAN作成に失敗しました', true);
+    }
 }
 
 async function submitBridge() {
@@ -699,7 +815,9 @@ async function editConnection(name) {
     document.getElementById('conn-modal-title').textContent = `接続編集: ${name}`;
     const ipv4 = detail.ipv4 || {};
     document.getElementById('n-method').value = ipv4.method || 'manual';
-    document.getElementById('n-address').value = ipv4.addresses || '';
+    const addresses = ipv4.addresses_list || (ipv4.addresses ? [ipv4.addresses] : []);
+    document.getElementById('n-address').value = addresses[0] || '';
+    document.getElementById('n-secondary-addresses').value = addresses.slice(1).join('\n');
     document.getElementById('n-gateway').value = ipv4.gateway || '';
     document.getElementById('n-dns').value = ipv4.dns || '';
     onMethodChange();
@@ -803,6 +921,10 @@ async function saveConnection() {
     const payload = {
         method: document.getElementById('n-method').value,
         address: document.getElementById('n-address').value.trim(),
+        secondary_addresses: document.getElementById('n-secondary-addresses').value
+            .split(/\r?\n/)
+            .map(s => s.trim())
+            .filter(Boolean),
         gateway: document.getElementById('n-gateway').value.trim(),
         dns: document.getElementById('n-dns').value.split(',').map(s => s.trim()).filter(Boolean),
         activate: document.getElementById('n-activate').checked,

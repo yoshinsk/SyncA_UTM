@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Sophos Import - SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-box-arrow-in-down text-primary"></i> Sophos SG UTM インポート
+    </h1>
+</div>
+
+<div class="alert alert-warning small">
+    Sophos XMLから復元可能な設定を解析します。リモートアクセス設定は除外します。存在しない機能は無視し、Web proxy / Webserver Protection はNginx移行対象として扱います。
+</div>
+
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-filetype-xml text-secondary"></i>
+        <strong>XML読込み</strong>
+    </div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-8">
+                <label class="form-label">Sophos WebAdmin XML</label>
+                <input id="xml-file" type="file" class="form-control" accept=".xml,text/xml">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-outline-primary w-100" onclick="previewImport()">
+                    <i class="bi bi-search"></i> 解析
+                </button>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" onclick="savePlan()">
+                    <i class="bi bi-save"></i> プラン保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="result" class="d-none">
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white"><strong>解析結果</strong></div>
+        <div class="card-body">
+            <div id="summary" class="mb-3"></div>
+            <pre id="plan-json" class="bg-dark text-light small p-2" style="max-height:520px;overflow:auto"></pre>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+async function _sendXml(path) {
+    const file = document.getElementById('xml-file').files[0];
+    if (!file) {
+        toast('XMLファイルを選択してください', true);
+        return null;
+    }
+    const form = new FormData();
+    form.append('xml', file);
+    const r = await fetch(path, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken },
+        credentials: 'same-origin',
+        body: form,
+    });
+    return await r.json();
+}
+
+function _render(data) {
+    document.getElementById('result').classList.remove('d-none');
+    const s = data.summary || {};
+    document.getElementById('summary').innerHTML = `
+        <div class="row g-2 small">
+            <div class="col-md-3"><strong>release:</strong> <code>${escapeHtml((data.format || {}).release || '-')}</code></div>
+            <div class="col-md-3"><strong>対応対象:</strong> ${s.supported_items || 0}</div>
+            <div class="col-md-3"><strong>remote access除外:</strong> ${s.remote_access_ignored || 0}</div>
+            <div class="col-md-3"><strong>秘密情報検出:</strong> ${s.secret_fields_detected || 0}</div>
+            <div class="col-12"><strong>分類:</strong> <code>${escapeHtml(JSON.stringify(s.supported_by_target || {}))}</code></div>
+        </div>`;
+    document.getElementById('plan-json').textContent = JSON.stringify(data, null, 2);
+}
+
+async function previewImport() {
+    const data = await _sendXml('/sophos-import/api/preview');
+    if (!data) return;
+    if (data.error) return toast(data.error, true);
+    _render(data);
+}
+
+async function savePlan() {
+    const data = await _sendXml('/sophos-import/api/save-plan');
+    if (!data) return;
+    if (data.error) return toast(data.error, true);
+    toast(`プランを保存しました: ${data.path}`);
+    _render(data);
+}
+</script>
+{% endblock %}

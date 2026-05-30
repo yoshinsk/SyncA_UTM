@@ -316,6 +316,109 @@ def create_bridge():
     }), 201
 
 
+@bp.route("/api/connections/vlan", methods=["POST"])
+@login_required
+@csrf_protect
+def create_vlan():
+    """Create a VLAN-tagged NetworkManager connection on a parent interface."""
+    payload = request.get_json(force=True, silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    parent = (payload.get("parent") or "").strip()
+    ifname = (payload.get("ifname") or "").strip()
+    vlan_id_raw = payload.get("vlan_id")
+    address = (payload.get("address") or "").strip()
+    gateway = (payload.get("gateway") or "").strip()
+    dns_raw = payload.get("dns") or []
+    autoconnect = bool(payload.get("autoconnect", True))
+    activate = bool(payload.get("activate", True))
+
+    if not _IDENT_RE.match(name):
+        return jsonify({"error": "name required (alnum, '_', '-')"}), 400
+    try:
+        parent = validate_interface(parent)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        vlan_id = int(vlan_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid VLAN ID"}), 400
+    if not (1 <= vlan_id <= 4094):
+        return jsonify({"error": "VLAN ID out of range (1-4094)"}), 400
+    if not ifname:
+        ifname = f"{parent}.{vlan_id}"
+    try:
+        ifname = validate_interface(ifname)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    if address:
+        try:
+            validate_ipv4_cidr(address)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 400
+    if gateway:
+        try:
+            validate_ipv4(gateway)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 400
+    dns_list: list[str] = []
+    if isinstance(dns_raw, list):
+        for d in dns_raw:
+            if str(d).strip():
+                try:
+                    dns_list.append(validate_ipv4(str(d).strip()))
+                except ValidationError as e:
+                    return jsonify({"error": str(e)}), 400
+
+    res = sudo_run([
+        "nmcli", "connection", "add",
+        "type", "vlan",
+        "con-name", name,
+        "ifname", ifname,
+        "dev", parent,
+        "id", str(vlan_id),
+        "connection.autoconnect", "yes" if autoconnect else "no",
+    ], timeout=30)
+    if not res.ok:
+        return jsonify({"ok": False, "error": (res.stderr or res.stdout).strip()}), 500
+
+    if address:
+        cmd = [
+            "nmcli", "connection", "modify", name,
+            "ipv4.method", "manual",
+            "ipv4.addresses", address,
+        ]
+        if gateway:
+            cmd.extend(["ipv4.gateway", gateway])
+        if dns_list:
+            cmd.extend(["ipv4.dns", ",".join(dns_list)])
+        ip_res = sudo_run(cmd)
+        if not ip_res.ok:
+            sudo_run(["nmcli", "connection", "delete", name])
+            return jsonify({"ok": False, "error": ip_res.stderr.strip()}), 500
+    else:
+        sudo_run(["nmcli", "connection", "modify", name, "ipv4.method", "disabled"])
+
+    output = res.stdout + res.stderr
+    if activate:
+        up = sudo_run(["nmcli", "connection", "up", name], timeout=60)
+        output += "\n--- up ---\n" + (up.stdout + up.stderr)
+        if not up.ok:
+            return jsonify({
+                "ok": False, "created": True, "activated": False,
+                "error": "created but failed to activate",
+                "output": output.strip(),
+            }), 500
+
+    return jsonify({
+        "ok": True,
+        "name": name,
+        "ifname": ifname,
+        "parent": parent,
+        "vlan_id": vlan_id,
+        "output": output.strip(),
+    }), 201
+
+
 @bp.route("/api/connections/pppoe", methods=["POST"])
 @login_required
 @csrf_protect
@@ -575,9 +678,11 @@ def _describe_connection(name: str) -> dict:
         k, _, v = line.partition(":")
         raw[k.strip()] = v.strip()
 
+    addresses = _split_nm_list(raw.get("ipv4.addresses", ""))
     ipv4 = {
         "method": raw.get("ipv4.method"),
         "addresses": raw.get("ipv4.addresses"),
+        "addresses_list": addresses,
         "gateway": raw.get("ipv4.gateway"),
         "dns": raw.get("ipv4.dns"),
         "dns_search": raw.get("ipv4.dns-search"),
@@ -609,6 +714,13 @@ def _describe_connection(name: str) -> dict:
         "pppoe": pppoe,
         "routes": routes,
     }
+
+
+def _split_nm_list(value: str) -> list[str]:
+    s = (value or "").strip()
+    if not s or s == "--":
+        return []
+    return [part.strip() for part in re.split(r"\s*,\s*|\s*;\s*", s) if part.strip()]
 
 
 # ---- static routes -----------------------------------------------------
@@ -826,10 +938,19 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
     modifications: list[list[str]] = []
 
     if mode == "manual":
-        address = payload.get("address")
-        if not address:
+        addresses_raw = payload.get("addresses")
+        if isinstance(addresses_raw, list):
+            addresses = [str(a).strip() for a in addresses_raw if str(a).strip()]
+        else:
+            primary = (payload.get("address") or "").strip()
+            secondary_raw = payload.get("secondary_addresses") or []
+            addresses = [primary] if primary else []
+            if isinstance(secondary_raw, list):
+                addresses.extend(str(a).strip() for a in secondary_raw if str(a).strip())
+        if not addresses:
             raise ValidationError("address required for manual mode (e.g. 192.168.1.1/24)")
-        validate_ipv4_cidr(address)
+        for address in addresses:
+            validate_ipv4_cidr(address)
         gateway: Optional[str] = payload.get("gateway") or None
         if gateway:
             validate_ipv4(gateway)
@@ -840,7 +961,7 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
             validate_ipv4(d)
 
         modifications.append(["ipv4.method", "manual"])
-        modifications.append(["ipv4.addresses", address])
+        modifications.append(["ipv4.addresses", ",".join(addresses)])
         modifications.append(["ipv4.gateway", gateway or ""])
         modifications.append(["ipv4.dns", ",".join(dns_list)])
     else:  # auto / DHCP

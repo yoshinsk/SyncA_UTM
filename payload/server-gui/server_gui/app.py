@@ -21,6 +21,7 @@ from .modules import geoip as geoip_module
 from .modules import ipsec as ipsec_module
 from .modules import network as network_module
 from .modules import nginx_proxy as nginx_module
+from .modules import sophos_import as sophos_import_module
 from .modules import system as system_module
 from .modules import wireguard as wireguard_module
 
@@ -61,6 +62,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     fail2ban_module.register(app)
     ddns_module.register(app)
     backup_module.register(app)
+    sophos_import_module.register(app)
     admin_module.register(app)
 
     @app.route("/")

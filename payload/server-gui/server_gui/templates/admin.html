@@ -48,6 +48,37 @@
     </div>
 </div>
 
+<!-- ========== Command execution ========== -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-terminal text-secondary"></i>
+        <strong>任意コマンド実行</strong>
+        <span class="text-secondary small">root権限で実行されます。実行履歴は監査ログに保存されます。</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-warning small">
+            SSHやGUIの接続断につながるコマンドを実行できます。内容を確認し、必要な場合のみ実行してください。
+        </div>
+        <div class="row g-2">
+            <div class="col-md-9">
+                <label class="form-label small mb-1">コマンド</label>
+                <textarea id="cmd-command" class="form-control font-monospace" rows="3" spellcheck="false"
+                          placeholder="例: ip route show"></textarea>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">現在の管理パスワード</label>
+                <input id="cmd-password" type="password" class="form-control font-monospace" autocomplete="current-password">
+                <label class="form-label small mt-2 mb-1">タイムアウト秒</label>
+                <input id="cmd-timeout" type="number" min="1" max="300" value="30" class="form-control font-monospace">
+                <button class="btn btn-danger btn-sm w-100 mt-2" onclick="runCommand()">
+                    <i class="bi bi-play-fill"></i> 実行
+                </button>
+            </div>
+        </div>
+        <pre id="cmd-output" class="bg-dark text-light small p-2 mt-3 d-none" style="max-height:360px;overflow:auto"></pre>
+    </div>
+</div>
+
 <!-- ========== GitHub auto-update ========== -->
 <div class="card border-0 shadow-sm">
     <div class="card-header bg-white d-flex align-items-center gap-2">
@@ -184,6 +215,28 @@ async function changePassword() {
     } else if (res.error) {
         toast(res.error, true);
     }
+}
+
+async function runCommand() {
+    const command = document.getElementById('cmd-command').value.trim();
+    const password = document.getElementById('cmd-password').value;
+    const timeout = parseInt(document.getElementById('cmd-timeout').value, 10) || 30;
+    if (!command || !password) return toast('コマンドと現在の管理パスワードを入力してください', true);
+    if (!confirm(`root権限で次のコマンドを実行します。\n\n${command}`)) return;
+    const res = await api.send('/admin/api/command', 'POST', { command, password, timeout });
+    if (!res) return;
+    const out = document.getElementById('cmd-output');
+    out.classList.remove('d-none');
+    out.textContent = [
+        `$ ${command}`,
+        `returncode: ${res.returncode}`,
+        '',
+        '--- stdout ---',
+        res.stdout || '',
+        '--- stderr ---',
+        res.stderr || '',
+    ].join('\n');
+    toast(res.ok ? 'コマンドが完了しました' : 'コマンドが失敗しました', !res.ok);
 }
 
 async function saveGithub() {

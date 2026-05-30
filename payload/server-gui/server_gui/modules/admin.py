@@ -73,6 +73,9 @@ _PASSWORD_MAX_LEN = 256
 _HTTP_TIMEOUT = 15
 _DOWNLOAD_TIMEOUT = 120
 _MAX_ARCHIVE_BYTES = 200 * 1024 * 1024  # 200 MiB sanity cap
+_COMMAND_TIMEOUT_MAX = 300
+_COMMAND_OUTPUT_MAX = 128 * 1024
+_COMMAND_AUDIT_LOG = Path("/var/log/server-gui/admin-command.log")
 
 
 def register(app: Flask) -> None:
@@ -128,6 +131,92 @@ def get_settings():
         "last_apply_log": data.get("last_apply_log", ""),
         "username": session.get("user", ""),
     })
+
+
+@bp.route("/api/command", methods=["POST"])
+@login_required
+@csrf_protect
+def run_admin_command():
+    """Run an arbitrary administrator command after password re-authentication."""
+    payload = request.get_json(force=True, silent=True) or {}
+    password = payload.get("password") or ""
+    command = (payload.get("command") or "").strip()
+    timeout_raw = payload.get("timeout", 30)
+
+    if not command:
+        return jsonify({"error": "command required"}), 400
+    if "\x00" in command or len(command) > 4000:
+        return jsonify({"error": "invalid command"}), 400
+    try:
+        timeout = int(timeout_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid timeout"}), 400
+    if not (1 <= timeout <= _COMMAND_TIMEOUT_MAX):
+        return jsonify({"error": f"timeout must be 1..{_COMMAND_TIMEOUT_MAX} seconds"}), 400
+    if not _check_current_password(password):
+        return jsonify({"error": "current password is invalid"}), 401
+
+    started = _now_iso()
+    user = session.get("user", "")
+    logger.warning("admin command requested by %s: %s", user, command)
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "/bin/bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        rc = proc.returncode
+        stdout = _truncate_output(proc.stdout)
+        stderr = _truncate_output(proc.stderr)
+    except subprocess.TimeoutExpired as e:
+        rc = 124
+        stdout = _truncate_output(e.stdout or "")
+        stderr = _truncate_output(e.stderr or "")
+        stderr = _truncate_output(stderr + "\n[timeout]")
+
+    _write_command_audit({
+        "started_at": started,
+        "finished_at": _now_iso(),
+        "user": user,
+        "remote_addr": request.remote_addr or "",
+        "returncode": rc,
+        "timeout": timeout,
+        "command": command,
+    })
+    return jsonify({"ok": rc == 0, "returncode": rc, "stdout": stdout, "stderr": stderr})
+
+
+def _check_current_password(password: str) -> bool:
+    creds_path = Path(current_app.config["CONFIG_DIR"]) / "credentials.json"
+    try:
+        creds = json.loads(creds_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    return check_password_hash(creds.get("password_hash", ""), password)
+
+
+def _truncate_output(value: str) -> str:
+    if not isinstance(value, str):
+        if isinstance(value, (bytes, bytearray)):
+            value = bytes(value).decode("utf-8", errors="replace")
+        else:
+            value = str(value)
+    if len(value.encode("utf-8", errors="replace")) <= _COMMAND_OUTPUT_MAX:
+        return value
+    encoded = value.encode("utf-8", errors="replace")[:_COMMAND_OUTPUT_MAX]
+    return encoded.decode("utf-8", errors="replace") + "\n[truncated]"
+
+
+def _write_command_audit(record: dict) -> None:
+    try:
+        _COMMAND_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _COMMAND_AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _COMMAND_AUDIT_LOG.chmod(0o600)
+    except OSError as e:
+        logger.error("failed to write admin command audit log: %s", e)
 
 
 # ---- password change ----------------------------------------------------
