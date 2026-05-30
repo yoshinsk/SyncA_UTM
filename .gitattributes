@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Installer and helper scripts are executed on Linux build/install hosts.
+*.sh text eol=lf
+iso/payload/* text eol=lf
+scripts/* text eol=lf
