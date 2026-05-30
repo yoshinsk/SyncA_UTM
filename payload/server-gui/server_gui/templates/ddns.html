@@ -121,11 +121,13 @@
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label">account / host <span class="text-danger">*</span></label>
-                        <input id="pe-account" class="form-control font-monospace" placeholder="例: densmile01">
+                        <input id="pe-account" class="form-control font-monospace" placeholder="例: densmile01"
+                               oninput="_toggleDdnsftGuard()">
                     </div>
                     <div class="col-md-6" id="pe-domain-wrap">
                         <label class="form-label">domain</label>
-                        <input id="pe-domain" class="form-control font-monospace" placeholder="ddnsft.com">
+                        <input id="pe-domain" class="form-control font-monospace" placeholder="ddnsft.com"
+                               oninput="_toggleDdnsftGuard()">
                     </div>
                     <div class="col-md-6" id="pe-user-wrap">
                         <label class="form-label">Basic Auth ユーザ</label>
@@ -134,6 +136,23 @@
                     <div class="col-md-6" id="pe-pass-wrap">
                         <label class="form-label">Basic Auth パスワード</label>
                         <input id="pe-pass" type="password" class="form-control font-monospace" placeholder="(編集時は ***)">
+                    </div>
+                    <div class="col-12 d-none" id="pe-ddnsft-guard-wrap">
+                        <label class="form-label">ddnsft.com 登録確認</label>
+                        <div class="input-group">
+                            <input id="pe-overwrite-pin" class="form-control font-monospace"
+                                   inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+                                   placeholder="上書き許可PIN (4桁)">
+                            <button class="btn btn-outline-secondary" type="button" onclick="checkDdnsftHost()">
+                                <i class="bi bi-search"></i> 確認
+                            </button>
+                            <button class="btn btn-outline-primary" type="button" onclick="requestOverwritePin()">
+                                <i class="bi bi-envelope"></i> PIN送信
+                            </button>
+                        </div>
+                        <div class="form-text" id="pe-ddnsft-guard-text">
+                            保存時に <code>dig @ns1.ddnsft.com</code> で既存ホスト名を確認します。既に登録済みの場合、上書きにはメール送信された4桁PINが必要です。
+                        </div>
                     </div>
                 </div>
                 <div class="alert alert-info small mt-3 d-none" id="pe-hidden-banner">
@@ -184,12 +203,30 @@ async function applyPreset(key) {
     document.getElementById('pe-pass').value = preset.auth_pass || '';
     document.getElementById('pe-preset-type').value = key;
     _applyHideAuth(!!preset.hide_auth);
+    _toggleDdnsftGuard();
 }
 
 function _applyHideAuth(hide) {
     ['pe-template-wrap', 'pe-domain-wrap', 'pe-user-wrap', 'pe-pass-wrap']
         .forEach(id => document.getElementById(id).classList.toggle('d-none', hide));
     document.getElementById('pe-hidden-banner').classList.toggle('d-none', !hide);
+}
+
+function _isDdnsftForm() {
+    const preset = document.getElementById('pe-preset-type').value;
+    const domain = document.getElementById('pe-domain').value.trim().toLowerCase();
+    return preset === 'ddnsft' || domain === 'ddnsft.com';
+}
+
+function _toggleDdnsftGuard() {
+    document.getElementById('pe-ddnsft-guard-wrap').classList.toggle('d-none', !_isDdnsftForm());
+}
+
+function _hostPayload() {
+    return {
+        account: document.getElementById('pe-account').value.trim(),
+        domain: document.getElementById('pe-domain').value.trim() || 'ddnsft.com',
+    };
 }
 
 async function refresh() {
@@ -242,8 +279,11 @@ function openProviderModal(p) {
     document.getElementById('pe-user').value = p ? (p.auth_user || '') : '';
     document.getElementById('pe-pass').value = p ? (p.auth_pass || '') : '';  // '***' on edit
     document.getElementById('pe-preset-type').value = p ? (p.preset_type || 'custom') : 'custom';
+    document.getElementById('pe-overwrite-pin').value = '';
+    document.getElementById('pe-ddnsft-guard-text').innerHTML = '保存時に <code>dig @ns1.ddnsft.com</code> で既存ホスト名を確認します。既に登録済みの場合、上書きにはメール送信された4桁PINが必要です。';
     // For known hide_auth presets, hide on edit too
     _applyHideAuth(p && p.preset_type === 'ddnsft');
+    _toggleDdnsftGuard();
     pModal.show();
 }
 
@@ -257,6 +297,7 @@ async function submitProvider() {
         domain: document.getElementById('pe-domain').value.trim(),
         auth_user: document.getElementById('pe-user').value.trim(),
         auth_pass: document.getElementById('pe-pass').value,
+        overwrite_pin: document.getElementById('pe-overwrite-pin').value.trim(),
     };
     if (!payload.name || !payload.template) return toast('名前と URL テンプレートは必須', true);
     if (!payload.account) return toast('account / host は必須', true);
@@ -267,6 +308,29 @@ async function submitProvider() {
     toast(editingId ? '更新しました' : '追加しました');
     pModal.hide();
     refresh();
+}
+
+async function checkDdnsftHost() {
+    const payload = _hostPayload();
+    if (!payload.account) return toast('account / host は必須', true);
+    const res = await api.send('/ddns/api/host/check', 'POST', payload);
+    if (!res) return;
+    const text = document.getElementById('pe-ddnsft-guard-text');
+    if (res.exists) {
+        text.innerHTML = `<span class="text-danger fw-semibold">${escapeHtml(res.fqdn)} は登録済みです。</span> 上書きする場合はPIN送信後、4桁PINを入力して保存してください。`;
+    } else {
+        text.innerHTML = `<span class="text-success fw-semibold">${escapeHtml(res.fqdn)} は未登録です。</span> PINなしで保存できます。`;
+    }
+}
+
+async function requestOverwritePin() {
+    const payload = _hostPayload();
+    if (!payload.account) return toast('account / host は必須', true);
+    const res = await api.send('/ddns/api/overwrite-pin/request', 'POST', payload);
+    if (!res) return;
+    document.getElementById('pe-ddnsft-guard-text').innerHTML =
+        `${escapeHtml(res.fqdn)} の上書き許可PINを ${escapeHtml(res.sent_to)} に送信しました。有効期限: ${escapeHtml(res.expires_at)}`;
+    toast('PINを送信しました');
 }
 
 async function deleteProvider(id, name) {

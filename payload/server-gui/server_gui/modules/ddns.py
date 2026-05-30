@@ -38,9 +38,13 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import hashlib
+import hmac
 import json
 import logging
+import os
 import re
+import secrets
 import urllib.error
 import urllib.request
 import uuid
@@ -61,6 +65,10 @@ MODULE_NAME = "ddns"
 # update.ddnsft.com). Cert is verified by urllib's default context.
 DEFAULT_CHECK_URL = "https://update.ddnsft.com/checkip.php"
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,63}$")
+DDNSFT_DOMAIN = "ddnsft.com"
+DDNSFT_NS = "ns1.ddnsft.com"
+PIN_RECIPIENT = os.environ.get("SYNCA_DDNS_PIN_RECIPIENT", "syncautm@nsksys.com")
+PIN_TTL_SECONDS = int(os.environ.get("SYNCA_DDNS_PIN_TTL_SECONDS", "600"))
 
 # Built-in presets. Selecting one auto-fills the provider form. Credentials
 # baked in here are *defaults* — the admin can override them via the API once
@@ -116,6 +124,7 @@ def _default() -> dict:
         "current_ip": None,
         "last_check": None,
         "last_error": None,
+        "overwrite_pin": None,
         "providers": [],
     }
 
@@ -166,6 +175,7 @@ def get_state():
     for p in safe.get("providers", []):
         if p.get("auth_pass"):
             p["auth_pass"] = "***"
+    safe.pop("overwrite_pin", None)
     return jsonify(safe)
 
 
@@ -223,7 +233,14 @@ def add_provider():
     with _store().transaction(MODULE_NAME, _default()) as data:
         if any(p["name"] == new["name"] for p in data["providers"]):
             return jsonify({"error": f"name {new['name']!r} already exists"}), 409
+        conflict = _ddnsft_registration_conflict(data, new, None)
+        if conflict:
+            return conflict
+        pin_error = _validate_ddnsft_overwrite_pin_if_needed(data, new, None, payload.get("overwrite_pin"))
+        if pin_error:
+            return pin_error
         data["providers"].append(new)
+        _consume_overwrite_pin(data, new)
     return jsonify({"id": new["id"]}), 201
 
 
@@ -244,11 +261,18 @@ def update_provider(pid: str):
                     new["auth_pass"] = p.get("auth_pass", "")
                 if any(o["name"] == new["name"] and o["id"] != pid for o in data["providers"]):
                     return jsonify({"error": "name collision"}), 409
+                conflict = _ddnsft_registration_conflict(data, new, p)
+                if conflict:
+                    return conflict
+                pin_error = _validate_ddnsft_overwrite_pin_if_needed(data, new, p, payload.get("overwrite_pin"))
+                if pin_error:
+                    return pin_error
                 new["id"] = pid
                 new["last_ip"] = p.get("last_ip")
                 new["last_status"] = p.get("last_status")
                 new["last_update"] = p.get("last_update")
                 data["providers"][i] = new
+                _consume_overwrite_pin(data, new)
                 return jsonify({"ok": True})
     return jsonify({"error": "not found"}), 404
 
@@ -304,6 +328,68 @@ def force_update(pid: str):
     return jsonify({"ok": result["ok"], "ip": ip, **result})
 
 
+@bp.route("/api/host/check", methods=["POST"])
+@login_required
+@csrf_protect
+def check_host():
+    """Check whether a ddnsft.com hostname already resolves on ddnsft DNS."""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        fqdn = _ddnsft_fqdn_from_payload(payload)
+        result = _query_ddnsft_host(fqdn)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+    return jsonify({"ok": True, "fqdn": fqdn, **result})
+
+
+@bp.route("/api/overwrite-pin/request", methods=["POST"])
+@login_required
+@csrf_protect
+def request_overwrite_pin():
+    """Send a one-time 4 digit PIN for an existing ddnsft.com hostname."""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        fqdn = _ddnsft_fqdn_from_payload(payload)
+        result = _query_ddnsft_host(fqdn)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+    if not result["exists"]:
+        return jsonify({"error": f"{fqdn} は未登録です。PINは不要です。"}), 400
+
+    pin = f"{secrets.randbelow(10000):04d}"
+    salt = secrets.token_hex(16)
+    now = _dt.datetime.now()
+    expires_at = now + _dt.timedelta(seconds=PIN_TTL_SECONDS)
+    message = (
+        "To: " + PIN_RECIPIENT + "\n"
+        "From: synca-utm@localhost\n"
+        "Subject: SyncA UTM DDNS overwrite PIN\n"
+        "Content-Type: text/plain; charset=UTF-8\n\n"
+        f"DDNSホスト名: {fqdn}\n"
+        f"上書き許可PIN: {pin}\n"
+        f"有効期限: {expires_at.isoformat(timespec='seconds')}\n"
+    )
+    sent = run(["/usr/sbin/sendmail", "-t"], stdin=message, timeout=10)
+    if not sent.ok:
+        return jsonify({"error": f"PINメール送信に失敗しました: {sent.stderr or sent.stdout}"}), 502
+
+    with _store().transaction(MODULE_NAME, _default()) as data:
+        data["overwrite_pin"] = {
+            "fqdn": fqdn,
+            "salt": salt,
+            "pin_hash": _pin_hash(pin, salt),
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "requested_at": now.isoformat(timespec="seconds"),
+            "sent_to": PIN_RECIPIENT,
+        }
+    return jsonify({"ok": True, "fqdn": fqdn, "sent_to": PIN_RECIPIENT,
+                    "expires_at": expires_at.isoformat(timespec="seconds")})
+
+
 # ---- helpers -----------------------------------------------------------
 
 def _parse_provider_payload(payload: dict) -> dict:
@@ -323,6 +409,109 @@ def _parse_provider_payload(payload: dict) -> dict:
         "auth_user": (payload.get("auth_user") or "").strip(),
         "auth_pass": payload.get("auth_pass") or "",
     }
+
+
+def _provider_fqdn(provider: dict) -> str | None:
+    if not _is_ddnsft_provider(provider):
+        return None
+    account = (provider.get("account") or "").strip().lower()
+    domain = (provider.get("domain") or "").strip().lower() or DDNSFT_DOMAIN
+    if not account:
+        return None
+    return f"{account}.{domain}"
+
+
+def _is_ddnsft_provider(provider: dict) -> bool:
+    domain = (provider.get("domain") or "").strip().lower()
+    preset_type = (provider.get("preset_type") or "").strip().lower()
+    return preset_type == "ddnsft" or domain == DDNSFT_DOMAIN
+
+
+def _ddnsft_fqdn_from_payload(payload: dict) -> str:
+    account = (payload.get("account") or "").strip().lower()
+    domain = (payload.get("domain") or DDNSFT_DOMAIN).strip().lower()
+    if not NAME_RE.match(account):
+        raise ValueError("ddnsft.com のホスト名は英数字、ハイフン、アンダースコアの1-63文字で指定してください")
+    if domain != DDNSFT_DOMAIN:
+        raise ValueError("ddnsft.com の確認対象ドメインは ddnsft.com のみです")
+    return f"{account}.{domain}"
+
+
+def _query_ddnsft_host(fqdn: str) -> dict:
+    result = run(["dig", f"@{DDNSFT_NS}", fqdn, "A", "+short"], timeout=10)
+    if result.returncode == 127:
+        raise RuntimeError("dig が見つかりません。ISOには bind-utils を含めてください。")
+    if not result.ok:
+        raise RuntimeError(f"{fqdn} のDDNS確認に失敗しました: {result.stderr or result.stdout}")
+    records = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return {"exists": bool(records), "records": records}
+
+
+def _ddnsft_registration_conflict(data: dict, new: dict, current: dict | None):
+    fqdn = _provider_fqdn(new)
+    if not fqdn:
+        return None
+    current_fqdn = _provider_fqdn(current or {})
+    for provider in data.get("providers", []):
+        if current and provider.get("id") == current.get("id"):
+            continue
+        if _provider_fqdn(provider) == fqdn:
+            return jsonify({"error": f"{fqdn} はこのUTMに登録済みです。別のホスト名を指定してください。"}), 409
+    if fqdn == current_fqdn:
+        return None
+    try:
+        result = _query_ddnsft_host(fqdn)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+    if result["exists"]:
+        return None
+    return None
+
+
+def _validate_ddnsft_overwrite_pin_if_needed(data: dict, new: dict, current: dict | None, pin: str | None):
+    fqdn = _provider_fqdn(new)
+    if not fqdn or fqdn == _provider_fqdn(current or {}):
+        return None
+    try:
+        result = _query_ddnsft_host(fqdn)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+    if not result["exists"]:
+        return None
+    if _verify_overwrite_pin(data, fqdn, pin):
+        return None
+    return jsonify({
+        "error": f"{fqdn} は既にDDNSに登録されています。上書きする場合は4桁PINを入力してください。",
+        "requires_pin": True,
+        "fqdn": fqdn,
+        "records": result["records"],
+    }), 409
+
+
+def _pin_hash(pin: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{pin}".encode("utf-8")).hexdigest()
+
+
+def _verify_overwrite_pin(data: dict, fqdn: str, pin: str | None) -> bool:
+    if not pin or not re.fullmatch(r"\d{4}", str(pin)):
+        return False
+    stored = data.get("overwrite_pin") or {}
+    if stored.get("fqdn") != fqdn:
+        return False
+    try:
+        expires_at = _dt.datetime.fromisoformat(stored.get("expires_at", ""))
+    except ValueError:
+        return False
+    if expires_at < _dt.datetime.now():
+        return False
+    expected = stored.get("pin_hash") or ""
+    actual = _pin_hash(str(pin), stored.get("salt") or "")
+    return hmac.compare_digest(expected, actual)
+
+
+def _consume_overwrite_pin(data: dict, provider: dict) -> None:
+    if (data.get("overwrite_pin") or {}).get("fqdn") == _provider_fqdn(provider):
+        data["overwrite_pin"] = None
 
 
 def _now() -> str:

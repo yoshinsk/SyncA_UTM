@@ -43,8 +43,13 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 - DDNSサービスは `ddnsft.com` を前提にする。
 - 入力させる値はホスト名の左辺だけにする。例: `example.ddnsft.com` の場合は `example`。
 - ドメインは既定で `ddnsft.com`。
-- DDNS認証ユーザーとパスワードを保存する。
-- WAN IP確定後にDDNS更新を行い、FQDN到達確認後にLet's Encrypt取得へ進む。
+- インストール時にはDDNSプロバイダ登録を自動作成しない。初回起動後、管理GUIで運用者が登録する。
+- DDNS登録前に `dig @ns1.ddnsft.com <host>.ddnsft.com A +short` で既存登録を確認する。
+- 既に登録されているホスト名は通常登録を拒否する。
+- 自身で運用中のホスト名を上書きする場合のみ、4桁数字PINを入力すると登録を許可する。
+- 4桁PINは `syncautm@nsksys.com` にメール送信する。ISOには `bind-utils` と `/usr/sbin/sendmail` 互換MTAを同梱する。
+- DDNS認証ユーザーとパスワードは必要なサービスの場合のみ保存する。`ddnsft.com` の既定プリセットには認証情報を埋め込まない。
+- WAN IP確定後、登録済みDDNSプロバイダがある場合だけDDNS更新を行い、FQDN到達確認後にLet's Encrypt取得へ進む。
 
 ### WAN
 
@@ -102,8 +107,8 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 4. Firewalldの基本プロファイルを適用する。
 5. LANからWANへのNATとforwardを有効化する。
 6. WireGuard、strongSwan、Nginx、server-gui、fail2banを起動する。
-7. WAN疎通確認後にDDNSを更新する。
-8. DDNS解決確認後、Let's Encrypt証明書を取得する。
+7. WAN疎通確認後、登録済みDDNSプロバイダがあればDDNSを更新する。初期状態ではDDNS登録は空にする。
+8. DDNS解決確認後、Let's Encrypt証明書を取得する。DDNS未登録の場合は自己署名証明書のままGUIを継続稼働する。
 9. 初回インターネット接続完了時に日本IPセットを取得し、管理対象国として自動登録する。
 10. certbot、DDNS、GeoIP、backup、更新確認のtimerを有効化する。
 
@@ -223,6 +228,7 @@ Include /etc/httpd/modsecurity.d/activated_rules/*.conf
 - LAN DHCPとLANからインターネットへのNATが動作する。
 - PPPoE環境でMSS clampが有効で、MTUブラックホールを起こさない。
 - DDNSFT.COMのホスト左辺だけでDDNS更新できる。
+- 既存DDNSホスト名はPINなしで登録できず、4桁PINは `syncautm@nsksys.com` に届く。
 - Let's Encrypt証明書取得とrenewalが動作する。
 - 日本IPセットが初回オンライン時に取得され、Firewalldに反映される。
 - strongSwan VPNが切断されない。

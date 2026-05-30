@@ -9,8 +9,6 @@ GUI_USER="${GUI_USER:-loginuser}"
 GUI_PASS="${GUI_PASS:-}"
 DDNS_HOST="${DDNS_HOST:-synca}"
 DDNS_DOMAIN="${DDNS_DOMAIN:-ddnsft.com}"
-DDNS_AUTH_USER="${DDNS_AUTH_USER:-}"
-DDNS_AUTH_PASS="${DDNS_AUTH_PASS:-}"
 LAN_IF="${LAN_IF:-enp3s0}"
 WAN_IF="${WAN_IF:-enp2s0}"
 LAN_CIDR="${LAN_CIDR:-172.17.17.1/24}"
@@ -81,22 +79,8 @@ PY
   "current_ip": null,
   "last_check": null,
   "last_error": null,
-  "providers": [
-    {
-      "id": "ddnsft-default",
-      "name": "ddnsft-${DDNS_HOST}",
-      "enabled": true,
-      "preset_type": "ddnsft",
-      "template": "https://update.ddnsft.com/update/update.php?host={account}&dm={domain}&ip={ip}",
-      "account": "${DDNS_HOST}",
-      "domain": "${DDNS_DOMAIN}",
-      "auth_user": "${DDNS_AUTH_USER}",
-      "auth_pass": "${DDNS_AUTH_PASS}",
-      "last_ip": null,
-      "last_status": null,
-      "last_update": null
-    }
-  ]
+  "overwrite_pin": null,
+  "providers": []
 }
 JSON
 
