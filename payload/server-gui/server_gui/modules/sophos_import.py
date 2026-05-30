@@ -274,6 +274,8 @@ def _build_ui_preview(index: dict[str, dict]) -> dict:
     return {
         "network": _preview_network(index),
         "static_routes": _preview_static_routes(index),
+        "dhcp": _preview_dhcp(index),
+        "dhcp_options": _preview_dhcp_options(index),
         "strongswan": _preview_ipsec(index),
         "nginx": _preview_nginx(index),
         "certificates": _preview_certificates(index),
@@ -376,6 +378,61 @@ def _preview_ipsec(index: dict[str, dict]) -> list[dict]:
     return rows
 
 
+def _preview_dhcp(index: dict[str, dict]) -> list[dict]:
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "DHCPv4 server":
+            continue
+        f = obj.get("fields", {})
+        rows.append({
+            "ref": ref,
+            "enabled": f.get("status switch") == "1",
+            "form": {
+                "対象インターフェース": _name(index, f.get("interface", "")),
+                "開始IP": f.get("range_start", ""),
+                "終了IP": f.get("range_end", ""),
+                "ネットマスク": f.get("netmask", ""),
+                "デフォルトゲートウェイ": f.get("default gateway address", ""),
+                "DNS 1": f.get("first DNS server", ""),
+                "DNS 2": f.get("second DNS server", ""),
+                "ドメイン": f.get("domain", ""),
+                "リース時間(秒)": f.get("lease time", ""),
+                "静的割当のみ": "はい" if f.get("static mappings only switch") == "1" else "いいえ",
+                "WINS node type": f.get("WINS node type", ""),
+                "WINS server": f.get("WINS server address", ""),
+                "Proxy auto-config": "はい" if f.get("proxy-autoconfig switch") == "1" else "いいえ",
+                "Relay mode": "はい" if f.get("relay mode switch") == "1" else "いいえ",
+                "コメント": f.get("comment", ""),
+            },
+        })
+    return rows
+
+
+def _preview_dhcp_options(index: dict[str, dict]) -> list[dict]:
+    rows = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "DHCPv4 option":
+            continue
+        f = obj.get("fields", {})
+        value = f.get("text value") or f.get("IPv4 address") or f.get("hex value")
+        rows.append({
+            "ref": ref,
+            "enabled": f.get("status switch") == "1",
+            "form": {
+                "オプション番号": f.get("code number", ""),
+                "オプション名": f.get("option name", ""),
+                "型": f.get("type", ""),
+                "値": value,
+                "スコープ": f.get("scope", ""),
+                "対象DHCPサーバー": ", ".join(_name(index, r) for r in _split_refs(f.get("server list", ""))),
+                "対象ホスト": ", ".join(_name(index, r) for r in _split_refs(f.get("host list", ""))),
+                "MAC prefix": f.get("mac prefix", ""),
+                "Vendor prefix": f.get("vendor prefix", ""),
+            },
+        })
+    return rows
+
+
 def _preview_nginx(index: dict[str, dict]) -> list[dict]:
     backends_by_name = {}
     for ref, obj in index.items():
@@ -393,16 +450,32 @@ def _preview_nginx(index: dict[str, dict]) -> list[dict]:
         backend_scheme = "https" if backend.get("SSL switch") == "1" else "http"
         backend_host = _resolve_host(index, backend.get("host", ""))
         backend_port = backend.get("port", "")
+        domains = [v for v in re.split(r"[\s,]+", f.get("domain list", "")) if v]
+        cert_fqdn = domains[0] if domains else ""
         form = {
             "vhost名": f.get("name", ""),
             "有効": "はい" if f.get("status switch") == "1" else "いいえ",
-            "公開ホスト名": f.get("domain list", ""),
+            "server_name": " ".join(domains),
             "待受スキーム": f.get("type", ""),
             "待受ポート": f.get("port", ""),
+            "Listen設定": f"{f.get('port', '')} {'ssl' if f.get('type') == 'https' else ''}".strip(),
+            "証明書候補": f"/etc/letsencrypt/live/{cert_fqdn}/fullchain.pem" if cert_fqdn else "",
+            "秘密鍵候補": f"/etc/letsencrypt/live/{cert_fqdn}/privkey.pem" if cert_fqdn else "",
             "バックエンド名": backend.get("name", ""),
+            "バックエンド方式": backend_scheme,
+            "バックエンドホスト": backend_host,
+            "バックエンドポート": backend_port,
             "バックエンドURL": f"{backend_scheme}://{backend_host}:{backend_port}" if backend else "",
             "Hostヘッダ維持": "はい" if f.get("switch to preserve host header") == "1" else "いいえ",
             "HTTPからHTTPSへリダイレクト": "はい" if f.get("implicit redirection from http to https switch") == "1" else "いいえ",
+            "WebSocket対応": "いいえ",
+            "client_max_body_size": "10m",
+            "set_real_ip_from": "",
+            "Sophos profile": f.get("profile", ""),
+            "HTML内URL書換": "はい" if f.get("URL rewriting in HTML documents") == "1" else "いいえ",
+            "Content-Type補完": "はい" if f.get("add missing Content-Type header switch") == "1" else "いいえ",
+            "例外リスト": ", ".join(_name(index, r) for r in _split_refs(f.get("exception list", ""))),
+            "コメント": f.get("comment", ""),
         }
         rows.append({"ref": ref, "backend_ref": backend_ref, "form": form})
     return rows
@@ -422,18 +495,24 @@ def _preview_certificates(index: dict[str, dict]) -> list[dict]:
             continue
         f = obj.get("fields", {})
         name = f.get("name", "")
-        if "(X509 User Cert)" in name:
+        if "(X509 User Cert)" in name or name == "Local X509 Cert" or name.startswith("WebAdmin certificate for "):
             continue
+        is_ddnsft = name.endswith(".ddnsft.com")
         usage = "Nginx候補" if name in nginx_domains else "参考のみ"
-        if "WebAdmin certificate" in name:
-            usage = "除外: WebAdmin/管理証明書"
+        if is_ddnsft:
+            usage = "DDNS上書き登録が必要 / 証明書取込候補"
         rows.append({
             "ref": ref,
             "usage": usage,
             "form": {
                 "証明書名": name,
+                "FQDN": name if "." in name else "",
+                "DDNS登録": "上書きが必要" if is_ddnsft else "不要または対象外",
+                "DDNSホスト名": name.removesuffix(".ddnsft.com") if is_ddnsft else "",
                 "秘密鍵の取込": "はい" if f.get("private key") else "いいえ",
                 "証明書の取込": "はい" if f.get("certificate") else "いいえ",
+                "issuer certificate": f.get("issuer certificate", ""),
+                "コメント": f.get("comment", ""),
             },
         })
     return rows
