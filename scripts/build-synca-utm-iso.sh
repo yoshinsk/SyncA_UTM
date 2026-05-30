@@ -116,8 +116,18 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text()
 lines = []
+skip_synca = False
 for line in text.splitlines():
+    if line.startswith("label synca-utm"):
+        skip_synca = True
+        continue
+    if skip_synca and line.startswith("label "):
+        skip_synca = False
+    if skip_synca:
+        continue
     stripped = line.lstrip()
+    if stripped == "menu default":
+        continue
     if stripped.startswith("append "):
         line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
         line = re.sub(r"\s+inst\.repo=\S+", "", line)
@@ -128,19 +138,22 @@ for line in text.splitlines():
         if "inst.nompath" not in line:
             line += " inst.nompath"
     lines.append(line)
-path.write_text("\n".join(lines) + "\n")
-PY
-    if grep -q "Install SyncA UTM" "$cfg"; then
-        return 0
-    fi
-    cat >> "$cfg" <<'CFG'
 
+synca_block = """\
 label synca-utm
   menu label Install SyncA UTM
   menu default
   kernel vmlinuz
   append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
-CFG
+"""
+for idx, line in enumerate(lines):
+    if line.startswith("label "):
+        lines[idx:idx] = synca_block.rstrip("\n").splitlines() + [""]
+        break
+else:
+    lines.extend([""] + synca_block.rstrip("\n").splitlines())
+path.write_text("\n".join(lines) + "\n")
+PY
 }
 
 patch_grub() {
@@ -154,8 +167,23 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text()
 lines = []
+skip_synca = False
+brace_depth = 0
 for line in text.splitlines():
     stripped = line.lstrip()
+    if not skip_synca and "menuentry 'Install SyncA UTM'" in line:
+        skip_synca = True
+        brace_depth = line.count("{") - line.count("}")
+        continue
+    if skip_synca:
+        brace_depth += line.count("{") - line.count("}")
+        if brace_depth <= 0:
+            skip_synca = False
+        continue
+    if stripped.startswith("set default="):
+        line = 'set default="synca-utm"'
+    if "search --no-floppy --set=root -l " in line:
+        line = "search --no-floppy --set=root -l 'SYNCA_UTM_9'"
     if stripped.startswith(("linux ", "linuxefi ")):
         line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
         line = re.sub(r"\s+inst\.repo=\S+", "", line)
@@ -166,20 +194,24 @@ for line in text.splitlines():
         if "inst.nompath" not in line:
             line += " inst.nompath"
     lines.append(line)
-path.write_text("\n".join(lines) + "\n")
-PY
-    if grep -q "Install SyncA UTM" "$cfg"; then
-        return 0
-    fi
-    cat >> "$cfg" <<'CFG'
 
-set default="synca-utm"
+if not any(line.lstrip().startswith("set default=") for line in lines):
+    lines.insert(0, 'set default="synca-utm"')
 
+synca_block = """\
 menuentry 'Install SyncA UTM' --id synca-utm --class fedora --class gnu-linux --class gnu --class os {
     linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
     initrdefi /images/pxeboot/initrd.img
 }
-CFG
+"""
+for idx, line in enumerate(lines):
+    if "menuentry " in line:
+        lines[idx:idx] = synca_block.rstrip("\n").splitlines() + [""]
+        break
+else:
+    lines.extend([""] + synca_block.rstrip("\n").splitlines())
+path.write_text("\n".join(lines) + "\n")
+PY
 }
 
 build_iso() {
