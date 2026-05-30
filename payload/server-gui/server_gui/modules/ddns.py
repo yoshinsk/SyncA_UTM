@@ -49,6 +49,7 @@ import smtplib
 import urllib.error
 import urllib.request
 import uuid
+from email.utils import formatdate, make_msgid
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -529,6 +530,8 @@ def _send_pin_email(fqdn: str, pin: str, expires_at: _dt.datetime) -> None:
         msg["To"] = PIN_RECIPIENT
         msg["From"] = SMTP_FROM
         msg["Subject"] = subject
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain=_message_id_domain())
         msg.set_content(body)
         try:
             if SMTP_SSL:
@@ -548,12 +551,19 @@ def _send_pin_email(fqdn: str, pin: str, expires_at: _dt.datetime) -> None:
         "To: " + PIN_RECIPIENT + "\n"
         "From: " + SMTP_FROM + "\n"
         "Subject: " + subject + "\n"
+        "Date: " + formatdate(localtime=True) + "\n"
+        "Message-ID: " + make_msgid(domain=_message_id_domain()) + "\n"
         "Content-Type: text/plain; charset=UTF-8\n\n"
         + body
     )
     sent = run(["/usr/sbin/sendmail", "-f", SMTP_FROM, "-t"], stdin=message, timeout=10)
     if not sent.ok:
         raise RuntimeError(f"PINメール送信に失敗しました(sendmail): {sent.stderr or sent.stdout}")
+
+
+def _message_id_domain() -> str:
+    domain = SMTP_FROM.rsplit("@", 1)[-1].strip()
+    return domain or "localhost"
 
 
 def _pin_hash(pin: str, salt: str) -> str:
