@@ -42,8 +42,17 @@ install_extra_rpms() {
     # Optional local RPM closure for packages not present on the AlmaLinux DVD,
     # for example nginx-mod-modsecurity from EPEL. The build process must place
     # all dependency RPMs in this directory for fully offline installation.
+    local rpm_glob=()
     if [[ -d "$RPM_DIR" ]] && compgen -G "$RPM_DIR/*.rpm" >/dev/null; then
-        dnf install -y "$RPM_DIR"/*.rpm
+        rpm_glob+=("$RPM_DIR"/*.rpm)
+    fi
+    if [[ -d "$RPM_DIR/Packages" ]] && compgen -G "$RPM_DIR/Packages/*.rpm" >/dev/null; then
+        rpm_glob+=("$RPM_DIR"/Packages/*.rpm)
+    fi
+    if [[ "${#rpm_glob[@]}" -gt 0 ]]; then
+        dnf install -y "${rpm_glob[@]}" || {
+            echo "warning: optional SyncA RPM installation failed; continuing because Kickstart already installs required packages" >&2
+        }
     fi
 }
 
@@ -59,8 +68,12 @@ install_wireguard_ui() {
 install_firewalld_profile() {
     install -d -m 0755 /opt/synca-installer/firewalld-profiles
     if [[ -f "${INSTALLER_DIR}/firewalld-profiles/synca-utm-default.json" ]]; then
-        install -m 0644 "${INSTALLER_DIR}/firewalld-profiles/synca-utm-default.json" \
-            /opt/synca-installer/firewalld-profiles/synca-utm-default.json
+        if [[ "$(readlink -f "${INSTALLER_DIR}/firewalld-profiles/synca-utm-default.json")" != "/opt/synca-installer/firewalld-profiles/synca-utm-default.json" ]]; then
+            install -m 0644 "${INSTALLER_DIR}/firewalld-profiles/synca-utm-default.json" \
+                /opt/synca-installer/firewalld-profiles/synca-utm-default.json
+        else
+            chmod 0644 /opt/synca-installer/firewalld-profiles/synca-utm-default.json
+        fi
     fi
 }
 
@@ -197,7 +210,11 @@ UNIT
 
 main() {
     require_root
-    install -m 0755 "${INSTALLER_DIR}/synca-firstboot.sh" /opt/synca-installer/synca-firstboot.sh
+    if [[ "$(readlink -f "${INSTALLER_DIR}/synca-firstboot.sh")" != "/opt/synca-installer/synca-firstboot.sh" ]]; then
+        install -m 0755 "${INSTALLER_DIR}/synca-firstboot.sh" /opt/synca-installer/synca-firstboot.sh
+    else
+        chmod 0755 /opt/synca-installer/synca-firstboot.sh
+    fi
     write_systemd_units
     systemctl daemon-reload
     systemctl enable synca-firstboot.service
