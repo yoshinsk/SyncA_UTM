@@ -3,7 +3,6 @@
 
 text
 skipx
-interactive
 lang en_US.UTF-8
 keyboard us
 timezone Asia/Tokyo --utc
