@@ -59,6 +59,7 @@ collect_config() {
     nmcli -t -f DEVICE,TYPE,STATE device status || true
     echo
 
+    SYSTEM_HOSTNAME="$(prompt "System hostname" "synca-utm")"
     ADMIN_USER="$(prompt "Linux sudo user" "loginuser")"
     ADMIN_PASS="$(prompt_secret "Linux sudo user password")"
     GUI_USER="$(prompt "GUI user" "$ADMIN_USER")"
@@ -100,6 +101,7 @@ collect_config() {
 write_install_env() {
     install -d -m 0700 "$SYNC_DIR"
     cat > "${SYNC_DIR}/install.env" <<ENV
+SYSTEM_HOSTNAME=${SYSTEM_HOSTNAME}
 ADMIN_USER=${ADMIN_USER}
 GUI_USER=${GUI_USER}
 ADMIN_CIDR=${ADMIN_CIDR}
@@ -119,6 +121,10 @@ DDNS_LEFT=${DDNS_LEFT}
 DDNS_DOMAIN=${DDNS_DOMAIN}
 ENV
     chmod 0600 "${SYNC_DIR}/install.env"
+}
+
+configure_hostname() {
+    hostnamectl set-hostname "$SYSTEM_HOSTNAME"
 }
 
 configure_users() {
@@ -360,6 +366,7 @@ start_services() {
 main() {
     collect_config
     write_install_env
+    configure_hostname
     configure_users
     configure_network
     write_server_gui_config

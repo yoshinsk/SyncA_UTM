@@ -16,6 +16,8 @@ WGUI_BINARY="${WGUI_BINARY:-}"
 SYNC_PREPARE_ONLY="${SYNC_PREPARE_ONLY:-0}"
 SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-1}"
 SYNCA_PRIVATE_SMTP_DROPIN="${SYNCA_PRIVATE_SMTP_DROPIN:-}"
+SYNCA_INITIAL_ADMIN_USER="${SYNCA_INITIAL_ADMIN_USER:-}"
+SYNCA_INITIAL_ADMIN_PASSWORD="${SYNCA_INITIAL_ADMIN_PASSWORD:-}"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -70,6 +72,37 @@ package_wheelhouse() {
 copy_payload_files() {
     install -m 0644 "${ROOT_DIR}/iso/kickstart/synca-utm.ks" \
         "${BUILD_DIR}/payload/ks/synca-utm.ks"
+    if [[ -n "$SYNCA_INITIAL_ADMIN_USER" || -n "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
+        if [[ -z "$SYNCA_INITIAL_ADMIN_USER" || -z "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
+            echo "SYNCA_INITIAL_ADMIN_USER and SYNCA_INITIAL_ADMIN_PASSWORD must be set together." >&2
+            exit 1
+        fi
+        python3 - "${BUILD_DIR}/payload/ks/synca-utm.ks" \
+            "$SYNCA_INITIAL_ADMIN_USER" "$SYNCA_INITIAL_ADMIN_PASSWORD" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+user = shlex.quote(sys.argv[2])
+password = shlex.quote(sys.argv[3])
+text = path.read_text()
+marker = "%post --log=/root/synca-utm-post.log\nset -euxo pipefail\n"
+block = f"""set -euxo pipefail
+if ! id {user} >/dev/null 2>&1; then
+    useradd -m -G wheel {user}
+fi
+printf '%s:%s\\n' {user} {password} | chpasswd
+install -d -m 0750 /etc/sudoers.d
+echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/10-synca-wheel
+chmod 0440 /etc/sudoers.d/10-synca-wheel
+"""
+if marker not in text:
+    raise SystemExit("kickstart post marker not found")
+path.write_text(text.replace(marker, "%post --log=/root/synca-utm-post.log\n" + block, 1))
+PY
+        echo "Included initial admin user for internal ISO."
+    fi
     install -m 0755 "${ROOT_DIR}/iso/payload/synca-install.sh" \
         "${BUILD_DIR}/payload/synca/synca-install.sh"
     install -m 0755 "${ROOT_DIR}/iso/payload/synca-firstboot.sh" \

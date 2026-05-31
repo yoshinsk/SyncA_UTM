@@ -30,8 +30,6 @@ install_server_gui() {
     python3 -m venv /opt/server-gui/venv
     if [[ -d "$WHEELHOUSE" ]] && compgen -G "$WHEELHOUSE/*.whl" >/dev/null; then
         /opt/server-gui/venv/bin/pip install --no-index --find-links "$WHEELHOUSE" \
-            --upgrade pip setuptools wheel
-        /opt/server-gui/venv/bin/pip install --no-index --find-links "$WHEELHOUSE" \
             -r /opt/server-gui/requirements.txt
     else
         echo "Python wheelhouse is missing. Rebuild ISO with SYNC_BUILD_WHEELHOUSE=1." >&2
@@ -162,17 +160,20 @@ UNIT
     cat > /etc/systemd/system/synca-firstboot.service <<'UNIT'
 [Unit]
 Description=SyncA UTM first boot console setup
-After=network.target
-Before=server-gui.service nginx.service
+After=systemd-user-sessions.service network.target
+Before=getty@tty1.service server-gui.service nginx.service
+Conflicts=getty@tty1.service
 ConditionPathExists=!/etc/synca/firstboot.done
 
 [Service]
 Type=oneshot
 ExecStart=/opt/synca-installer/synca-firstboot.sh
-StandardInput=tty
+StandardInput=tty-force
 StandardOutput=tty
 StandardError=tty
-TTYPath=/dev/console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
 RemainAfterExit=yes
 
 [Install]
@@ -199,12 +200,14 @@ UNIT
 
 main() {
     require_root
+    install -m 0755 "${INSTALLER_DIR}/synca-firstboot.sh" /opt/synca-installer/synca-firstboot.sh
+    write_systemd_units
+    systemctl daemon-reload
+    systemctl enable synca-firstboot.service
     install_extra_rpms
     install_server_gui
     install_wireguard_ui
     install_firewalld_profile
-    install -m 0755 "${INSTALLER_DIR}/synca-firstboot.sh" /opt/synca-installer/synca-firstboot.sh
-    write_systemd_units
     install_private_overrides
     systemctl daemon-reload
 }
