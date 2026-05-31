@@ -86,3 +86,49 @@ chmod +x /opt/synca-installer/*.sh
 /opt/synca-installer/synca-install.sh --postinstall
 systemctl enable synca-firstboot.service
 %end
+
+%post --nochroot --log=/mnt/sysroot/root/synca-utm-bootloader-post.log
+set -euxo pipefail
+
+mountpoint -q /mnt/sysroot/dev || mount --bind /dev /mnt/sysroot/dev
+mountpoint -q /mnt/sysroot/proc || mount --bind /proc /mnt/sysroot/proc
+mountpoint -q /mnt/sysroot/sys || mount --bind /sys /mnt/sysroot/sys
+mountpoint -q /mnt/sysroot/run || mount --bind /run /mnt/sysroot/run
+
+boot_source="$(findmnt -n -o SOURCE /mnt/sysroot/boot 2>/dev/null || true)"
+if [[ -z "$boot_source" ]]; then
+    boot_source="$(findmnt -n -o SOURCE /mnt/sysroot 2>/dev/null || true)"
+fi
+boot_device="$(readlink -f "$boot_source" 2>/dev/null || printf '%s' "$boot_source")"
+target_disk="$(lsblk -npo PKNAME "$boot_device" 2>/dev/null | head -n1 || true)"
+
+if [[ -z "$target_disk" && "$boot_device" =~ ^/dev/(sd[a-z]|vd[a-z])[0-9]+$ ]]; then
+    target_disk="/dev/${BASH_REMATCH[1]}"
+fi
+if [[ -z "$target_disk" && "$boot_device" =~ ^/dev/(nvme[0-9]+n[0-9]+)p[0-9]+$ ]]; then
+    target_disk="/dev/${BASH_REMATCH[1]}"
+fi
+
+if [[ -n "$target_disk" && -b "$target_disk" && ! -d /sys/firmware/efi ]]; then
+    chroot /mnt/sysroot grub2-install "$target_disk"
+fi
+
+chroot /mnt/sysroot grub2-mkconfig -o /boot/grub2/grub.cfg
+
+if [[ -d /sys/firmware/efi && -d /mnt/sysroot/boot/efi/EFI ]]; then
+    install -d -m 0755 /mnt/sysroot/boot/efi/EFI/BOOT
+    if [[ -f /mnt/sysroot/boot/efi/EFI/almalinux/shimx64.efi ]]; then
+        cp -f /mnt/sysroot/boot/efi/EFI/almalinux/shimx64.efi \
+            /mnt/sysroot/boot/efi/EFI/BOOT/BOOTX64.EFI
+    elif [[ -f /mnt/sysroot/boot/efi/EFI/almalinux/grubx64.efi ]]; then
+        cp -f /mnt/sysroot/boot/efi/EFI/almalinux/grubx64.efi \
+            /mnt/sysroot/boot/efi/EFI/BOOT/BOOTX64.EFI
+    fi
+    cp -f /mnt/sysroot/boot/efi/EFI/almalinux/grubx64.efi \
+        /mnt/sysroot/boot/efi/EFI/BOOT/grubx64.efi 2>/dev/null || true
+    cp -f /mnt/sysroot/boot/efi/EFI/almalinux/mmx64.efi \
+        /mnt/sysroot/boot/efi/EFI/BOOT/mmx64.efi 2>/dev/null || true
+    cp -f /mnt/sysroot/boot/efi/EFI/almalinux/grub.cfg \
+        /mnt/sysroot/boot/efi/EFI/BOOT/grub.cfg 2>/dev/null || true
+fi
+%end

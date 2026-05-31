@@ -7,6 +7,16 @@ set -euo pipefail
 CONFIG_DIR="/etc/server-gui"
 SYNC_DIR="/etc/synca"
 
+bind_firstboot_tty() {
+    local tty="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
+    if [[ -z "${SYNCA_FIRSTBOOT_TTY_BOUND:-}" && -e "$tty" ]]; then
+        export SYNCA_FIRSTBOOT_TTY_BOUND=1
+        exec "$0" "$@" <"$tty" >"$tty" 2>&1
+    fi
+}
+
+bind_firstboot_tty "$@"
+
 prompt() {
     # Read one line with a default. Prompts are ASCII for installer console
     # compatibility; Japanese is available later in the web GUI.
