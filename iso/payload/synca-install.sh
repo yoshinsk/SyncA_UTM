@@ -35,6 +35,7 @@ install_server_gui() {
         echo "Python wheelhouse is missing. Rebuild ISO with SYNC_BUILD_WHEELHOUSE=1." >&2
         exit 1
     fi
+    sed -i 's/\r$//' /opt/server-gui/bin/*
     chmod +x /opt/server-gui/bin/*
 }
 
@@ -63,6 +64,30 @@ install_wireguard_ui() {
     if [[ -f "$WGUI_BINARY" ]]; then
         install -m 0755 "$WGUI_BINARY" /opt/wireguard/wireguard-ui
     fi
+}
+
+install_letsencrypt_hooks() {
+    install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+    cat > /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --zone=public --add-service=http || true
+    firewall-cmd --zone=public --add-service=https || true
+fi
+systemctl stop nginx.service || true
+HOOK
+    cat > /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+systemctl start nginx.service || true
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --zone=public --remove-service=http || true
+    firewall-cmd --zone=public --remove-service=https || true
+fi
+HOOK
+    chmod 0755 /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh \
+        /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh
 }
 
 install_firewalld_profile() {
@@ -180,6 +205,7 @@ ConditionPathExists=!/etc/synca/firstboot.done
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/opt/synca-installer/private/firstboot.env
 ExecStart=/opt/synca-installer/synca-firstboot.sh --interactive
 StandardInput=tty-force
 StandardOutput=tty
@@ -225,6 +251,7 @@ main() {
     install_extra_rpms
     install_server_gui
     install_wireguard_ui
+    install_letsencrypt_hooks
     install_firewalld_profile
     install_private_overrides
     systemctl daemon-reload

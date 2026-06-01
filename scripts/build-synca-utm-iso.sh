@@ -16,6 +16,7 @@ WGUI_BINARY="${WGUI_BINARY:-}"
 SYNC_PREPARE_ONLY="${SYNC_PREPARE_ONLY:-0}"
 SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-1}"
 SYNCA_PRIVATE_SMTP_DROPIN="${SYNCA_PRIVATE_SMTP_DROPIN:-}"
+SYNCA_PRIVATE_FIRSTBOOT_ENV="${SYNCA_PRIVATE_FIRSTBOOT_ENV:-}"
 SYNCA_INITIAL_ADMIN_USER="${SYNCA_INITIAL_ADMIN_USER:-}"
 SYNCA_INITIAL_ADMIN_PASSWORD="${SYNCA_INITIAL_ADMIN_PASSWORD:-}"
 
@@ -119,6 +120,16 @@ PY
         install -m 0600 "$SYNCA_PRIVATE_SMTP_DROPIN" \
             "${BUILD_DIR}/payload/synca/private/server-gui-ddns-smtp.conf"
         echo "Included private SMTP drop-in for internal ISO."
+    fi
+    if [[ -n "$SYNCA_PRIVATE_FIRSTBOOT_ENV" ]]; then
+        if [[ ! -f "$SYNCA_PRIVATE_FIRSTBOOT_ENV" ]]; then
+            echo "SYNCA_PRIVATE_FIRSTBOOT_ENV does not exist: $SYNCA_PRIVATE_FIRSTBOOT_ENV" >&2
+            exit 1
+        fi
+        mkdir -p "${BUILD_DIR}/payload/synca/private"
+        install -m 0600 "$SYNCA_PRIVATE_FIRSTBOOT_ENV" \
+            "${BUILD_DIR}/payload/synca/private/firstboot.env"
+        echo "Included private firstboot environment for internal ISO."
     fi
     if [[ -n "$WGUI_BINARY" ]]; then
         install -m 0755 "$WGUI_BINARY" "${BUILD_DIR}/payload/synca/wireguard-ui"

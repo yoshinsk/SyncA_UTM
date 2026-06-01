@@ -490,7 +490,7 @@ def create_pppoe():
         return jsonify({"ok": False, "error": "password set failed: " + pw_res.stderr.strip()}), 500
 
     if mtu is not None:
-        sudo_run(["nmcli", "connection", "modify", name, "802-3-ethernet.mtu", str(mtu)])
+        sudo_run(["nmcli", "connection", "modify", name, "ppp.mtu", str(mtu), "ppp.mru", str(mtu)])
 
     output = res.stdout + res.stderr
 
@@ -541,7 +541,7 @@ def update_pppoe(name: str):
             return jsonify({"error": "invalid MTU"}), 400
         if not (576 <= mtu <= 1500):
             return jsonify({"error": "MTU out of range (576-1500)"}), 400
-        r = sudo_run(["nmcli", "connection", "modify", name, "802-3-ethernet.mtu", str(mtu)])
+        r = sudo_run(["nmcli", "connection", "modify", name, "ppp.mtu", str(mtu), "ppp.mru", str(mtu)])
         if not r.ok:
             return jsonify({"ok": False, "error": r.stderr.strip()}), 500
         changed.append("mtu")

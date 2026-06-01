@@ -427,7 +427,7 @@ configure_network() {
         pppoe)
             nmcli connection add type pppoe ifname "$WAN_IF" con-name synca-pppoe \
                 pppoe.username "$PPPOE_USER" pppoe.password "$PPPOE_PASS" \
-                ppp.mtu 1492 ppp.mru 1492 ipv6.method ignore \
+                ppp.mtu 1454 ppp.mru 1454 ipv6.method ignore \
                 connection.autoconnect yes connection.zone public
             activate_connection_with_retry synca-pppoe 4 || true
             ;;
@@ -462,6 +462,27 @@ PY
   "providers": []
 }
 JSON
+    if [[ -n "$DDNS_LEFT" && -n "${SYNCA_DDNSFT_AUTH_USER:-}" && -n "${SYNCA_DDNSFT_AUTH_PASS:-}" ]]; then
+        python3 - <<PY
+import json
+from pathlib import Path
+
+path = Path(${CONFIG_DIR@Q}) / "ddns.json"
+data = json.loads(path.read_text(encoding="utf-8"))
+data["providers"] = [{
+    "id": "default-ddnsft",
+    "name": ${DDNS_LEFT@Q},
+    "enabled": True,
+    "preset_type": "ddnsft",
+    "template": "https://update.ddnsft.com/update/update.php?host={account}&dm={domain}&ip={ip}",
+    "account": ${DDNS_LEFT@Q},
+    "domain": ${DDNS_DOMAIN@Q},
+    "auth_user": ${SYNCA_DDNSFT_AUTH_USER@Q},
+    "auth_pass": ${SYNCA_DDNSFT_AUTH_PASS@Q},
+}]
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+    fi
 
     cat > "${CONFIG_DIR}/geoip.json" <<'JSON'
 {
