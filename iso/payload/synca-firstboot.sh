@@ -6,6 +6,7 @@ set -euo pipefail
 
 CONFIG_DIR="/etc/server-gui"
 SYNC_DIR="/etc/synca"
+BACKTITLE="SyncA UTM initial setup"
 
 bind_firstboot_tty() {
     local tty="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
@@ -33,6 +34,61 @@ prompt_secret() {
         echo
     done
     printf '%s' "$value"
+}
+
+has_dialog() {
+    command -v dialog >/dev/null 2>&1
+}
+
+fatal() {
+    local message="$1"
+    if has_dialog; then
+        dialog --backtitle "$BACKTITLE" --title "Error" --msgbox "$message" 12 70 || true
+    else
+        echo "$message" >&2
+    fi
+    exit 1
+}
+
+ui_message() {
+    local title="$1"
+    local message="$2"
+    if has_dialog; then
+        dialog --backtitle "$BACKTITLE" --title "$title" --msgbox "$message" 16 72
+    else
+        echo "$title"
+        echo "$message"
+        echo
+    fi
+}
+
+ui_input() {
+    local title="$1"
+    local message="$2"
+    local default="$3"
+    local value
+    if has_dialog; then
+        value="$(dialog --stdout --backtitle "$BACKTITLE" --title "$title" --inputbox "$message" 12 72 "$default")" \
+            || fatal "Setup cancelled."
+        printf '%s' "${value:-$default}"
+    else
+        prompt "$title" "$default"
+    fi
+}
+
+ui_password() {
+    local title="$1"
+    local message="$2"
+    local value
+    if has_dialog; then
+        while [[ -z "${value:-}" ]]; do
+            value="$(dialog --stdout --backtitle "$BACKTITLE" --title "$title" --insecure --passwordbox "$message" 10 72)" \
+                || fatal "Setup cancelled."
+        done
+        printf '%s' "$value"
+    else
+        prompt_secret "$title"
+    fi
 }
 
 require_interface() {
@@ -70,6 +126,7 @@ select_interface() {
     local exclude="${2:-}"
     local choice count name index
     local -a names=()
+    local -a menu_items=()
 
     while IFS= read -r name; do
         [[ -z "$name" || "$name" == "$exclude" ]] && continue
@@ -78,8 +135,20 @@ select_interface() {
 
     count="${#names[@]}"
     if [[ "$count" -eq 0 ]]; then
-        echo "No selectable ethernet interface found for ${role}." >&2
-        exit 1
+        fatal "No selectable ethernet interface found for ${role}."
+    fi
+
+    if has_dialog; then
+        for name in "${names[@]}"; do
+            local state mac connection
+            state="$(nmcli -g GENERAL.STATE device show "$name" 2>/dev/null | head -n1 || true)"
+            mac="$(nmcli -g GENERAL.HWADDR device show "$name" 2>/dev/null | head -n1 || true)"
+            connection="$(nmcli -g GENERAL.CONNECTION device show "$name" 2>/dev/null | head -n1 || true)"
+            menu_items+=("$name" "state=${state:-unknown} mac=${mac:--} con=${connection:---}")
+        done
+        dialog --stdout --backtitle "$BACKTITLE" --title "${role} interface" --menu \
+            "Select the ${role} interface." 20 78 10 "${menu_items[@]}" || fatal "Setup cancelled."
+        return 0
     fi
 
     while true; do
@@ -101,6 +170,18 @@ select_interface() {
         fi
         echo "Invalid ${role} interface selection: ${choice}" >&2
     done
+}
+
+select_wan_mode() {
+    if has_dialog; then
+        dialog --stdout --backtitle "$BACKTITLE" --title "WAN mode" --menu \
+            "Select the WAN connection method." 12 72 3 \
+            "dhcp" "DHCP client" \
+            "static" "Static IP address" \
+            "pppoe" "PPPoE" || fatal "Setup cancelled."
+    else
+        prompt "WAN mode: dhcp/static/pppoe" "dhcp"
+    fi
 }
 
 cidr_ip() {
@@ -129,15 +210,18 @@ cidr_netmask() {
 
 collect_config() {
     clear || true
-    echo "SyncA UTM first boot setup"
-    echo "Use ASCII input on this console. Japanese UI is available in the web GUI."
-    echo
-    SYSTEM_HOSTNAME="$(prompt "System hostname" "synca-utm")"
-    ADMIN_USER="$(prompt "Linux sudo user" "loginuser")"
-    ADMIN_PASS="$(prompt_secret "Linux sudo user password")"
-    GUI_USER="$(prompt "GUI user" "$ADMIN_USER")"
-    GUI_PASS="$(prompt_secret "GUI password")"
-    ADMIN_CIDR="$(prompt "Management source CIDR" "0.0.0.0/0")"
+    ui_message "Welcome" "This wizard configures SyncA UTM for first use.
+
+Use ASCII input on this console. Japanese UI is available later in the web GUI.
+
+You will select WAN/LAN interfaces, WAN connection method, administrator account, and LAN defaults."
+
+    SYSTEM_HOSTNAME="$(ui_input "System hostname" "Hostname for this machine." "synca-utm")"
+    ADMIN_USER="$(ui_input "Linux sudo user" "Linux sudo user name." "loginuser")"
+    ADMIN_PASS="$(ui_password "Linux sudo user password" "Password for the Linux sudo user.")"
+    GUI_USER="$(ui_input "GUI user" "Web GUI user name." "$ADMIN_USER")"
+    GUI_PASS="$(ui_password "GUI password" "Password for the Web GUI user.")"
+    ADMIN_CIDR="$(ui_input "Management source CIDR" "CIDR allowed to manage this appliance. Use 0.0.0.0/0 for initial setup from any source." "0.0.0.0/0")"
 
     WAN_IF="$(select_interface "WAN")"
     echo
@@ -146,7 +230,7 @@ collect_config() {
     require_interface "$WAN_IF"
     require_interface "$LAN_IF"
 
-    WAN_MODE="$(prompt "WAN mode: dhcp/static/pppoe" "dhcp")"
+    WAN_MODE="$(select_wan_mode)"
     WAN_MODE="${WAN_MODE,,}"
     WAN_ADDRESS=""
     WAN_GATEWAY=""
@@ -156,24 +240,24 @@ collect_config() {
 
     case "$WAN_MODE" in
         static)
-            WAN_ADDRESS="$(prompt "WAN static address CIDR" "192.0.2.2/24")"
-            WAN_GATEWAY="$(prompt "WAN gateway" "192.0.2.1")"
-            WAN_DNS="$(prompt "WAN DNS comma separated" "$WAN_DNS")"
+            WAN_ADDRESS="$(ui_input "WAN static address" "WAN static address in CIDR form." "192.0.2.2/24")"
+            WAN_GATEWAY="$(ui_input "WAN gateway" "WAN default gateway." "192.0.2.1")"
+            WAN_DNS="$(ui_input "WAN DNS" "WAN DNS servers, comma separated." "$WAN_DNS")"
             ;;
         pppoe)
-            PPPOE_USER="$(prompt "PPPoE user" "")"
-            PPPOE_PASS="$(prompt_secret "PPPoE password")"
+            PPPOE_USER="$(ui_input "PPPoE user" "PPPoE username." "")"
+            PPPOE_PASS="$(ui_password "PPPoE password" "PPPoE password.")"
             ;;
         dhcp) ;;
-        *) echo "Invalid WAN mode: $WAN_MODE" >&2; exit 1 ;;
+        *) fatal "Invalid WAN mode: $WAN_MODE" ;;
     esac
 
-    LAN_CIDR="$(prompt "LAN address CIDR" "172.17.17.1/24")"
-    DHCP_START="$(prompt "LAN DHCP start" "172.17.17.10")"
-    DHCP_END="$(prompt "LAN DHCP end" "172.17.17.20")"
-    WG_ADDR="$(prompt "WireGuard interface CIDR" "10.252.1.1/24")"
-    WG_PORT="$(prompt "WireGuard listen port" "51820")"
-    DDNS_LEFT="$(prompt "DDNS host left label, blank to skip" "")"
+    LAN_CIDR="$(ui_input "LAN address" "LAN-side IP address in CIDR form." "172.17.17.1/24")"
+    DHCP_START="$(ui_input "LAN DHCP start" "First DHCP address for LAN clients." "172.17.17.10")"
+    DHCP_END="$(ui_input "LAN DHCP end" "Last DHCP address for LAN clients." "172.17.17.20")"
+    WG_ADDR="$(ui_input "WireGuard address" "WireGuard interface address in CIDR form." "10.252.1.1/24")"
+    WG_PORT="$(ui_input "WireGuard port" "WireGuard UDP listen port." "51820")"
+    DDNS_LEFT="$(ui_input "DDNS host label" "ddnsft.com host label only. Leave blank to skip initial DDNS registration." "")"
     DDNS_DOMAIN="ddnsft.com"
 }
 

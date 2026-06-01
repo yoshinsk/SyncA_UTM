@@ -19,6 +19,7 @@ bind-utils
 certbot
 cronie
 curl
+dialog
 dnsmasq
 fail2ban
 firewalld
@@ -44,6 +45,7 @@ python3-pip
 rootfiles
 rsync
 shadow-utils
+slang
 ssdeep-libs
 strongswan
 sudo

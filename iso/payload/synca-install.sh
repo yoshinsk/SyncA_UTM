@@ -181,7 +181,7 @@ ConditionPathExists=!/etc/synca/firstboot.done
 [Service]
 Type=oneshot
 ExecStart=/opt/synca-installer/synca-firstboot.sh --interactive
-StandardInput=tty
+StandardInput=tty-force
 StandardOutput=tty
 StandardError=tty
 TTYPath=/dev/tty1
