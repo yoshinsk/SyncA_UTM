@@ -573,6 +573,7 @@ def _list_devices() -> list[dict]:
     ip_map = _device_ip_map()
     default_dev = _default_route_device()
     pppoe_conn = _active_pppoe_connection()
+    pppoe_parent = _pppoe_parent(pppoe_conn)
     devices = []
     for r in rows:
         if len(r) < 4:
@@ -586,11 +587,16 @@ def _list_devices() -> list[dict]:
             # while the owning PPPoE profile is activated on the parent NIC.
             state = "connected"
             connection = (pppoe_conn or {}).get("name") or connection
+        if pppoe_parent and name == pppoe_parent:
+            state = "connected"
+            connection = (pppoe_conn or {}).get("name") or connection
         devices.append({
             "device": name,
             "type": r[1],
             "state": state,
             "connection": connection,
+            "pppoe_parent": bool(pppoe_parent and name == pppoe_parent),
+            "bridge_eligible": r[1] == "ethernet" and not (pppoe_parent and name == pppoe_parent),
             "ipv4": info.get("ipv4", []),
             "ipv6": info.get("ipv6", []),
             "mac": info.get("mac"),
@@ -619,6 +625,15 @@ def _active_pppoe_connection() -> Optional[dict]:
         if conn.get("type") == "pppoe" and conn.get("device"):
             return conn
     return None
+
+
+def _pppoe_parent(conn: Optional[dict]) -> str:
+    """Return the ethernet parent interface used by an active PPPoE profile."""
+    if not conn or not conn.get("name"):
+        return ""
+    detail = _describe_connection(conn["name"])
+    pppoe = detail.get("pppoe") or {}
+    return pppoe.get("parent") or detail.get("interface") or conn.get("device") or ""
 
 
 def _device_ip_map() -> dict[str, dict]:
@@ -702,7 +717,8 @@ def _describe_connection(name: str) -> dict:
         pppoe = {
             "username": raw.get("pppoe.username"),
             # password is not returned by nmcli (it's a Secret); placeholder only
-            "mtu": raw.get("802-3-ethernet.mtu"),
+            "mtu": raw.get("ppp.mtu") or raw.get("802-3-ethernet.mtu"),
+            "mru": raw.get("ppp.mru"),
             "parent": raw.get("connection.interface-name"),
             "service": raw.get("pppoe.service"),
         }
@@ -927,6 +943,8 @@ def get_wan():
         # frontend has a single field to check regardless of whether we
         # found a managed connection profile.
         details["device"] = wan_dev
+        if wan_type == "pppoe":
+            details["pppoe_parent"] = (details.get("pppoe") or {}).get("parent") or details.get("interface")
         details["wan_type"] = wan_type
         details["wan_gateway"] = wan_gw
         return jsonify(details)

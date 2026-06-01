@@ -77,9 +77,10 @@
                         <h6><i class="bi bi-geo-alt"></i> sources <small class="text-secondary">(CIDR / ipset)</small></h6>
                         <div id="z-sources" class="d-flex flex-wrap gap-1 mb-2"></div>
                         <div class="input-group input-group-sm">
-                            <input id="src-input" type="text" class="form-control" placeholder="10.0.0.0/8 または ipset:geoip-jp">
+                            <input id="src-input" type="text" class="form-control" list="src-datalist" placeholder="10.0.0.0/8 または ipset:jp-ipv4">
                             <button class="btn btn-primary" onclick="addSource()"><i class="bi bi-plus"></i></button>
                         </div>
+                        <datalist id="src-datalist"></datalist>
                     </div>
                 </div>
                 <hr>
@@ -282,6 +283,7 @@ let activeData = {};
 let defaultZone = null;
 let activeZone = null;
 let allServices = [];
+let allIpsets = [];
 // Per-zone state captured from latest fetch (used by remove-by-index handlers)
 let currentForwardPorts = [];
 let currentRichRules = [];
@@ -309,6 +311,7 @@ function tag(text, onRemove, dragMeta = null) {
 async function init() {
     console.log('[firewall] init');
     await loadServiceList();
+    await loadIpsets();
     await refreshZones();
     await loadDirectRules();
 }
@@ -320,6 +323,19 @@ async function loadServiceList() {
     const dl = document.getElementById('svc-datalist');
     dl.innerHTML = allServices.map(s => `<option value="${escapeHtml(s)}">`).join('');
     document.getElementById('svc-available-count').textContent = allServices.length;
+    renderPalettes();
+}
+
+async function loadIpsets() {
+    const data = await api.get('/firewall/api/ipsets');
+    if (!data) return;
+    allIpsets = data.ipsets || [];
+    const dl = document.getElementById('src-datalist');
+    if (dl) {
+        dl.innerHTML = allIpsets.map(s =>
+            `<option value="${escapeHtml(s.source)}">${escapeHtml(s.name)} (${s.entry_count ?? '-'})</option>`
+        ).join('');
+    }
     renderPalettes();
 }
 
@@ -362,7 +378,8 @@ function renderSidebar() {
 function renderPalettes() {
     renderPalette('fw-service-palette', 'service', commonServices.filter(s => allServices.includes(s)));
     renderPalette('fw-port-palette', 'port', commonPorts);
-    renderPalette('fw-source-palette', 'source', commonSources);
+    const ipsetSources = allIpsets.map(s => s.source);
+    renderPalette('fw-source-palette', 'source', [...new Set([...ipsetSources, ...commonSources])]);
 }
 
 function renderPalette(id, kind, items) {

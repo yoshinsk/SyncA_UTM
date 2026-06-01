@@ -488,6 +488,7 @@ let vlanModal;
 let editingPppoeName = null;
 let currentWanType = 'unknown';
 let currentWanDevice = '';
+let currentWanParent = '';
 
 document.addEventListener('DOMContentLoaded', () => {
     connModal = new bootstrap.Modal(document.getElementById('conn-modal'));
@@ -512,6 +513,7 @@ async function loadWan() {
     if (!wan) return;
     currentWanType = wan.wan_type || 'unknown';
     currentWanDevice = wan.device || wan.interface || wan.name || '';
+    currentWanParent = wan.pppoe_parent || '';
     const ifname = currentWanDevice;
     const summary = ifname
         ? `IF: <code>${escapeHtml(ifname)}</code>` +
@@ -601,8 +603,9 @@ function openBridgeModal() {
     document.getElementById('br-hello-time').value = '2';
     document.getElementById('br-autoconnect').checked = true;
     document.getElementById('br-activate').checked = true;
-    // Build member checkboxes from ethernet devices, excluding WAN
-    const candidates = devices.filter(d => d.type === 'ethernet' && d.device !== currentWanDevice);
+    // Build member checkboxes from ethernet devices, excluding WAN and PPPoE parent interfaces.
+    const blocked = new Set([currentWanDevice, currentWanParent].filter(Boolean));
+    const candidates = devices.filter(d => d.type === 'ethernet' && d.bridge_eligible !== false && !blocked.has(d.device));
     const wrap = document.getElementById('br-members');
     if (candidates.length === 0) {
         wrap.innerHTML = '<div class="text-secondary small">ブリッジ可能な ethernet IF がありません (WAN を除く)</div>';
@@ -756,7 +759,7 @@ function renderDevices(devices) {
             return `<tr>
                 <td class="fw-semibold font-monospace">${escapeHtml(d.device)}</td>
                 <td>${escapeHtml(d.type)}</td>
-                <td>${stateBadge(d.state)}</td>
+                <td>${stateBadge(d.state)} ${d.pppoe_parent ? '<span class="badge bg-info-subtle text-info-emphasis ms-1">PPPoE parent</span>' : ''}</td>
                 <td>${v4}</td>
                 <td class="font-monospace small text-secondary">${d.mac ? escapeHtml(d.mac) : '—'}</td>
                 <td class="font-monospace small text-secondary">${d.mtu || '—'}</td>

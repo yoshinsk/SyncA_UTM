@@ -185,6 +185,23 @@ def services_available():
     return jsonify({"services": sorted(res.stdout.split())})
 
 
+@bp.route("/api/ipsets", methods=["GET"])
+@login_required
+def list_ipsets():
+    """All permanent firewalld ipsets for source selection."""
+    res = sudo_run(["firewall-cmd", "--permanent", "--get-ipsets"])
+    if not res.ok:
+        return jsonify({"ipsets": [], "error": res.stderr.strip()})
+    items = []
+    for name in sorted(res.stdout.split()):
+        count = None
+        entries = sudo_run(["firewall-cmd", "--permanent", "--ipset", name, "--get-entries"])
+        if entries.ok:
+            count = len([line for line in entries.stdout.splitlines() if line.strip()])
+        items.append({"name": name, "source": f"ipset:{name}", "entry_count": count})
+    return jsonify({"ipsets": items})
+
+
 _DIRECT_IDENT_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 
 

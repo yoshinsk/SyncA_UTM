@@ -209,7 +209,7 @@
 
                 <hr>
                 <h6 class="text-secondary small">IKE proposals (上級)</h6>
-                <input id="cf-proposals" class="form-control font-monospace" value="aes256-sha256-modp2048"
+                <input id="cf-proposals" class="form-control font-monospace" value="aes128-sha1-modp1024"
                        list="ike-proposals-datalist" autocomplete="off">
                 <div class="form-text small">候補から選択 / 直接入力可。<code>encryption-integrity-dh</code> のセット。複数候補は <code>,</code> 区切り。</div>
 
@@ -441,7 +441,7 @@ function addChildRow(child) {
         </div>`;
     wrap.appendChild(div);
     div.querySelector('.ch-name').value = c.name || '';
-    div.querySelector('.ch-esp').value = c.esp_proposals || 'aes256-sha256';
+    div.querySelector('.ch-esp').value = c.esp_proposals || 'aes128-sha1';
     div.querySelector('.ch-start').value = c.start_action || (idx === 0 ? 'trap' : '');
     div.querySelector('.ch-dpd').value = c.dpd_action || 'restart';
     div.querySelector('.ch-lts').value = c.local_ts || '';
@@ -489,14 +489,14 @@ function openConnModal(c) {
     document.getElementById('cf-submit-label').textContent = c ? '更新して swanctl --load-all' : '保存して swanctl --load-all';
     document.getElementById('cf-name').value = c ? c.name : '';
     document.getElementById('cf-auth-type').value = c ? (c.auth_type || 'psk') : 'psk';
-    document.getElementById('cf-version').value = c ? c.version : 2;
+    document.getElementById('cf-version').value = c ? c.version : 1;
     document.getElementById('cf-local').value = c ? c.local_addrs : '%any';
     document.getElementById('cf-remote').value = c ? c.remote_addrs : '';
     document.getElementById('cf-local-id').value = c ? (c.local_id || '') : '';
     document.getElementById('cf-remote-id').value = c ? (c.remote_id || '') : '';
     document.getElementById('cf-psk').value = '';
     document.getElementById('cf-psk').placeholder = c ? '(変更しない場合は空欄)' : '新規時は必須';
-    document.getElementById('cf-proposals').value = (c && c.proposals) || 'aes256-sha256-modp2048';
+    document.getElementById('cf-proposals').value = (c && c.proposals) || 'aes128-sha1-modp1024';
     // EAP fields
     document.getElementById('cf-server-cert').value = c ? (c.server_cert || '') : '';
     document.getElementById('cf-server-key').value = c ? (c.server_key || '') : '';

@@ -17,6 +17,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
+import json
 
 from flask import Blueprint, Flask, jsonify, render_template, request
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 bp = Blueprint("certs", __name__, url_prefix="/certs")
 
 LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
+GUI_NGINX_CONF = Path("/etc/nginx/conf.d/vhost-server-gui.conf")
 
 # Hook scripts dropped by the SyncA UTM installer. They stop nginx + open
 # port 80/443 in the firewall before certbot runs, then close+restart after.
@@ -113,11 +115,15 @@ def issue_certificate():
         cmd.extend(["-d", f])
 
     res = sudo_run(cmd, timeout=180)
+    applied = None
+    if res.ok and bool(payload.get("apply_to_gui", True)):
+        applied = _apply_gui_certificate(fqdns[0])
     return jsonify({
         "ok": res.ok,
         "command": " ".join(cmd),
         "stdout": res.stdout,
         "stderr": res.stderr,
+        "applied_to_gui": applied,
     })
 
 
@@ -183,6 +189,23 @@ def list_certificates():
     return jsonify({"certificates": certs})
 
 
+@bp.route("/api/apply-gui", methods=["POST"])
+@login_required
+@csrf_protect
+def apply_gui_certificate():
+    """Use an existing Let's Encrypt certificate for the SyncA UTM GUI vhost."""
+    payload = request.get_json(force=True, silent=True) or {}
+    name = (payload.get("name") or payload.get("fqdn") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    try:
+        name = validate_hostname(name)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    result = _apply_gui_certificate(name)
+    return jsonify(result), 200 if result.get("ok") else 500
+
+
 # ---- parsing -----------------------------------------------------------
 
 def _parse_cert(path: Path) -> Optional[dict]:
@@ -225,6 +248,48 @@ def _parse_cert(path: Path) -> Optional[dict]:
             info["days_remaining"] = days
 
     return info
+
+
+def _apply_gui_certificate(name: str) -> dict:
+    """Point the GUI nginx vhost at /etc/letsencrypt/live/<name>/ cert files."""
+    live_dir = LETSENCRYPT_LIVE / name
+    cert = live_dir / "fullchain.pem"
+    key = live_dir / "privkey.pem"
+    if not cert.exists() or not key.exists():
+        return {"ok": False, "error": f"certificate files not found for {name}"}
+    script = r'''
+import json
+import re
+import sys
+from pathlib import Path
+
+payload = json.load(sys.stdin)
+conf = Path(payload["conf"])
+cert = payload["cert"]
+key = payload["key"]
+if not conf.exists():
+    raise SystemExit(f"{conf} does not exist")
+text = conf.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"^\s*ssl_certificate\s+[^;]+;", f"    ssl_certificate {cert};", text, flags=re.M)
+text = re.sub(r"^\s*ssl_certificate_key\s+[^;]+;", f"    ssl_certificate_key {key};", text, flags=re.M)
+conf.write_text(text, encoding="utf-8")
+'''
+    res = sudo_run(
+        ["python3", "-c", script],
+        stdin=json.dumps({"conf": str(GUI_NGINX_CONF), "cert": str(cert), "key": str(key)}),
+    )
+    if not res.ok:
+        return {"ok": False, "error": res.stderr or res.stdout}
+    test = sudo_run(["nginx", "-t"])
+    if not test.ok:
+        return {"ok": False, "error": test.stderr or test.stdout}
+    reload_res = sudo_run(["systemctl", "reload", "nginx"])
+    return {
+        "ok": reload_res.ok,
+        "cert_path": str(cert),
+        "key_path": str(key),
+        "output": (test.stdout + test.stderr + reload_res.stdout + reload_res.stderr).strip(),
+    }
 
 
 def _extract_cn(rdn_string: str) -> str:

@@ -44,6 +44,7 @@ API_GETS = [
     "/ddns/api/state",
     "/firewall/api/zones",
     "/firewall/api/services-available",
+    "/firewall/api/ipsets",
     "/firewall/api/direct-rules",
     "/fail2ban/api/status",
     "/fail2ban/api/jail-local",

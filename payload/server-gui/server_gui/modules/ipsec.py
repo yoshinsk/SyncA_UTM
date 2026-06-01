@@ -52,6 +52,21 @@ def _strip_noise(text: str) -> str:
     out_lines = [ln for ln in text.splitlines() if "plugin 'sqlite'" not in ln]
     return "\n".join(out_lines).strip()
 
+
+def _swanctl_error(text: str) -> str:
+    """Return a GUI-safe swanctl error message without noisy usage output."""
+    cleaned = _strip_noise(text)
+    if "No such file or directory" in cleaned and ("charon.vici" in cleaned or "default" in cleaned):
+        return "strongSwanのVICIソケットに接続できません。strongswanサービスが停止しているか、charonがまだ起動していません。"
+    lines = []
+    for line in cleaned.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("strongSwan ") or line.startswith("swanctl usage:") or line.startswith("--"):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip() or cleaned
+
 # Strict allow-lists to keep generated config sane
 _PROPOSAL_RE = re.compile(r"^[a-zA-Z0-9_\-,]{1,256}$")
 _ADDR_RE = re.compile(r"^[%a-zA-Z0-9_\-./:,]{1,128}$")
@@ -89,7 +104,10 @@ def list_connections():
     """Parse `swanctl --list-conns` block output into structured records."""
     res = sudo_run(["swanctl", "--list-conns"])
     if not res.ok:
-        return jsonify({"connections": [], "error": (res.stderr or res.stdout).strip()})
+        message = _swanctl_error(res.stderr or res.stdout)
+        if "VICIソケットに接続できません" in message:
+            return jsonify({"connections": [], "warning": message})
+        return jsonify({"connections": [], "error": message})
     return jsonify({"connections": _parse_conns(res.stdout)})
 
 
@@ -99,7 +117,10 @@ def list_sas():
     """Active Security Associations (current sessions)."""
     res = sudo_run(["swanctl", "--list-sas"])
     if not res.ok:
-        return jsonify({"sas": [], "error": (res.stderr or res.stdout).strip()})
+        message = _swanctl_error(res.stderr or res.stdout)
+        if "VICIソケットに接続できません" in message:
+            return jsonify({"sas": [], "warning": message})
+        return jsonify({"sas": [], "error": message})
     return jsonify({"sas": _parse_sas(res.stdout), "raw": res.stdout})
 
 
@@ -327,7 +348,7 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
     if auth_type == "eap" and version != 2:
         raise ValidationError("EAP roadwarrior requires IKEv2")
 
-    proposals = (raw.get("proposals") or "aes256-sha256-modp2048").strip()
+    proposals = (raw.get("proposals") or "aes128-sha1-modp1024").strip()
     if not _PROPOSAL_RE.match(proposals):
         raise ValidationError("invalid proposals string")
 
@@ -426,7 +447,7 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
             raise ValidationError(f"invalid local_ts on {ch_name!r}")
         if remote_ts and not _TS_RE.match(remote_ts):
             raise ValidationError(f"invalid remote_ts on {ch_name!r}")
-        esp_proposals = (ch_raw.get("esp_proposals") or "aes256-sha256").strip()
+        esp_proposals = (ch_raw.get("esp_proposals") or "aes128-sha1").strip()
         if not _PROPOSAL_RE.match(esp_proposals):
             raise ValidationError(f"invalid esp_proposals on {ch_name!r}")
         start_action = (ch_raw.get("start_action") or "").strip()
@@ -450,7 +471,7 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
             "name": f"{name}-child",
             "local_ts": default_ts,
             "remote_ts": "",
-            "esp_proposals": "aes256-sha256",
+            "esp_proposals": "aes128-sha1",
             "start_action": "" if auth_type == "eap" else "trap",
             "dpd_action": "clear" if auth_type == "eap" else "restart",
         }]
