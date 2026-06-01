@@ -99,15 +99,15 @@ def issue_certificate():
     if payload.get("staging"):
         cmd.append("--staging")
     if method == "standalone":
+        hook_result = _ensure_letsencrypt_hooks()
+        if not hook_result.get("ok"):
+            return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
         cmd.append("--standalone")
         # Use the installer's pre/post hooks if available — they stop nginx
         # and open 80/443 in the firewall during the brief validation window.
         # Without them, standalone issuance from a fresh install fails because
         # firewalld is "default DROP" on the WAN zone.
-        if LE_HOOK_PRE.is_file():
-            cmd.extend(["--pre-hook", str(LE_HOOK_PRE)])
-        if LE_HOOK_POST.is_file():
-            cmd.extend(["--post-hook", str(LE_HOOK_POST)])
+        cmd.extend(["--pre-hook", str(LE_HOOK_PRE), "--post-hook", str(LE_HOOK_POST)])
     else:
         webroot = payload.get("webroot") or "/var/www/letsencrypt"
         cmd.extend(["--webroot", "--webroot-path", webroot])
@@ -136,6 +136,10 @@ def renew_certificate():
     name = payload.get("name")
     dry_run = bool(payload.get("dry_run", False))
     force = bool(payload.get("force", False))
+
+    hook_result = _ensure_letsencrypt_hooks()
+    if not hook_result.get("ok"):
+        return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
 
     cmd = ["certbot", "renew", "--non-interactive"]
     if dry_run:
@@ -187,6 +191,40 @@ def list_certificates():
                 entry.update(info)
             certs.append(entry)
     return jsonify({"certificates": certs})
+
+
+def _ensure_letsencrypt_hooks() -> dict:
+    """Install certbot hooks that temporarily release nginx port 80."""
+    script = r'''
+from pathlib import Path
+
+pre = Path("/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh")
+post = Path("/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh")
+pre.parent.mkdir(parents=True, exist_ok=True)
+post.parent.mkdir(parents=True, exist_ok=True)
+pre.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --zone=public --add-service=http || true
+    firewall-cmd --zone=public --add-service=https || true
+fi
+systemctl stop nginx.service || true
+""", encoding="utf-8")
+post.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+systemctl start nginx.service || true
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --zone=public --remove-service=http || true
+    firewall-cmd --zone=public --remove-service=https || true
+fi
+""", encoding="utf-8")
+pre.chmod(0o755)
+post.chmod(0o755)
+'''
+    res = sudo_run(["python3", "-c", script])
+    if not res.ok:
+        return {"ok": False, "error": res.stderr or res.stdout}
+    return {"ok": True}
 
 
 @bp.route("/api/apply-gui", methods=["POST"])

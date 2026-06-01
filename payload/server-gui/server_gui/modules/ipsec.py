@@ -198,8 +198,11 @@ def terminate():
 @csrf_protect
 def reload_creds():
     """swanctl --load-all (re-read conf.d + secrets without restarting strongswan)."""
+    started = _ensure_strongswan_running()
+    if not started.get("ok"):
+        return jsonify({"ok": False, "output": started.get("error", "failed to start strongSwan")})
     res = sudo_run(["swanctl", "--load-all"])
-    return jsonify({"ok": res.ok, "output": _strip_noise(res.stdout + res.stderr)})
+    return jsonify({"ok": res.ok, "output": _swanctl_error(res.stdout + res.stderr) if not res.ok else _strip_noise(res.stdout + res.stderr)})
 
 
 # ---- managed (writable) connections --------------------------------------
@@ -210,6 +213,14 @@ def _store() -> ConfigStore:
 
 def _default() -> dict:
     return {"connections": []}
+
+
+def _ensure_strongswan_running() -> dict:
+    """Start and enable strongSwan before swanctl operations that need VICI."""
+    res = sudo_run(["systemctl", "enable", "--now", "strongswan"], timeout=30)
+    if not res.ok:
+        return {"ok": False, "error": _swanctl_error(res.stderr or res.stdout)}
+    return {"ok": True}
 
 
 @bp.route("/api/managed", methods=["GET"])
@@ -647,6 +658,10 @@ def _apply(conns: list[dict]) -> None:
     except OSError as e:
         raise RuntimeError(f"failed to write {MANAGED_FILE}: {e}") from e
 
+    started = _ensure_strongswan_running()
+    if not started.get("ok"):
+        raise RuntimeError(started.get("error", "failed to start strongSwan"))
+
     res = sudo_run(["swanctl", "--load-all"], timeout=30)
     if not res.ok:
         # Roll back
@@ -658,7 +673,7 @@ def _apply(conns: list[dict]) -> None:
                 pass
         elif MANAGED_FILE.exists():
             MANAGED_FILE.unlink(missing_ok=True)
-        raise RuntimeError(f"swanctl --load-all failed:\n{_strip_noise(res.stderr or res.stdout)}")
+        raise RuntimeError(f"swanctl --load-all failed:\n{_swanctl_error(res.stderr or res.stdout)}")
 
     try:
         _sync_firewalld_for_site_to_site(conns)

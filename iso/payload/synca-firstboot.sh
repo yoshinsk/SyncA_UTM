@@ -690,6 +690,8 @@ start_services() {
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable server-gui-ddns.timer server-gui-geoip.timer
         systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
+        systemctl enable wg-quick@wg0 || true
+        systemctl start --no-block wg-quick@wg0 || true
     fi
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]] && systemctl list-unit-files wgui-worker.service >/dev/null 2>&1; then
         systemctl enable wgui-worker || true

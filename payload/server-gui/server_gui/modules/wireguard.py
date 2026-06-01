@@ -349,6 +349,7 @@ def add_peer(iface: str):
     parsed["peers"].append(_meta_to_conf_peer(peer_pub, meta))
     try:
         _write_conf(iface, parsed)
+        _ensure_interface_running(iface)
         _sync_interface(iface)
         _sync_firewalld_for_interface(iface, parsed)
     except RuntimeError as e:
@@ -710,7 +711,7 @@ def create_interface():
 
     start_result = None
     if payload.get("start"):
-        res = sudo_run(["wg-quick", "up", name])
+        res = sudo_run(["systemctl", "enable", "--now", f"wg-quick@{name}"])
         start_result = {"ok": res.ok, "output": (res.stdout + res.stderr).strip()}
         if res.ok:
             try:
@@ -767,6 +768,8 @@ def update_interface(iface: str):
     parsed["interface"].update(fields)
     try:
         _write_conf(iface, parsed)
+        if not requires_restart:
+            _ensure_interface_running(iface)
         _sync_interface(iface)
         _sync_firewalld_for_interface(iface, parsed)
     except RuntimeError as e:
@@ -817,7 +820,7 @@ def regenerate_server_keys(iface: str):
 def up_interface(iface: str):
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
-    res = sudo_run(["wg-quick", "up", iface])
+    res = sudo_run(["systemctl", "enable", "--now", f"wg-quick@{iface}"])
     output = (res.stdout + res.stderr).strip()
     if res.ok:
         try:
@@ -834,7 +837,7 @@ def up_interface(iface: str):
 def down_interface(iface: str):
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
-    res = sudo_run(["wg-quick", "down", iface])
+    res = sudo_run(["systemctl", "disable", "--now", f"wg-quick@{iface}"])
     return jsonify({"ok": res.ok, "output": (res.stdout + res.stderr).strip()})
 
 
@@ -1068,6 +1071,15 @@ def _client_filename(meta: dict) -> str:
 def _interface_is_active(iface: str) -> bool:
     res = run(["ip", "-o", "link", "show", iface])
     return res.ok and "UP" in res.stdout
+
+
+def _ensure_interface_running(iface: str) -> None:
+    """Enable and start wg-quick@<iface> when an interface config exists."""
+    if _interface_is_active(iface):
+        return
+    res = sudo_run(["systemctl", "enable", "--now", f"wg-quick@{iface}"], timeout=30)
+    if not res.ok:
+        raise RuntimeError(f"wg-quick start failed: {(res.stderr or res.stdout).strip()}")
 
 
 def _detect_wan_endpoint(listen_port: Optional[int] = None) -> str:
