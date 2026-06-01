@@ -35,6 +35,16 @@ prompt_secret() {
     printf '%s' "$value"
 }
 
+require_interface() {
+    local name="$1"
+    if ! nmcli -t -f DEVICE device status | grep -Fxq "$name"; then
+        echo "Network interface not found: $name" >&2
+        echo "Available interfaces:" >&2
+        nmcli -t -f DEVICE,TYPE,STATE device status >&2 || true
+        exit 1
+    fi
+}
+
 cidr_ip() {
     printf '%s' "${1%/*}"
 }
@@ -76,7 +86,15 @@ collect_config() {
 
     WAN_IF="$(prompt "WAN interface" "enp2s0")"
     LAN_IF="$(prompt "LAN interface" "enp3s0")"
+    if [[ "$WAN_IF" == "$LAN_IF" ]]; then
+        echo "WAN and LAN interfaces must be different." >&2
+        exit 1
+    fi
+    require_interface "$WAN_IF"
+    require_interface "$LAN_IF"
+
     WAN_MODE="$(prompt "WAN mode: dhcp/static/pppoe" "dhcp")"
+    WAN_MODE="${WAN_MODE,,}"
     WAN_ADDRESS=""
     WAN_GATEWAY=""
     WAN_DNS="1.1.1.1,1.0.0.1"
@@ -116,6 +134,7 @@ collect_auto_safe_config() {
     WAN_IF="${SYNCA_WAN_IF:-enp2s0}"
     LAN_IF="${SYNCA_LAN_IF:-enp3s0}"
     WAN_MODE="${SYNCA_WAN_MODE:-dhcp}"
+    WAN_MODE="${WAN_MODE,,}"
     WAN_ADDRESS="${SYNCA_WAN_ADDRESS:-}"
     WAN_GATEWAY="${SYNCA_WAN_GATEWAY:-}"
     WAN_DNS="${SYNCA_WAN_DNS:-1.1.1.1,1.0.0.1}"
@@ -175,7 +194,8 @@ configure_network() {
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         nmcli connection delete synca-lan >/dev/null 2>&1 || true
         nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
-            ipv4.method manual ipv4.addresses "$LAN_CIDR" connection.autoconnect yes
+            ipv4.method manual ipv4.addresses "$LAN_CIDR" \
+            connection.autoconnect yes connection.zone trusted
         nmcli connection up synca-lan || true
     fi
 
@@ -188,17 +208,20 @@ configure_network() {
     case "$WAN_MODE" in
         dhcp)
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
-                ipv4.method auto connection.autoconnect yes
+                ipv4.method auto connection.autoconnect yes connection.zone public
+            nmcli connection up synca-wan || true
             ;;
         static)
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
                 ipv4.method manual ipv4.addresses "$WAN_ADDRESS" ipv4.gateway "$WAN_GATEWAY" \
-                ipv4.dns "$WAN_DNS" connection.autoconnect yes
+                ipv4.dns "$WAN_DNS" connection.autoconnect yes connection.zone public
+            nmcli connection up synca-wan || true
             ;;
         pppoe)
             nmcli connection add type pppoe ifname "$WAN_IF" con-name synca-pppoe \
                 pppoe.username "$PPPOE_USER" pppoe.password "$PPPOE_PASS" \
-                ppp.mtu 1492 ppp.mru 1492 connection.autoconnect yes
+                ppp.mtu 1492 ppp.mru 1492 connection.autoconnect yes connection.zone public
+            nmcli connection up synca-pppoe || true
             ;;
     esac
 }
@@ -396,9 +419,13 @@ CONF
     fi
     firewall-cmd --permanent --zone=public --add-port=4444/tcp
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+        local nat_out_if="$WAN_IF"
+        if [[ "$WAN_MODE" == "pppoe" ]]; then
+            nat_out_if="ppp+"
+        fi
         firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
         firewall-cmd --permanent --zone=public --add-masquerade
-        firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$WAN_IF" -j MASQUERADE || true
+        firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$nat_out_if" -j MASQUERADE || true
     fi
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
