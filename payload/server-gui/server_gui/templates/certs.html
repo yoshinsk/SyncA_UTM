@@ -70,8 +70,8 @@
                     <div class="col-md-6">
                         <label class="form-label">取得方法</label>
                         <select id="iss-method" class="form-select">
-                            <option value="standalone">standalone</option>
                             <option value="webroot">webroot</option>
+                            <option value="standalone">standalone</option>
                         </select>
                     </div>
                     <div class="col-md-6" id="iss-webroot-wrap" style="display:none">
@@ -156,7 +156,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function openIssueModal() {
     document.getElementById('iss-fqdn').value = '';
     document.getElementById('iss-email').value = '';
-    document.getElementById('iss-method').value = 'standalone';
+    document.getElementById('iss-method').value = 'webroot';
     document.getElementById('iss-webroot-wrap').style.display = 'none';
     document.getElementById('iss-staging').checked = false;
     document.getElementById('iss-result').classList.add('d-none');
@@ -179,7 +179,7 @@ async function issueCert() {
     if (!res) return;
     document.getElementById('iss-result').classList.remove('d-none');
     document.getElementById('iss-output').textContent =
-        `$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
+        `${res.warning ? res.warning + '\n\n' : ''}$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
     if (res.ok) {
         toast('取得しました');
         refresh();

@@ -31,13 +31,12 @@ bp = Blueprint("certs", __name__, url_prefix="/certs")
 
 LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 GUI_NGINX_CONF = Path("/etc/nginx/conf.d/vhost-server-gui.conf")
+ACME_NGINX_CONF = Path("/etc/nginx/conf.d/00-synca-acme.conf")
+ACME_WEBROOT = Path("/var/www/letsencrypt")
 
-# Hook scripts dropped by the SyncA UTM installer. They stop nginx + open
-# port 80/443 in the firewall before certbot runs, then close+restart after.
-# We pass them via --pre-hook / --post-hook for INITIAL issuance so first-
-# time standalone obtains succeed end-to-end from the GUI. Renewals invoke
-# them automatically because they also live under /etc/letsencrypt/
-# renewal-hooks/pre/ and post/.
+# Hook scripts dropped by the SyncA UTM installer. They temporarily open
+# HTTP in firewalld for ACME HTTP-01, but they do not stop nginx. GUI-driven
+# issuance uses webroot so the API connection is not cut mid-request.
 LE_HOOK_PRE  = Path("/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh")
 LE_HOOK_POST = Path("/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh")
 
@@ -87,9 +86,17 @@ def issue_certificate():
     if not EMAIL_RE.match(email):
         return jsonify({"error": "valid email required"}), 400
 
-    method = payload.get("method", "standalone")
+    method = payload.get("method", "webroot")
     if method not in ("standalone", "webroot"):
         return jsonify({"error": "method must be 'standalone' or 'webroot'"}), 400
+    requested_method = method
+    method_warning = None
+    if method == "standalone":
+        method = "webroot"
+        method_warning = (
+            "standalone は nginx を一時停止するため GUI 通信が切断されます。"
+            "GUI からの取得では webroot を使用しました。"
+        )
 
     cmd = [
         "certbot", "certonly",
@@ -109,17 +116,30 @@ def issue_certificate():
         # firewalld is "default DROP" on the WAN zone.
         cmd.extend(["--pre-hook", str(LE_HOOK_PRE), "--post-hook", str(LE_HOOK_POST)])
     else:
-        webroot = payload.get("webroot") or "/var/www/letsencrypt"
+        acme_result = _ensure_acme_http_vhost()
+        if not acme_result.get("ok"):
+            return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
+        hook_result = _ensure_letsencrypt_hooks()
+        if not hook_result.get("ok"):
+            return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
+        webroot = payload.get("webroot") or str(ACME_WEBROOT)
         cmd.extend(["--webroot", "--webroot-path", webroot])
     for f in fqdns:
         cmd.extend(["-d", f])
 
-    res = sudo_run(cmd, timeout=180)
+    firewall_state = _open_http_for_acme()
+    try:
+        res = sudo_run(cmd, timeout=180)
+    finally:
+        _close_http_for_acme(firewall_state)
     applied = None
     if res.ok and bool(payload.get("apply_to_gui", True)):
         applied = _apply_gui_certificate(fqdns[0])
     return jsonify({
         "ok": res.ok,
+        "requested_method": requested_method,
+        "effective_method": method,
+        "warning": method_warning,
         "command": " ".join(cmd),
         "stdout": res.stdout,
         "stderr": res.stderr,
@@ -194,7 +214,7 @@ def list_certificates():
 
 
 def _ensure_letsencrypt_hooks() -> dict:
-    """Install certbot hooks that temporarily release nginx port 80."""
+    """Install certbot hooks that temporarily open HTTP for ACME renewal."""
     script = r'''
 from pathlib import Path
 
@@ -204,19 +224,33 @@ pre.parent.mkdir(parents=True, exist_ok=True)
 post.parent.mkdir(parents=True, exist_ok=True)
 pre.write_text("""#!/usr/bin/env bash
 set -euo pipefail
+install -d -m 0755 /run/synca-acme
 if systemctl is-active --quiet firewalld; then
-    firewall-cmd --zone=public --add-service=http || true
-    firewall-cmd --zone=public --add-service=https || true
+    if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
+        touch /run/synca-acme/http-was-open
+    else
+        rm -f /run/synca-acme/http-was-open
+        firewall-cmd --zone=public --add-service=http || true
+    fi
+    if firewall-cmd --direct --get-all-rules | grep -Fxq 'ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'; then
+        touch /run/synca-acme/ppp80-was-open
+    else
+        rm -f /run/synca-acme/ppp80-was-open
+        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    fi
 fi
-systemctl stop nginx.service || true
 """, encoding="utf-8")
 post.write_text("""#!/usr/bin/env bash
 set -euo pipefail
-systemctl start nginx.service || true
 if systemctl is-active --quiet firewalld; then
-    firewall-cmd --zone=public --remove-service=http || true
-    firewall-cmd --zone=public --remove-service=https || true
+    if [[ ! -f /run/synca-acme/ppp80-was-open ]]; then
+        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    fi
+    if [[ ! -f /run/synca-acme/http-was-open ]]; then
+        firewall-cmd --zone=public --remove-service=http || true
+    fi
 fi
+rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open
 """, encoding="utf-8")
 pre.chmod(0o755)
 post.chmod(0o755)
@@ -225,6 +259,73 @@ post.chmod(0o755)
     if not res.ok:
         return {"ok": False, "error": res.stderr or res.stdout}
     return {"ok": True}
+
+
+def _ensure_acme_http_vhost() -> dict:
+    """Prepare a port 80 nginx vhost that serves only ACME HTTP-01 files."""
+    script = r'''
+from pathlib import Path
+
+webroot = Path("/var/www/letsencrypt/.well-known/acme-challenge")
+conf = Path("/etc/nginx/conf.d/00-synca-acme.conf")
+webroot.mkdir(parents=True, exist_ok=True)
+conf.write_text("""# Managed by SyncA UTM. Serves Let's Encrypt HTTP-01 challenges only.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name synca-acme.invalid;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+    location / {
+        return 404;
+    }
+}
+""", encoding="utf-8")
+'''
+    write_res = sudo_run(["python3", "-c", script])
+    if not write_res.ok:
+        return {"ok": False, "error": write_res.stderr or write_res.stdout}
+    test = sudo_run(["nginx", "-t"])
+    if not test.ok:
+        return {"ok": False, "error": test.stderr or test.stdout}
+    reload_res = sudo_run(["systemctl", "reload-or-restart", "nginx"])
+    if not reload_res.ok:
+        return {"ok": False, "error": reload_res.stderr or reload_res.stdout}
+    return {"ok": True}
+
+
+def _open_http_for_acme() -> dict:
+    """Open HTTP on firewalld only for the ACME transaction window."""
+    state = {"http_was_open": False, "ppp80_was_open": False}
+    http_state = sudo_run(["firewall-cmd", "--zone=public", "--query-service=http"])
+    state["http_was_open"] = http_state.ok and http_state.stdout.strip() == "yes"
+    direct_rules = sudo_run(["firewall-cmd", "--direct", "--get-all-rules"])
+    state["ppp80_was_open"] = (
+        direct_rules.ok
+        and "ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT" in direct_rules.stdout.splitlines()
+    )
+    if not state["http_was_open"]:
+        sudo_run(["firewall-cmd", "--zone=public", "--add-service=http"])
+    if not state["ppp80_was_open"]:
+        sudo_run([
+            "firewall-cmd", "--direct", "--add-rule", "ipv4", "filter", "INPUT", "0",
+            "-i", "ppp+", "-p", "tcp", "--dport", "80", "-j", "ACCEPT",
+        ])
+    return state
+
+
+def _close_http_for_acme(state: dict) -> None:
+    """Close the temporary HTTP firewalld rules after certbot returns."""
+    if not state.get("ppp80_was_open"):
+        sudo_run([
+            "firewall-cmd", "--direct", "--remove-rule", "ipv4", "filter", "INPUT", "0",
+            "-i", "ppp+", "-p", "tcp", "--dport", "80", "-j", "ACCEPT",
+        ])
+    if not state.get("http_was_open"):
+        sudo_run(["firewall-cmd", "--zone=public", "--remove-service=http"])
 
 
 @bp.route("/api/apply-gui", methods=["POST"])

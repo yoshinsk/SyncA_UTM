@@ -88,20 +88,34 @@ install_letsencrypt_hooks() {
     cat > /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
+install -d -m 0755 /run/synca-acme
 if systemctl is-active --quiet firewalld; then
-    firewall-cmd --zone=public --add-service=http || true
-    firewall-cmd --zone=public --add-service=https || true
+    if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
+        touch /run/synca-acme/http-was-open
+    else
+        rm -f /run/synca-acme/http-was-open
+        firewall-cmd --zone=public --add-service=http || true
+    fi
+    if firewall-cmd --direct --get-all-rules | grep -Fxq 'ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'; then
+        touch /run/synca-acme/ppp80-was-open
+    else
+        rm -f /run/synca-acme/ppp80-was-open
+        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    fi
 fi
-systemctl stop nginx.service || true
 HOOK
     cat > /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
-systemctl start nginx.service || true
 if systemctl is-active --quiet firewalld; then
-    firewall-cmd --zone=public --remove-service=http || true
-    firewall-cmd --zone=public --remove-service=https || true
+    if [[ ! -f /run/synca-acme/ppp80-was-open ]]; then
+        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    fi
+    if [[ ! -f /run/synca-acme/http-was-open ]]; then
+        firewall-cmd --zone=public --remove-service=http || true
+    fi
 fi
+rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open
 HOOK
     chmod 0755 /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh \
         /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh

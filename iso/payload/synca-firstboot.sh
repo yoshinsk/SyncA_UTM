@@ -672,6 +672,22 @@ server {
     }
 }
 NGINX
+    cat > /etc/nginx/conf.d/00-synca-acme.conf <<'NGINX'
+# Managed by SyncA UTM. Serves Let's Encrypt HTTP-01 challenges only.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name synca-acme.invalid;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+    location / {
+        return 404;
+    }
+}
+NGINX
 }
 
 configure_firewall() {
