@@ -380,6 +380,7 @@ CONF
 
     systemctl enable --now firewalld
     firewall-cmd --set-default-zone=public
+    firewall-cmd --permanent --zone=public --add-service=ssh || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
     fi
