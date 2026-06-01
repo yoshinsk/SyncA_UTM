@@ -7,6 +7,8 @@ set -euo pipefail
 CONFIG_DIR="/etc/server-gui"
 SYNC_DIR="/etc/synca"
 BACKTITLE="SyncA UTM initial setup"
+FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
+TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
 
 bind_firstboot_tty() {
     local tty="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
@@ -88,6 +90,26 @@ ui_password() {
         printf '%s' "$value"
     else
         prompt_secret "$title"
+    fi
+}
+
+ui_apply_started() {
+    if has_dialog; then
+        dialog --backtitle "$BACKTITLE" --title "Applying settings" --infobox \
+            "Applying SyncA UTM settings.\n\nLogs: ${FIRSTBOOT_LOG}" 8 72 \
+            >"$TTY_PATH" 2>&1 || true
+    else
+        echo "Applying SyncA UTM settings. Logs: ${FIRSTBOOT_LOG}" >"$TTY_PATH" 2>/dev/null || true
+    fi
+}
+
+ui_apply_finished() {
+    local message="SyncA UTM setup complete.\n\nGUI: https://$(cidr_ip "$LAN_CIDR"):4444/\n\nLogs: ${FIRSTBOOT_LOG}"
+    if has_dialog; then
+        dialog --backtitle "$BACKTITLE" --title "Complete" --msgbox "$message" 12 72 \
+            >"$TTY_PATH" 2>&1 || true
+    else
+        printf '%b\n' "$message" >"$TTY_PATH" 2>/dev/null || true
     fi
 }
 
@@ -182,6 +204,50 @@ select_wan_mode() {
     else
         prompt "WAN mode: dhcp/static/pppoe" "dhcp"
     fi
+}
+
+connection_names_for_interface() {
+    local ifname="$1"
+    {
+        nmcli -t -f NAME,DEVICE connection show | awk -F: -v d="$ifname" '$2 == d {print $1}'
+        nmcli -t -f NAME,connection.interface-name connection show | awk -F: -v d="$ifname" '$2 == d {print $1}'
+    } | awk 'NF && !seen[$0]++'
+}
+
+delete_connections_for_interface() {
+    local ifname="$1"
+    local conn
+    while IFS= read -r conn; do
+        [[ -z "$conn" || "$conn" == "lo" ]] && continue
+        nmcli connection down "$conn" >/dev/null 2>&1 || true
+        nmcli connection delete "$conn" >/dev/null 2>&1 || true
+    done < <(connection_names_for_interface "$ifname")
+}
+
+wait_for_carrier() {
+    local ifname="$1"
+    local i
+    for i in {1..20}; do
+        if [[ "$(cat "/sys/class/net/${ifname}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+activate_connection_with_retry() {
+    local conn="$1"
+    local tries="${2:-3}"
+    local i
+    for ((i = 1; i <= tries; i++)); do
+        if nmcli connection up "$conn"; then
+            return 0
+        fi
+        echo "warning: activation failed for ${conn}; retry ${i}/${tries}" >&2
+        sleep 3
+    done
+    return 1
 }
 
 cidr_ip() {
@@ -329,36 +395,41 @@ configure_users() {
 
 configure_network() {
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+        delete_connections_for_interface "$LAN_IF"
         nmcli connection delete synca-lan >/dev/null 2>&1 || true
         nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
             ipv4.method manual ipv4.addresses "$LAN_CIDR" \
+            ipv4.never-default yes ipv6.method ignore \
             connection.autoconnect yes connection.zone trusted
-        nmcli connection up synca-lan || true
+        activate_connection_with_retry synca-lan 2 || true
     fi
 
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" != "1" ]]; then
         return 0
     fi
 
+    delete_connections_for_interface "$WAN_IF"
     nmcli connection delete synca-wan >/dev/null 2>&1 || true
     nmcli connection delete synca-pppoe >/dev/null 2>&1 || true
+    wait_for_carrier "$WAN_IF" || echo "warning: carrier did not become ready on ${WAN_IF}" >&2
     case "$WAN_MODE" in
         dhcp)
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
-                ipv4.method auto connection.autoconnect yes connection.zone public
-            nmcli connection up synca-wan || true
+                ipv4.method auto ipv6.method ignore connection.autoconnect yes connection.zone public
+            activate_connection_with_retry synca-wan 3 || true
             ;;
         static)
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
                 ipv4.method manual ipv4.addresses "$WAN_ADDRESS" ipv4.gateway "$WAN_GATEWAY" \
-                ipv4.dns "$WAN_DNS" connection.autoconnect yes connection.zone public
-            nmcli connection up synca-wan || true
+                ipv4.dns "$WAN_DNS" ipv6.method ignore connection.autoconnect yes connection.zone public
+            activate_connection_with_retry synca-wan 3 || true
             ;;
         pppoe)
             nmcli connection add type pppoe ifname "$WAN_IF" con-name synca-pppoe \
                 pppoe.username "$PPPOE_USER" pppoe.password "$PPPOE_PASS" \
-                ppp.mtu 1492 ppp.mru 1492 connection.autoconnect yes connection.zone public
-            nmcli connection up synca-pppoe || true
+                ppp.mtu 1492 ppp.mru 1492 ipv6.method ignore \
+                connection.autoconnect yes connection.zone public
+            activate_connection_with_retry synca-pppoe 4 || true
             ;;
     esac
 }
@@ -611,6 +682,10 @@ main() {
             ;;
     esac
     write_install_env
+    ui_apply_started
+    install -d -m 0755 "$(dirname "$FIRSTBOOT_LOG")"
+    exec >>"$FIRSTBOOT_LOG" 2>&1
+    echo "SyncA UTM firstboot apply started at $(date -Is)"
     configure_hostname
     configure_users
     configure_network
@@ -622,9 +697,8 @@ main() {
     start_services
     touch "${SYNC_DIR}/firstboot.done"
     systemctl disable synca-firstboot.service || true
-    echo
-    echo "SyncA UTM setup complete."
-    echo "GUI: https://$(cidr_ip "$LAN_CIDR"):4444/"
+    echo "SyncA UTM firstboot apply completed at $(date -Is)"
+    ui_apply_finished
 }
 
 main "$@"
