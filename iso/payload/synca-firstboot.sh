@@ -15,8 +15,6 @@ bind_firstboot_tty() {
     fi
 }
 
-bind_firstboot_tty "$@"
-
 prompt() {
     # Read one line with a default. Prompts are ASCII for installer console
     # compatibility; Japanese is available later in the web GUI.
@@ -108,6 +106,30 @@ collect_config() {
     DDNS_DOMAIN="ddnsft.com"
 }
 
+collect_auto_safe_config() {
+    SYSTEM_HOSTNAME="${SYNCA_SYSTEM_HOSTNAME:-synca-utm}"
+    ADMIN_USER="${SYNCA_ADMIN_USER:-loginuser}"
+    ADMIN_PASS="${SYNCA_ADMIN_PASSWORD:-Asdf-1234}"
+    GUI_USER="${SYNCA_GUI_USER:-$ADMIN_USER}"
+    GUI_PASS="${SYNCA_GUI_PASSWORD:-$ADMIN_PASS}"
+    ADMIN_CIDR="${SYNCA_ADMIN_CIDR:-0.0.0.0/0}"
+    WAN_IF="${SYNCA_WAN_IF:-enp2s0}"
+    LAN_IF="${SYNCA_LAN_IF:-enp3s0}"
+    WAN_MODE="${SYNCA_WAN_MODE:-dhcp}"
+    WAN_ADDRESS="${SYNCA_WAN_ADDRESS:-}"
+    WAN_GATEWAY="${SYNCA_WAN_GATEWAY:-}"
+    WAN_DNS="${SYNCA_WAN_DNS:-1.1.1.1,1.0.0.1}"
+    PPPOE_USER="${SYNCA_PPPOE_USER:-}"
+    PPPOE_PASS="${SYNCA_PPPOE_PASS:-}"
+    LAN_CIDR="${SYNCA_LAN_CIDR:-172.17.17.1/24}"
+    DHCP_START="${SYNCA_DHCP_START:-172.17.17.20}"
+    DHCP_END="${SYNCA_DHCP_END:-172.17.17.120}"
+    WG_ADDR="${SYNCA_WG_ADDR:-10.252.1.1/24}"
+    WG_PORT="${SYNCA_WG_PORT:-51820}"
+    DDNS_LEFT="${SYNCA_DDNS_LEFT:-}"
+    DDNS_DOMAIN="ddnsft.com"
+}
+
 write_install_env() {
     install -d -m 0700 "$SYNC_DIR"
     cat > "${SYNC_DIR}/install.env" <<ENV
@@ -150,6 +172,9 @@ configure_users() {
 }
 
 configure_network() {
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" != "1" ]]; then
+        return 0
+    fi
     nmcli connection delete synca-lan >/dev/null 2>&1 || true
     nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
         ipv4.method manual ipv4.addresses "$LAN_CIDR" connection.autoconnect yes
@@ -279,6 +304,9 @@ CONF
 }
 
 configure_dnsmasq() {
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" != "1" ]]; then
+        return 0
+    fi
     local lan_ip netmask
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
@@ -347,17 +375,25 @@ CONF
     sysctl --system >/dev/null
 
     systemctl enable --now firewalld
-    firewall-cmd --permanent --set-default-zone=public
-    firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
-    firewall-cmd --permanent --zone=trusted --add-interface="$LAN_IF" || true
-    firewall-cmd --permanent --zone=trusted --add-source="$ADMIN_CIDR" || true
-    firewall-cmd --permanent --zone=trusted --add-service=dhcp || true
-    firewall-cmd --permanent --zone=trusted --add-service=dns || true
+    firewall-cmd --set-default-zone=public
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+        firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
+        firewall-cmd --permanent --zone=trusted --add-interface="$LAN_IF" || true
+    fi
+    if [[ "$ADMIN_CIDR" != "0.0.0.0/0" ]]; then
+        firewall-cmd --permanent --zone=trusted --add-source="$ADMIN_CIDR" || true
+    fi
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+        firewall-cmd --permanent --zone=trusted --add-service=dhcp || true
+        firewall-cmd --permanent --zone=trusted --add-service=dns || true
+    fi
     firewall-cmd --permanent --zone=public --add-port=4444/tcp
-    firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
-    firewall-cmd --permanent --zone=public --add-masquerade
-    firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$WAN_IF" -j MASQUERADE || true
-    if [[ "$WAN_MODE" == "pppoe" ]]; then
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+        firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
+        firewall-cmd --permanent --zone=public --add-masquerade
+        firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$WAN_IF" -j MASQUERADE || true
+    fi
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
     fi
     firewall-cmd --reload
@@ -365,16 +401,40 @@ CONF
 
 start_services() {
     systemctl daemon-reload
-    systemctl enable --now dnsmasq nginx server-gui
-    systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer
-    if systemctl list-unit-files wgui-worker.service >/dev/null 2>&1; then
-        systemctl enable --now wgui-worker || true
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+        systemctl enable dnsmasq
+        systemctl start --no-block dnsmasq || true
+    fi
+    systemctl enable nginx server-gui
+    systemctl start --no-block nginx server-gui || true
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+        systemctl enable server-gui-ddns.timer server-gui-geoip.timer
+        systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
+    fi
+    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]] && systemctl list-unit-files wgui-worker.service >/dev/null 2>&1; then
+        systemctl enable wgui-worker || true
+        systemctl start --no-block wgui-worker || true
     fi
     nginx -t
 }
 
 main() {
-    collect_config
+    local mode="${1:---auto-safe}"
+    case "$mode" in
+        --interactive)
+            bind_firstboot_tty "$@"
+            export SYNCA_APPLY_NETWORK=1
+            collect_config
+            ;;
+        --auto-safe)
+            export SYNCA_APPLY_NETWORK="${SYNCA_APPLY_NETWORK:-0}"
+            collect_auto_safe_config
+            ;;
+        *)
+            echo "Usage: $0 [--auto-safe|--interactive]" >&2
+            exit 2
+            ;;
+    esac
     write_install_env
     configure_hostname
     configure_users

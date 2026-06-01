@@ -180,7 +180,7 @@ ConditionPathExists=!/etc/synca/firstboot.done
 
 [Service]
 Type=oneshot
-ExecStart=/opt/synca-installer/synca-firstboot.sh
+ExecStart=/opt/synca-installer/synca-firstboot.sh --auto-safe
 StandardInput=null
 StandardOutput=journal+console
 StandardError=journal+console
