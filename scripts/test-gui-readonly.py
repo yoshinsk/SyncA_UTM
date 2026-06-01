@@ -32,6 +32,7 @@ PAGES = [
     "/certs/",
     "/backup/",
     "/admin/",
+    "/sophos-import/",
 ]
 
 API_GETS = [
@@ -66,6 +67,7 @@ API_GETS = [
     "/certs/api/certificates",
     "/backup/api/list",
     "/admin/api/settings",
+    "/sophos-import/api/plans",
 ]
 
 

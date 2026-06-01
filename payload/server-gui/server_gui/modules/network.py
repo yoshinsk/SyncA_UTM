@@ -545,7 +545,11 @@ def update_pppoe(name: str):
         if not r.ok:
             return jsonify({"ok": False, "error": r.stderr.strip()}), 500
         changed.append("mtu")
-    return jsonify({"ok": True, "changed": changed})
+    clamp_result = None
+    if bool(payload.get("mss_clamp", True)):
+        clamp_result = _ensure_pppoe_mss_clamp()
+        changed.append("mss_clamp")
+    return jsonify({"ok": True, "changed": changed, "mss_clamp": clamp_result})
 
 
 # ---- nmcli helpers -----------------------------------------------------

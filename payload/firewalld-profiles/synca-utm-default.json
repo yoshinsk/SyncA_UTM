@@ -191,6 +191,20 @@
       "chain": "POSTROUTING",
       "priority": 1,
       "args": "-o ${wan_interface} -j MASQUERADE"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "mangle",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-o ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "mangle",
+      "chain": "FORWARD",
+      "priority": 0,
+      "args": "-i ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
     }
   ],
   "first_online_actions": [
