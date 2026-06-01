@@ -10,12 +10,22 @@ BACKTITLE="SyncA UTM initial setup"
 FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
 TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
 
+quiet_firstboot_console() {
+    dmesg -n 1 >/dev/null 2>&1 || true
+    if command -v setterm >/dev/null 2>&1 && [[ -e "$TTY_PATH" ]]; then
+        setterm --msg off <"$TTY_PATH" >/dev/null 2>&1 || true
+        setterm --blank 0 --powerdown 0 <"$TTY_PATH" >/dev/null 2>&1 || true
+    fi
+}
+
 bind_firstboot_tty() {
     local tty="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
     if [[ -z "${SYNCA_FIRSTBOOT_TTY_BOUND:-}" && -e "$tty" ]]; then
         export SYNCA_FIRSTBOOT_TTY_BOUND=1
+        quiet_firstboot_console
         exec "$0" "$@" <"$tty" >"$tty" 2>&1
     fi
+    quiet_firstboot_console
 }
 
 prompt() {
@@ -106,8 +116,9 @@ ui_apply_started() {
 ui_apply_finished() {
     local message="SyncA UTM setup complete.\n\nGUI: https://$(cidr_ip "$LAN_CIDR"):4444/\n\nLogs: ${FIRSTBOOT_LOG}"
     if has_dialog; then
-        dialog --backtitle "$BACKTITLE" --title "Complete" --msgbox "$message" 12 72 \
+        dialog --backtitle "$BACKTITLE" --title "Complete" --infobox "$message\n\nContinuing in 5 seconds..." 12 72 \
             >"$TTY_PATH" 2>&1 || true
+        sleep 5
     else
         printf '%b\n' "$message" >"$TTY_PATH" 2>/dev/null || true
     fi
@@ -210,7 +221,12 @@ connection_names_for_interface() {
     local ifname="$1"
     {
         nmcli -t -f NAME,DEVICE connection show | awk -F: -v d="$ifname" '$2 == d {print $1}'
-        nmcli -t -f NAME,connection.interface-name connection show | awk -F: -v d="$ifname" '$2 == d {print $1}'
+        nmcli -t -f NAME connection show | while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            if [[ "$(nmcli -g connection.interface-name connection show "$name" 2>/dev/null || true)" == "$ifname" ]]; then
+                printf '%s\n' "$name"
+            fi
+        done
     } | awk 'NF && !seen[$0]++'
 }
 

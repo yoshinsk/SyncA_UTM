@@ -23,7 +23,8 @@ install_server_gui() {
     # script. Runtime configuration is created later by synca-firstboot.
     install -d -m 0755 /opt
     rm -rf /opt/server-gui
-    tar -xzf "$APP_ARCHIVE" -C /opt
+    install -d -m 0755 /opt/server-gui
+    tar -xzf "$APP_ARCHIVE" -C /opt/server-gui
     chown -R root:root /opt/server-gui
     chmod 0755 /opt/server-gui
 
@@ -35,8 +36,8 @@ install_server_gui() {
         echo "Python wheelhouse is missing. Rebuild ISO with SYNC_BUILD_WHEELHOUSE=1." >&2
         exit 1
     fi
-    sed -i 's/\r$//' /opt/server-gui/bin/*
-    chmod +x /opt/server-gui/bin/*
+    find /opt/server-gui/bin -maxdepth 1 -type f -exec sed -i 's/\r$//' {} +
+    find /opt/server-gui/bin -maxdepth 1 -type f -exec chmod +x {} +
 }
 
 install_extra_rpms() {
@@ -117,6 +118,12 @@ install_private_overrides() {
 }
 
 write_systemd_units() {
+    install -d -m 0755 /etc/systemd/system.conf.d
+    cat > /etc/systemd/system.conf.d/99-synca-quiet-console.conf <<'CONF'
+[Manager]
+ShowStatus=no
+CONF
+
     cat > /etc/systemd/system/server-gui.service <<'UNIT'
 [Unit]
 Description=Server GUI - SyncA UTM management
