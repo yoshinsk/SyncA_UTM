@@ -148,44 +148,50 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 text = path.read_text()
-lines = []
-skip_synca = False
+header = []
 for line in text.splitlines():
-    if line.startswith("label synca-utm"):
-        skip_synca = True
-        continue
-    if skip_synca and line.startswith("label "):
-        skip_synca = False
-    if skip_synca:
-        continue
     stripped = line.lstrip()
-    if stripped == "menu default":
-        continue
-    if stripped.startswith("append "):
-        line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
-        line = re.sub(r"\s+inst\.repo=\S+", "", line)
-        if "inst.stage2=" in line and "inst.repo=" not in line:
-            line += " inst.repo=hd:LABEL=SYNCA_UTM_9"
-        if "rd.multipath=0" not in line:
-            line += " rd.multipath=0"
-        if "inst.nompath" not in line:
-            line += " inst.nompath"
-    lines.append(line)
+    if line.startswith(("label ", "menu begin ")):
+        break
+    if stripped.startswith("timeout "):
+        line = "timeout 150"
+    if stripped.startswith("menu title "):
+        line = "menu title SyncA UTM Installer"
+    header.append(line)
 
-synca_block = """\
+menu_block = """\
 label synca-utm
   menu label Install SyncA UTM
   menu default
   kernel vmlinuz
   append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
+
+menu begin ^Troubleshooting
+  menu title Troubleshooting
+
+label text
+  menu label Install SyncA UTM using ^text mode
+  kernel vmlinuz
+  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
+
+label rescue
+  menu label ^Rescue an installed system
+  kernel vmlinuz
+  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.rescue rd.multipath=0 inst.nompath quiet
+
+label local
+  menu label Boot from ^local drive
+  localboot 0xffff
+
+label returntomain
+  menu label Return to ^main menu
+  menu exit
+
+menu end
 """
-for idx, line in enumerate(lines):
-    if line.startswith("label "):
-        lines[idx:idx] = synca_block.rstrip("\n").splitlines() + [""]
-        break
-else:
-    lines.extend([""] + synca_block.rstrip("\n").splitlines())
-path.write_text("\n".join(lines) + "\n")
+while header and not header[-1].strip():
+    header.pop()
+path.write_text("\n".join(header) + "\n\n" + menu_block.rstrip("\n") + "\n")
 PY
 }
 
@@ -200,50 +206,53 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text()
 lines = []
-skip_synca = False
+skipping_entry = False
+skipping_submenu = False
 brace_depth = 0
 for line in text.splitlines():
     stripped = line.lstrip()
-    if not skip_synca and "menuentry 'Install SyncA UTM'" in line:
-        skip_synca = True
+    if stripped.startswith(("menuentry ", "submenu ")):
+        skipping_entry = stripped.startswith("menuentry ")
+        skipping_submenu = stripped.startswith("submenu ")
         brace_depth = line.count("{") - line.count("}")
         continue
-    if skip_synca:
+    if skipping_entry or skipping_submenu:
         brace_depth += line.count("{") - line.count("}")
         if brace_depth <= 0:
-            skip_synca = False
+            skipping_entry = False
+            skipping_submenu = False
         continue
     if stripped.startswith("set default="):
         line = 'set default="synca-utm"'
+    if stripped.startswith("set timeout="):
+        line = "set timeout=15"
     if "search --no-floppy --set=root -l " in line:
         line = "search --no-floppy --set=root -l 'SYNCA_UTM_9'"
-    if stripped.startswith(("linux ", "linuxefi ")):
-        line = re.sub(r"inst\.stage2=\S+", "inst.stage2=hd:LABEL=SYNCA_UTM_9", line)
-        line = re.sub(r"\s+inst\.repo=\S+", "", line)
-        if "inst.stage2=" in line and "inst.repo=" not in line:
-            line += " inst.repo=hd:LABEL=SYNCA_UTM_9"
-        if "rd.multipath=0" not in line:
-            line += " rd.multipath=0"
-        if "inst.nompath" not in line:
-            line += " inst.nompath"
     lines.append(line)
 
 if not any(line.lstrip().startswith("set default=") for line in lines):
     lines.insert(0, 'set default="synca-utm"')
 
-synca_block = """\
+menu_block = """\
 menuentry 'Install SyncA UTM' --id synca-utm --class fedora --class gnu-linux --class gnu --class os {
     linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
     initrdefi /images/pxeboot/initrd.img
 }
+
+submenu 'Troubleshooting' {
+    menuentry 'Install SyncA UTM using text mode' --class fedora --class gnu-linux --class gnu --class os {
+        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
+        initrdefi /images/pxeboot/initrd.img
+    }
+    menuentry 'Rescue an installed system' --class fedora --class gnu-linux --class gnu --class os {
+        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.rescue rd.multipath=0 inst.nompath quiet
+        initrdefi /images/pxeboot/initrd.img
+    }
+}
 """
-for idx, line in enumerate(lines):
-    if "menuentry " in line:
-        lines[idx:idx] = synca_block.rstrip("\n").splitlines() + [""]
-        break
-else:
-    lines.extend([""] + synca_block.rstrip("\n").splitlines())
-path.write_text("\n".join(lines) + "\n")
+while lines and not lines[-1].strip():
+    lines.pop()
+path.write_text("\n".join(lines) + "\n\n" + menu_block.rstrip("\n") + "\n")
 PY
 }
 
