@@ -45,6 +45,64 @@ require_interface() {
     fi
 }
 
+list_ethernet_interfaces() {
+    nmcli -t -f DEVICE,TYPE device status | awk -F: '$2 == "ethernet" {print $1}'
+}
+
+print_interface_table() {
+    local exclude="${1:-}"
+    local index=1
+    local name state mac connection
+    echo "Available ethernet interfaces:" >&2
+    while IFS= read -r name; do
+        [[ -z "$name" || "$name" == "$exclude" ]] && continue
+        state="$(nmcli -g GENERAL.STATE device show "$name" 2>/dev/null | head -n1 || true)"
+        mac="$(nmcli -g GENERAL.HWADDR device show "$name" 2>/dev/null | head -n1 || true)"
+        connection="$(nmcli -g GENERAL.CONNECTION device show "$name" 2>/dev/null | head -n1 || true)"
+        printf '  %d) %s  state=%s  mac=%s  connection=%s\n' \
+            "$index" "$name" "${state:-unknown}" "${mac:--}" "${connection:---}" >&2
+        index=$((index + 1))
+    done < <(list_ethernet_interfaces)
+}
+
+select_interface() {
+    local role="$1"
+    local exclude="${2:-}"
+    local choice count name index
+    local -a names=()
+
+    while IFS= read -r name; do
+        [[ -z "$name" || "$name" == "$exclude" ]] && continue
+        names+=("$name")
+    done < <(list_ethernet_interfaces)
+
+    count="${#names[@]}"
+    if [[ "$count" -eq 0 ]]; then
+        echo "No selectable ethernet interface found for ${role}." >&2
+        exit 1
+    fi
+
+    while true; do
+        print_interface_table "$exclude"
+        read -r -p "Select ${role} interface by number or name: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            index=$((choice - 1))
+            if [[ "$index" -ge 0 && "$index" -lt "$count" ]]; then
+                printf '%s' "${names[$index]}"
+                return 0
+            fi
+        else
+            for name in "${names[@]}"; do
+                if [[ "$choice" == "$name" ]]; then
+                    printf '%s' "$name"
+                    return 0
+                fi
+            done
+        fi
+        echo "Invalid ${role} interface selection: ${choice}" >&2
+    done
+}
+
 cidr_ip() {
     printf '%s' "${1%/*}"
 }
@@ -74,9 +132,6 @@ collect_config() {
     echo "SyncA UTM first boot setup"
     echo "Use ASCII input on this console. Japanese UI is available in the web GUI."
     echo
-    nmcli -t -f DEVICE,TYPE,STATE device status || true
-    echo
-
     SYSTEM_HOSTNAME="$(prompt "System hostname" "synca-utm")"
     ADMIN_USER="$(prompt "Linux sudo user" "loginuser")"
     ADMIN_PASS="$(prompt_secret "Linux sudo user password")"
@@ -84,12 +139,10 @@ collect_config() {
     GUI_PASS="$(prompt_secret "GUI password")"
     ADMIN_CIDR="$(prompt "Management source CIDR" "0.0.0.0/0")"
 
-    WAN_IF="$(prompt "WAN interface" "enp2s0")"
-    LAN_IF="$(prompt "LAN interface" "enp3s0")"
-    if [[ "$WAN_IF" == "$LAN_IF" ]]; then
-        echo "WAN and LAN interfaces must be different." >&2
-        exit 1
-    fi
+    WAN_IF="$(select_interface "WAN")"
+    echo
+    LAN_IF="$(select_interface "LAN" "$WAN_IF")"
+    echo
     require_interface "$WAN_IF"
     require_interface "$LAN_IF"
 
