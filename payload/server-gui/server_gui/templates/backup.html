@@ -229,7 +229,7 @@ async function restoreUpload() {
     const sections = _sectionPayload();
     for (const k in sections) form.append(k, sections[k] ? 'true' : 'false');
     try {
-        const r = await fetch('/backup/api/restore', {
+        const r = await SyncAUI.fetch('/backup/api/restore', {
             method: 'POST',
             headers: { 'X-CSRF-Token': csrfToken },
             credentials: 'same-origin',

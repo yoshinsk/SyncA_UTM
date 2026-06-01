@@ -314,7 +314,7 @@ async function sendProvider(payload) {
     const url = editingId ? `/ddns/api/providers/${editingId}` : '/ddns/api/providers';
     const method = editingId ? 'PUT' : 'POST';
     try {
-        const response = await fetch(url, {
+        const response = await SyncAUI.fetch(url, {
             method,
             headers: {
                 'Content-Type': 'application/json',

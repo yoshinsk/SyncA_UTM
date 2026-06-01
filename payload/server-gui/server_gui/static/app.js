@@ -1,7 +1,10 @@
-/* Shared helpers for the server-gui frontend. Bootstrap 5 based. */
+/* payload/server-gui/server_gui/static/app.js
+   Shared frontend helpers for SyncA UTM's Bootstrap based server GUI. */
 'use strict';
 
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+const loadingText = '読み込み中...';
+const processingText = '処理中...';
 
 /* Pageunload detection: suppress noisy toasts that fire when in-flight fetches
    are aborted by navigation. Errors still go to the browser console. */
@@ -17,6 +20,137 @@ window.addEventListener('error', (e) => {
 window.addEventListener('unhandledrejection', (e) => {
     console.error('[unhandled-rejection]', e.reason);
 });
+
+const SyncAUI = (() => {
+    const buttonSelector = [
+        'button',
+        'input[type="button"]',
+        'input[type="submit"]',
+        'input[type="reset"]',
+        'a.btn',
+    ].join(',');
+    let activeRequests = 0;
+    let loadingTimer = null;
+    let loadingEl = null;
+
+    function ensureLoadingEl() {
+        if (loadingEl) return loadingEl;
+        loadingEl = document.createElement('div');
+        loadingEl.id = 'synca-loading-indicator';
+        loadingEl.className = 'synca-loading-indicator shadow-sm';
+        loadingEl.setAttribute('role', 'status');
+        loadingEl.setAttribute('aria-live', 'polite');
+        loadingEl.innerHTML = `
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <span class="synca-loading-text">${loadingText}</span>`;
+        document.body.appendChild(loadingEl);
+        return loadingEl;
+    }
+
+    function setButtonsDisabled(disabled) {
+        for (const button of document.querySelectorAll(buttonSelector)) {
+            if (button.dataset.syncaAllowBusy === 'true') continue;
+            const isLinkButton = button.matches('a.btn');
+            if (disabled) {
+                if (isLinkButton && !button.classList.contains('disabled')) {
+                    button.dataset.syncaBusyDisabled = '1';
+                    button.dataset.syncaPreviousTabindex = button.getAttribute('tabindex') || '';
+                    button.classList.add('disabled');
+                    button.setAttribute('aria-disabled', 'true');
+                    button.setAttribute('tabindex', '-1');
+                } else if (!isLinkButton && !button.disabled) {
+                    button.dataset.syncaBusyDisabled = '1';
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                }
+            } else if (button.dataset.syncaBusyDisabled === '1') {
+                if (isLinkButton) {
+                    button.classList.remove('disabled');
+                    if (button.dataset.syncaPreviousTabindex) {
+                        button.setAttribute('tabindex', button.dataset.syncaPreviousTabindex);
+                    } else {
+                        button.removeAttribute('tabindex');
+                    }
+                    delete button.dataset.syncaPreviousTabindex;
+                } else {
+                    button.disabled = false;
+                }
+                button.removeAttribute('aria-disabled');
+                delete button.dataset.syncaBusyDisabled;
+            }
+        }
+    }
+
+    function showLoading(message) {
+        const el = ensureLoadingEl();
+        el.querySelector('.synca-loading-text').textContent = message || loadingText;
+        clearTimeout(loadingTimer);
+        loadingTimer = setTimeout(() => {
+            if (activeRequests > 0) el.classList.add('show');
+        }, 250);
+    }
+
+    function hideLoading() {
+        clearTimeout(loadingTimer);
+        loadingTimer = null;
+        if (loadingEl) loadingEl.classList.remove('show');
+        document.body.classList.remove('synca-ui-busy');
+        document.body.removeAttribute('aria-busy');
+    }
+
+    function begin(options = {}) {
+        activeRequests += 1;
+        document.body.classList.add('synca-ui-busy');
+        document.body.setAttribute('aria-busy', 'true');
+        setButtonsDisabled(true);
+        showLoading(options.message || loadingText);
+        return { ended: false };
+    }
+
+    function end(token) {
+        if (!token || token.ended) return;
+        token.ended = true;
+        activeRequests = Math.max(0, activeRequests - 1);
+        if (activeRequests === 0) {
+            setButtonsDisabled(false);
+            hideLoading();
+        }
+    }
+
+    async function track(fn, options = {}) {
+        const token = begin(options);
+        try {
+            return await fn();
+        } finally {
+            end(token);
+        }
+    }
+
+    async function fetchWithUi(input, init = {}) {
+        const method = String(init.method || 'GET').toUpperCase();
+        const message = method === 'GET' ? loadingText : processingText;
+        return track(() => window.fetch(input, init), { message });
+    }
+
+    return {
+        begin,
+        end,
+        fetch: fetchWithUi,
+        isBusy: () => activeRequests > 0,
+        track,
+    };
+})();
+window.SyncAUI = SyncAUI;
+
+document.addEventListener('click', (event) => {
+    if (!SyncAUI.isBusy()) return;
+    const target = event.target instanceof Element
+        ? event.target.closest('button,input[type="button"],input[type="submit"],input[type="reset"],a.btn')
+        : null;
+    if (!target || target.dataset.syncaAllowBusy === 'true') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+}, true);
 
 function escapeHtml(s) {
     if (s === null || s === undefined) return '';
@@ -74,6 +208,7 @@ const api = {
     async get(url) {
         const ctx = { method: 'GET', url };
         const t0 = performance.now();
+        const uiToken = SyncAUI.begin({ message: loadingText });
         try {
             const res = await fetch(url, { credentials: 'same-origin' });
             const out = await this._handle(res, ctx);
@@ -87,11 +222,14 @@ const api = {
             console.error('[api] GET', url, 'failed:', e);
             toast('通信エラー: ' + e.message, true);
             return null;
+        } finally {
+            SyncAUI.end(uiToken);
         }
     },
     async send(url, method, payload) {
         const ctx = { method, url };
         const t0 = performance.now();
+        const uiToken = SyncAUI.begin({ message: processingText });
         try {
             const res = await fetch(url, {
                 method,
@@ -113,6 +251,8 @@ const api = {
             console.error('[api]', method, url, 'failed:', e);
             toast('通信エラー: ' + e.message, true);
             return null;
+        } finally {
+            SyncAUI.end(uiToken);
         }
     },
 };

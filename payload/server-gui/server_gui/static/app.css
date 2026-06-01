@@ -1,4 +1,5 @@
-/* server-gui customizations on top of Bootstrap 5. */
+/* payload/server-gui/server_gui/static/app.css
+   Custom Bootstrap 5 styling for SyncA UTM's server GUI. */
 
 body {
     font-feature-settings: "palt";
@@ -153,6 +154,39 @@ body > main {
 
 .toast-container .toast {
     min-width: 280px;
+}
+
+.synca-loading-indicator {
+    position: fixed;
+    top: 0.85rem;
+    right: 0.85rem;
+    z-index: 1090;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 2.4rem;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--bs-border-color-translucent);
+    border-radius: 0.5rem;
+    background: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    font-size: 0.875rem;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-0.25rem);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.synca-loading-indicator.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+.synca-ui-busy {
+    cursor: progress;
+}
+.synca-ui-busy button[data-synca-busy-disabled="1"],
+.synca-ui-busy input[data-synca-busy-disabled="1"],
+.synca-ui-busy a[data-synca-busy-disabled="1"] {
+    cursor: progress;
 }
 
 .firewall-visual-editor .fw-palette {
