@@ -9,6 +9,7 @@ SYNC_DIR="/etc/synca"
 BACKTITLE="SyncA UTM initial setup"
 FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
 TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
+export TERM="${TERM:-linux}"
 
 quiet_firstboot_console() {
     dmesg -n 1 >/dev/null 2>&1 || true
@@ -49,7 +50,9 @@ prompt_secret() {
 }
 
 has_dialog() {
-    command -v dialog >/dev/null 2>&1
+    command -v dialog >/dev/null 2>&1 || return 1
+    dialog --print-maxsize >/dev/null 2>&1 || return 1
+    return 0
 }
 
 fatal() {
@@ -266,6 +269,27 @@ activate_connection_with_retry() {
     return 1
 }
 
+ensure_lan_address() {
+    local lan_ip
+    lan_ip="$(cidr_ip "$LAN_CIDR")"
+    nmcli device set "$LAN_IF" managed yes >/dev/null 2>&1 || true
+    nmcli connection modify synca-lan connection.interface-name "$LAN_IF" \
+        ipv4.method manual ipv4.addresses "$LAN_CIDR" ipv4.never-default yes \
+        ipv6.method ignore connection.autoconnect yes connection.zone trusted \
+        >/dev/null 2>&1 || true
+    nmcli connection up synca-lan ifname "$LAN_IF" >/dev/null 2>&1 || true
+    if ip -4 addr show dev "$LAN_IF" 2>/dev/null | grep -Fq "inet ${lan_ip}/"; then
+        return 0
+    fi
+    ip link set "$LAN_IF" up >/dev/null 2>&1 || true
+    ip addr replace "$LAN_CIDR" dev "$LAN_IF" >/dev/null 2>&1 || true
+    if ! ip -4 addr show dev "$LAN_IF" 2>/dev/null | grep -Fq "inet ${lan_ip}/"; then
+        echo "warning: LAN address ${LAN_CIDR} is still not present on ${LAN_IF}" >&2
+        return 1
+    fi
+    return 0
+}
+
 cidr_ip() {
     printf '%s' "${1%/*}"
 }
@@ -346,7 +370,10 @@ You will select WAN/LAN interfaces, WAN connection method, administrator account
 collect_auto_safe_config() {
     SYSTEM_HOSTNAME="${SYNCA_SYSTEM_HOSTNAME:-synca-utm}"
     ADMIN_USER="${SYNCA_ADMIN_USER:-loginuser}"
-    ADMIN_PASS="${SYNCA_ADMIN_PASSWORD:-Asdf-1234}"
+    ADMIN_PASS="${SYNCA_ADMIN_PASSWORD:-}"
+    if [[ -z "$ADMIN_PASS" ]]; then
+        fatal "SYNCA_ADMIN_PASSWORD is required in --auto-safe mode."
+    fi
     GUI_USER="${SYNCA_GUI_USER:-$ADMIN_USER}"
     GUI_PASS="${SYNCA_GUI_PASSWORD:-$ADMIN_PASS}"
     ADMIN_CIDR="${SYNCA_ADMIN_CIDR:-0.0.0.0/0}"
@@ -418,6 +445,7 @@ configure_network() {
             ipv4.never-default yes ipv6.method ignore \
             connection.autoconnect yes connection.zone trusted
         activate_connection_with_retry synca-lan 2 || true
+        ensure_lan_address || true
     fi
 
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" != "1" ]]; then
@@ -479,22 +507,28 @@ PY
 }
 JSON
     if [[ -n "$DDNS_LEFT" && -n "${SYNCA_DDNSFT_AUTH_USER:-}" && -n "${SYNCA_DDNSFT_AUTH_PASS:-}" ]]; then
-        python3 - <<PY
+        SYNCA_CONFIG_DIR="$CONFIG_DIR" \
+        SYNCA_DDNS_LEFT_FOR_PY="$DDNS_LEFT" \
+        SYNCA_DDNS_DOMAIN_FOR_PY="$DDNS_DOMAIN" \
+        python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 
-path = Path(${CONFIG_DIR@Q}) / "ddns.json"
+path = Path(os.environ["SYNCA_CONFIG_DIR"]) / "ddns.json"
 data = json.loads(path.read_text(encoding="utf-8"))
+account = os.environ["SYNCA_DDNS_LEFT_FOR_PY"].strip()
+domain = os.environ["SYNCA_DDNS_DOMAIN_FOR_PY"].strip()
 data["providers"] = [{
     "id": "default-ddnsft",
-    "name": ${DDNS_LEFT@Q},
+    "name": account,
     "enabled": True,
     "preset_type": "ddnsft",
     "template": "https://update.ddnsft.com/update/update.php?host={account}&dm={domain}&ip={ip}",
-    "account": ${DDNS_LEFT@Q},
-    "domain": ${DDNS_DOMAIN@Q},
-    "auth_user": ${SYNCA_DDNSFT_AUTH_USER@Q},
-    "auth_pass": ${SYNCA_DDNSFT_AUTH_PASS@Q},
+    "account": account,
+    "domain": domain,
+    "auth_user": os.environ.get("SYNCA_DDNSFT_AUTH_USER", "").strip(),
+    "auth_pass": os.environ.get("SYNCA_DDNSFT_AUTH_PASS", "").strip(),
 }]
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
@@ -667,6 +701,9 @@ CONF
         local nat_out_if="$WAN_IF"
         if [[ "$WAN_MODE" == "pppoe" ]]; then
             nat_out_if="ppp+"
+            firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 22 -j ACCEPT || true
+            firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 4444 -j ACCEPT || true
+            firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p udp --dport "${WG_PORT}" -j ACCEPT || true
         fi
         firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
         firewall-cmd --permanent --zone=public --add-masquerade

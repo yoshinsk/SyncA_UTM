@@ -27,6 +27,21 @@ require_tool() {
     fi
 }
 
+normalize_lf_text_tree() {
+    # Build inputs can include private env/drop-in files prepared on Windows.
+    # Normalize only known text files so offline RPMs, wheels, archives, fonts,
+    # and bundled binaries remain byte-for-byte intact.
+    local root="$1"
+    [[ -d "$root" ]] || return 0
+    find "$root" -type f \( \
+        -name '*.sh' -o -name '*.ks' -o -name '*.env' -o -name '*.conf' \
+        -o -name '*.service' -o -name '*.timer' -o -name '*.json' \
+        -o -name '*.py' -o -name '*.html' -o -name '*.css' -o -name '*.js' \
+        -o -name '*.txt' -o -name '*.md' -o -name '*.ini' \
+        -o -name '*.yaml' -o -name '*.yml' -o -name '*.xml' -o -name '*.j2' \
+    \) -exec sed -i 's/\r$//' {} +
+}
+
 prepare_workspace() {
     mkdir -p "$BUILD_DIR" "$(dirname "$OUTPUT_ISO")"
     rm -rf "${BUILD_DIR}/payload"
@@ -138,6 +153,7 @@ PY
         mkdir -p "${BUILD_DIR}/payload/synca/rpms"
         rsync -a "${RPM_DIR_SRC%/}/SyncA-Extra/" "${BUILD_DIR}/payload/synca/rpms/"
     fi
+    normalize_lf_text_tree "${BUILD_DIR}/payload"
 }
 
 extract_boot_configs() {
@@ -314,6 +330,7 @@ main() {
     extract_boot_configs
     patch_isolinux
     patch_grub
+    normalize_lf_text_tree "${BUILD_DIR}/bootcfg"
     build_iso
     echo "ISO created: $OUTPUT_ISO"
 }

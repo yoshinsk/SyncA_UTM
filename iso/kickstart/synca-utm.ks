@@ -40,6 +40,7 @@ certbot
 cronie
 curl
 dnsmasq
+dialog
 fail2ban
 firewalld
 git
