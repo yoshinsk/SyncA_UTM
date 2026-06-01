@@ -98,8 +98,8 @@ collect_config() {
     esac
 
     LAN_CIDR="$(prompt "LAN address CIDR" "172.17.17.1/24")"
-    DHCP_START="$(prompt "LAN DHCP start" "172.17.17.20")"
-    DHCP_END="$(prompt "LAN DHCP end" "172.17.17.120")"
+    DHCP_START="$(prompt "LAN DHCP start" "172.17.17.10")"
+    DHCP_END="$(prompt "LAN DHCP end" "172.17.17.20")"
     WG_ADDR="$(prompt "WireGuard interface CIDR" "10.252.1.1/24")"
     WG_PORT="$(prompt "WireGuard listen port" "51820")"
     DDNS_LEFT="$(prompt "DDNS host left label, blank to skip" "")"
@@ -122,8 +122,8 @@ collect_auto_safe_config() {
     PPPOE_USER="${SYNCA_PPPOE_USER:-}"
     PPPOE_PASS="${SYNCA_PPPOE_PASS:-}"
     LAN_CIDR="${SYNCA_LAN_CIDR:-172.17.17.1/24}"
-    DHCP_START="${SYNCA_DHCP_START:-172.17.17.20}"
-    DHCP_END="${SYNCA_DHCP_END:-172.17.17.120}"
+    DHCP_START="${SYNCA_DHCP_START:-172.17.17.10}"
+    DHCP_END="${SYNCA_DHCP_END:-172.17.17.20}"
     WG_ADDR="${SYNCA_WG_ADDR:-10.252.1.1/24}"
     WG_PORT="${SYNCA_WG_PORT:-51820}"
     DDNS_LEFT="${SYNCA_DDNS_LEFT:-}"
@@ -172,12 +172,16 @@ configure_users() {
 }
 
 configure_network() {
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" != "1" ]]; then
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+        nmcli connection delete synca-lan >/dev/null 2>&1 || true
+        nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
+            ipv4.method manual ipv4.addresses "$LAN_CIDR" connection.autoconnect yes
+        nmcli connection up synca-lan || true
+    fi
+
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" != "1" ]]; then
         return 0
     fi
-    nmcli connection delete synca-lan >/dev/null 2>&1 || true
-    nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
-        ipv4.method manual ipv4.addresses "$LAN_CIDR" connection.autoconnect yes
 
     nmcli connection delete synca-wan >/dev/null 2>&1 || true
     nmcli connection delete synca-pppoe >/dev/null 2>&1 || true
@@ -304,7 +308,7 @@ CONF
 }
 
 configure_dnsmasq() {
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" != "1" ]]; then
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" != "1" ]]; then
         return 0
     fi
     local lan_ip netmask
@@ -376,24 +380,26 @@ CONF
 
     systemctl enable --now firewalld
     firewall-cmd --set-default-zone=public
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
+    fi
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=trusted --add-interface="$LAN_IF" || true
     fi
     if [[ "$ADMIN_CIDR" != "0.0.0.0/0" ]]; then
         firewall-cmd --permanent --zone=trusted --add-source="$ADMIN_CIDR" || true
     fi
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=trusted --add-service=dhcp || true
         firewall-cmd --permanent --zone=trusted --add-service=dns || true
     fi
     firewall-cmd --permanent --zone=public --add-port=4444/tcp
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
         firewall-cmd --permanent --zone=public --add-masquerade
         firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$WAN_IF" -j MASQUERADE || true
     fi
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
     fi
     firewall-cmd --reload
@@ -401,17 +407,17 @@ CONF
 
 start_services() {
     systemctl daemon-reload
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable dnsmasq
         systemctl start --no-block dnsmasq || true
     fi
     systemctl enable nginx server-gui
     systemctl start --no-block nginx server-gui || true
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]]; then
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable server-gui-ddns.timer server-gui-geoip.timer
         systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
     fi
-    if [[ "${SYNCA_APPLY_NETWORK:-1}" == "1" ]] && systemctl list-unit-files wgui-worker.service >/dev/null 2>&1; then
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]] && systemctl list-unit-files wgui-worker.service >/dev/null 2>&1; then
         systemctl enable wgui-worker || true
         systemctl start --no-block wgui-worker || true
     fi
@@ -424,10 +430,14 @@ main() {
         --interactive)
             bind_firstboot_tty "$@"
             export SYNCA_APPLY_NETWORK=1
+            export SYNCA_APPLY_LAN=1
+            export SYNCA_APPLY_WAN=1
             collect_config
             ;;
         --auto-safe)
             export SYNCA_APPLY_NETWORK="${SYNCA_APPLY_NETWORK:-0}"
+            export SYNCA_APPLY_LAN="${SYNCA_APPLY_LAN:-1}"
+            export SYNCA_APPLY_WAN="${SYNCA_APPLY_WAN:-0}"
             collect_auto_safe_config
             ;;
         *)
