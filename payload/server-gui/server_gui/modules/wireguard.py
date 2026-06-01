@@ -32,6 +32,7 @@ Workflow:
 from __future__ import annotations
 
 import datetime as _dt
+import io
 import ipaddress
 import logging
 import re
@@ -1431,8 +1432,39 @@ def _build_client_config(meta: dict, server_pub: Optional[str]) -> str:
 
 
 def _generate_qr_svg(text: str) -> str:
+    """Generate QR SVG for a client config without requiring qrencode RPM."""
+    if not text:
+        return ""
+    try:
+        import qrcode
+        import qrcode.image.svg
+
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=2,
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        buf = io.BytesIO()
+        image.save(buf)
+        return _normalize_inline_svg(buf.getvalue().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        logger.warning("Python QR generation failed; falling back to qrencode: %s", exc)
+
     res = run(["qrencode", "-t", "SVG", "-o", "-", text])
-    return res.stdout if res.ok else ""
+    if res.ok and res.stdout.strip():
+        return _normalize_inline_svg(res.stdout)
+    logger.warning("WireGuard QR generation failed: %s", (res.stderr or res.stdout).strip())
+    return ""
+
+
+def _normalize_inline_svg(svg: str) -> str:
+    """Return only the SVG element so it can be assigned to innerHTML."""
+    start = svg.find("<svg")
+    if start > 0:
+        svg = svg[start:]
+    return svg.strip()
 
 
 def _now() -> str:
