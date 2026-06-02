@@ -23,7 +23,7 @@
     </div>
     <div class="card-body">
         <div class="row g-2 align-items-end">
-            <div class="col-md-8">
+            <div class="col-md-6">
                 <label class="form-label">Sophos WebAdmin XML</label>
                 <input id="xml-file" type="file" class="form-control" accept=".xml,text/xml,application/xml">
             </div>
@@ -35,6 +35,11 @@
             <div class="col-md-2">
                 <button id="save-btn" type="button" class="btn btn-primary w-100">
                     <i class="bi bi-save"></i> プラン保存
+                </button>
+            </div>
+            <div class="col-md-2">
+                <button id="import-btn" type="button" class="btn btn-success w-100">
+                    <i class="bi bi-box-arrow-in-down"></i> 取り込み
                 </button>
             </div>
         </div>
@@ -95,6 +100,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('preview-btn').addEventListener('click', () => runSophosImport('preview'));
     document.getElementById('save-btn').addEventListener('click', () => runSophosImport('save'));
+    document.getElementById('import-btn').addEventListener('click', () => runSophosImport('import'));
     document.getElementById('reload-plans-btn').addEventListener('click', loadSavedPlans);
     loadSavedPlans();
 });
@@ -103,6 +109,7 @@ function setImportBusy(isBusy, message = '') {
     const status = document.getElementById('import-status');
     document.getElementById('preview-btn').disabled = isBusy;
     document.getElementById('save-btn').disabled = isBusy;
+    document.getElementById('import-btn').disabled = isBusy;
     if (message) {
         status.classList.remove('d-none', 'alert-danger', 'alert-info', 'alert-success');
         status.classList.add(isBusy ? 'alert-info' : 'alert-success');
@@ -161,6 +168,9 @@ async function loadSavedPlans() {
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadPlan('${escapeJs(p.name)}')">
                         <i class="bi bi-eye"></i> プレビュー
                     </button>
+                    <button type="button" class="btn btn-sm btn-outline-success" onclick="importSavedPlan('${escapeJs(p.name)}')">
+                        <i class="bi bi-box-arrow-in-down"></i> Import
+                    </button>
                 </td>
             </tr>`;
         }).join('');
@@ -180,6 +190,29 @@ async function loadPlan(name) {
     } finally {
         document.getElementById('preview-btn').disabled = false;
         document.getElementById('save-btn').disabled = false;
+        document.getElementById('import-btn').disabled = false;
+    }
+}
+
+async function importSavedPlan(name) {
+    setImportBusy(true, `${name} import running...`);
+    try {
+        const response = await SyncAUI.fetch(`/sophos-import/api/plans/${encodeURIComponent(name)}/import`, {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ replace: true, apply_system: false }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        renderImportResult(data);
+        setImportBusy(false, 'Import completed.');
+    } catch (e) {
+        showImportError(e.message || String(e));
+    } finally {
+        document.getElementById('preview-btn').disabled = false;
+        document.getElementById('save-btn').disabled = false;
+        document.getElementById('import-btn').disabled = false;
     }
 }
 
@@ -315,19 +348,47 @@ function escapeJs(value) {
 
 async function runSophosImport(mode) {
     const isSave = mode === 'save';
-    const path = isSave ? '/sophos-import/api/save-plan' : '/sophos-import/api/preview';
-    setImportBusy(true, isSave ? '取込プランを保存しています...' : 'XMLを解析しています...');
+    const isImport = mode === 'import';
+    const path = isImport ? '/sophos-import/api/import-upload' : (isSave ? '/sophos-import/api/save-plan' : '/sophos-import/api/preview');
+    setImportBusy(true, isImport ? 'SyncA管理設定へ取り込み中...' : (isSave ? '取込プランを保存しています...' : 'XMLを解析しています...'));
     try {
         const data = await sendSophosXml(path);
-        renderSophosPlan(data, isSave ? (data.path || '') : '');
-        setImportBusy(false, isSave ? `保存しました: ${data.path}` : '解析が完了しました。');
+        if (isImport) {
+            renderImportResult(data);
+        } else {
+            renderSophosPlan(data, isSave ? (data.path || '') : '');
+        }
+        setImportBusy(false, isImport ? '取り込みが完了しました。' : (isSave ? `保存しました: ${data.path}` : '解析が完了しました。'));
         if (isSave) loadSavedPlans();
     } catch (e) {
         showImportError(e.message || String(e));
     } finally {
         document.getElementById('preview-btn').disabled = false;
         document.getElementById('save-btn').disabled = false;
+        document.getElementById('import-btn').disabled = false;
     }
+}
+
+function renderImportResult(data) {
+    document.getElementById('result').classList.remove('d-none');
+    document.getElementById('preview-title').textContent = data.source || 'import';
+    const summary = data.summary || {};
+    document.getElementById('summary').innerHTML = `
+        <div class="row g-2 small">
+            <div class="col-md-3"><strong>PPPoE:</strong> ${summary.pppoe_profiles || 0}</div>
+            <div class="col-md-3"><strong>Static routes:</strong> ${summary.static_routes || 0}</div>
+            <div class="col-md-3"><strong>NAT/forward:</strong> ${summary.nat_forward_ports || 0}</div>
+            <div class="col-md-3"><strong>Masquerade:</strong> ${summary.masquerade_rules || 0}</div>
+            <div class="col-md-3"><strong>DHCP ranges:</strong> ${summary.dhcp_ranges || 0}</div>
+            <div class="col-md-3"><strong>DHCP options:</strong> ${summary.dhcp_options || 0}</div>
+            <div class="col-md-3"><strong>IPsec:</strong> ${summary.ipsec_connections || 0}</div>
+            <div class="col-md-3"><strong>Nginx vhosts:</strong> ${summary.nginx_vhosts || 0}</div>
+        </div>`;
+    document.getElementById('notes').innerHTML = (data.warnings || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+    document.getElementById('synca-preview').innerHTML = '<div class="alert alert-info small">Imported into SyncA managed config. PPPoE/static route entries need Linux interface or NetworkManager connection mapping before live apply.</div>';
+    document.getElementById('target-preview').innerHTML = '';
+    document.getElementById('plan-json').textContent = JSON.stringify(data, null, 2);
+    document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 </script>
 {% endblock %}
