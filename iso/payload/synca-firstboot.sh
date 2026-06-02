@@ -690,15 +690,35 @@ server {
 NGINX
 }
 
+install_sip_custom_firewalld_service() {
+    # Keep the firewalld service definition aligned with the custom SIP rule
+    # used on existing SyncA UTM deployments. Zone assignment and optional
+    # port-forward targets are configured separately.
+    install -d -m 0755 /etc/firewalld/services
+    cat > /etc/firewalld/services/sip-custom.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>SIP-Custom</short>
+  <description>Custom SIP on port 48060</description>
+  <port protocol="tcp" port="48060"/>
+  <port protocol="udp" port="48060"/>
+  <module name="nf_conntrack_sip"/>
+</service>
+XML
+    chmod 0644 /etc/firewalld/services/sip-custom.xml
+}
+
 configure_firewall() {
     cat > /etc/sysctl.d/99-synca-utm.conf <<'CONF'
 net.ipv4.ip_forward = 1
 CONF
     sysctl --system >/dev/null
 
+    install_sip_custom_firewalld_service
     systemctl enable --now firewalld
     firewall-cmd --set-default-zone=public
     firewall-cmd --permanent --zone=public --add-service=ssh || true
+    firewall-cmd --permanent --zone=public --add-service=sip-custom || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
     fi

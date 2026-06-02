@@ -83,6 +83,7 @@
         "http",
         "https",
         "ipsec",
+        "sip-custom",
         "ssh",
         "wireguard"
       ],
