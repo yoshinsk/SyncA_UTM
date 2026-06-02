@@ -1,4 +1,8 @@
-"""Safe subprocess wrappers. Never uses shell=True."""
+"""payload/server-gui/server_gui/shell.py
+
+Safe subprocess wrappers for SyncA UTM's server GUI. Commands are executed
+without shell=True and returned as structured text results for API handlers.
+"""
 from __future__ import annotations
 
 import logging
@@ -25,6 +29,15 @@ class CommandResult:
         return f"CommandResult(rc={self.returncode}, argv={joined})"
 
 
+def _coerce_text(value: str | bytes | None) -> str:
+    """Normalize subprocess output to text, including TimeoutExpired bytes."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def run(argv: Sequence[str], *, timeout: float = 30.0, check: bool = False, stdin: str | None = None) -> CommandResult:
     if not argv:
         raise ValueError("argv must not be empty")
@@ -42,7 +55,12 @@ def run(argv: Sequence[str], *, timeout: float = 30.0, check: bool = False, stdi
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        return CommandResult(124, e.stdout or "", (e.stderr or "") + "\n[timeout]", argv)
+        stdout = _coerce_text(e.stdout)
+        stderr = _coerce_text(e.stderr)
+        if stderr:
+            stderr += "\n"
+        stderr += "[timeout]"
+        return CommandResult(124, stdout, stderr, argv)
     except FileNotFoundError as e:
         return CommandResult(127, "", str(e), argv)
 
