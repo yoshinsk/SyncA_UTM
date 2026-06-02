@@ -14,3 +14,4 @@
 iso/payload/* text eol=lf
 iso/kickstart/* text eol=lf
 scripts/* text eol=lf
+payload/server-gui/bin/* text eol=lf

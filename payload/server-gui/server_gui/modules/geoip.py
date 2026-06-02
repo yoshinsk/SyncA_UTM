@@ -37,7 +37,7 @@ from flask import Blueprint, Flask, current_app, jsonify, render_template, reque
 
 from ..auth import csrf_protect, login_required
 from ..config_store import ConfigStore
-from ..shell import sudo_run
+from ..shell import run, sudo_run
 from ..validators import ValidationError, validate_country_code, validate_identifier
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,9 @@ DOWNLOAD_TIMEOUT = 30
 TMP_DIR = Path("/var/tmp/server-gui")
 IPSET_DIR = Path("/etc/firewalld/ipsets")
 IPSET_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,32}$")
+SIPIS_ID = "acrobits-sipis"
+SIPIS_HOSTNAME = "all.sipis.acrobits.cz"
+SIPIS_IPSET = "acrobits-sipis-ipv4"
 
 
 def register(app: Flask) -> None:
@@ -61,7 +64,41 @@ def _store() -> ConfigStore:
 
 
 def _default() -> dict:
-    return {"countries": []}
+    return {"countries": [], "dynamic_ipsets": _builtin_dynamic_ipsets()}
+
+
+def _builtin_dynamic_ipsets() -> list[dict]:
+    return [{
+        "id": SIPIS_ID,
+        "name": "Acrobits SIPIS",
+        "ipset": SIPIS_IPSET,
+        "hostname": SIPIS_HOSTNAME,
+        "resolver": "getent-ahostsv4",
+        "last_updated": None,
+        "entry_count": 0,
+        "source": f"DNS A records for {SIPIS_HOSTNAME}",
+    }]
+
+
+def _normalise_data(data: dict) -> dict:
+    """Return config data with built-in dynamic ipsets present."""
+    if not isinstance(data, dict):
+        data = _default()
+    if not isinstance(data.get("countries"), list):
+        data["countries"] = []
+    if not isinstance(data.get("dynamic_ipsets"), list):
+        data["dynamic_ipsets"] = []
+    dynamic = data["dynamic_ipsets"]
+    known = {str(item.get("id")): item for item in dynamic if isinstance(item, dict)}
+    for builtin in _builtin_dynamic_ipsets():
+        current = known.get(builtin["id"])
+        if current is None:
+            dynamic.append(dict(builtin))
+            continue
+        for key, value in builtin.items():
+            if key not in current or current[key] in (None, ""):
+                current[key] = value
+    return data
 
 
 def _default_ipset_name(code: str) -> str:
@@ -99,7 +136,7 @@ def page():
 @bp.route("/api/countries", methods=["GET"])
 @login_required
 def list_countries():
-    data = _store().load(MODULE_NAME, _default())
+    data = _normalise_data(_store().load(MODULE_NAME, _default()))
     return jsonify(data)
 
 
@@ -136,6 +173,7 @@ def delete_ipset(name: str):
         # Highly unlikely after the pre-flight check, but surface it cleanly.
         return jsonify({"ok": False, "error": "reload failed: " + reload_res.stderr.strip()}), 500
     with _store().transaction(MODULE_NAME, _default()) as data:
+        _normalise_data(data)
         data["countries"] = [c for c in data["countries"] if c["ipset"] != name]
     return jsonify({"ok": True, "deleted": name})
 
@@ -166,7 +204,9 @@ def discover_ipsets():
     if not res.ok:
         return jsonify({"ipsets": [], "error": res.stderr.strip()})
     all_sets = res.stdout.split()
-    managed = {c["ipset"]: c["code"] for c in _store().load(MODULE_NAME, _default())["countries"]}
+    stored = _normalise_data(_store().load(MODULE_NAME, _default()))
+    managed = {c["ipset"]: c["code"] for c in stored["countries"]}
+    managed.update({d["ipset"]: d["name"] for d in stored.get("dynamic_ipsets", [])})
     items = []
     for name in sorted(all_sets):
         entries_res = sudo_run(["firewall-cmd", "--permanent", "--ipset", name, "--get-entries"])
@@ -205,6 +245,7 @@ def add_country():
     adopt = bool(payload.get("adopt", False))
 
     with _store().transaction(MODULE_NAME, _default()) as data:
+        _normalise_data(data)
         if any(c["code"] == code for c in data["countries"]):
             return jsonify({"error": f"country {code} already managed"}), 409
         entry = {
@@ -223,6 +264,7 @@ def add_country():
         if not info_res.ok:
             # Roll back the record
             with _store().transaction(MODULE_NAME, _default()) as data:
+                _normalise_data(data)
                 data["countries"] = [c for c in data["countries"] if c["code"] != code]
             return jsonify({"error": f"ipset {ipset_name!r} not found"}), 404
         count = len(info_res.stdout.split())
@@ -235,6 +277,7 @@ def add_country():
             "adopted": True,
         }
         with _store().transaction(MODULE_NAME, _default()) as data:
+            _normalise_data(data)
             for i, c in enumerate(data["countries"]):
                 if c["code"] == code:
                     data["countries"][i] = adopted_entry
@@ -246,6 +289,7 @@ def add_country():
         return jsonify({"country": updated}), 201
     except RuntimeError as e:
         with _store().transaction(MODULE_NAME, _default()) as data:
+            _normalise_data(data)
             data["countries"] = [c for c in data["countries"] if c["code"] != code]
         return jsonify({"error": str(e)}), 500
 
@@ -277,6 +321,7 @@ def delete_country(code: str):
     delete_ipset_too = bool(payload.get("delete_ipset", False))
 
     with _store().transaction(MODULE_NAME, _default()) as data:
+        _normalise_data(data)
         entry = next((c for c in data["countries"] if c["code"] == code), None)
         if not entry:
             return jsonify({"error": "not found"}), 404
@@ -291,6 +336,57 @@ def delete_country(code: str):
     return jsonify({"deleted": code, "ipset_kept": not delete_ipset_too, "firewalld": fw_msg})
 
 
+@bp.route("/api/dynamic-ipsets/<set_id>/refresh", methods=["POST"])
+@login_required
+@csrf_protect
+def refresh_dynamic_ipset(set_id: str):
+    try:
+        updated = _refresh_dynamic_ipset(set_id)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"dynamic_ipset": updated})
+
+
+@bp.route("/api/dynamic-ipsets/<set_id>/attach", methods=["POST"])
+@login_required
+@csrf_protect
+def attach_dynamic_to_zone(set_id: str):
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        zone = validate_identifier(payload.get("zone", ""))
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    entry = _dynamic_entry(set_id)
+    if not entry:
+        return jsonify({"error": "dynamic ipset not managed"}), 404
+    source = f"ipset:{entry['ipset']}"
+    res = sudo_run(["firewall-cmd", "--zone", zone, "--add-source", source, "--permanent"])
+    if not res.ok:
+        return jsonify({"ok": False, "error": res.stderr.strip()}), 500
+    sudo_run(["firewall-cmd", "--reload"])
+    return jsonify({"ok": True, "zone": zone, "source": source})
+
+
+@bp.route("/api/dynamic-ipsets/<set_id>/detach", methods=["POST"])
+@login_required
+@csrf_protect
+def detach_dynamic_from_zone(set_id: str):
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        zone = validate_identifier(payload.get("zone", ""))
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    entry = _dynamic_entry(set_id)
+    if not entry:
+        return jsonify({"error": "dynamic ipset not managed"}), 404
+    source = f"ipset:{entry['ipset']}"
+    res = sudo_run(["firewall-cmd", "--zone", zone, "--remove-source", source, "--permanent"])
+    if not res.ok:
+        return jsonify({"ok": False, "error": res.stderr.strip()}), 500
+    sudo_run(["firewall-cmd", "--reload"])
+    return jsonify({"ok": True})
+
+
 @bp.route("/api/countries/<code>/attach", methods=["POST"])
 @login_required
 @csrf_protect
@@ -302,7 +398,7 @@ def attach_to_zone(code: str):
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
 
-    data = _store().load(MODULE_NAME, _default())
+    data = _normalise_data(_store().load(MODULE_NAME, _default()))
     entry = next((c for c in data["countries"] if c["code"] == code), None)
     if not entry:
         return jsonify({"error": "country not managed"}), 404
@@ -373,6 +469,7 @@ def _refresh_country(code: str) -> dict:
         "adopted": False,
     }
     with _store().transaction(MODULE_NAME, _default()) as data:
+        _normalise_data(data)
         found = False
         for i, c in enumerate(data["countries"]):
             if c["code"] == code:
@@ -382,6 +479,70 @@ def _refresh_country(code: str) -> dict:
         if not found:
             data["countries"].append(updated_entry)
     return updated_entry
+
+
+def _dynamic_entry(set_id: str) -> dict | None:
+    data = _normalise_data(_store().load(MODULE_NAME, _default()))
+    return next((item for item in data.get("dynamic_ipsets", []) if item.get("id") == set_id), None)
+
+
+def _refresh_dynamic_ipset(set_id: str) -> dict:
+    data = _normalise_data(_store().load(MODULE_NAME, _default()))
+    entry = next((item for item in data.get("dynamic_ipsets", []) if item.get("id") == set_id), None)
+    if not entry:
+        raise RuntimeError(f"dynamic ipset not found: {set_id}")
+    ipset_name = entry.get("ipset") or ""
+    if not IPSET_NAME_RE.match(ipset_name):
+        raise RuntimeError(f"invalid ipset name: {ipset_name!r}")
+    hostname = entry.get("hostname") or ""
+    addresses = _resolve_ahostsv4(hostname)
+    if not addresses:
+        raise RuntimeError(f"no IPv4 addresses returned for {hostname}")
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    list_file = TMP_DIR / f"{set_id}.zone"
+    list_file.write_text("\n".join(addresses) + "\n", encoding="utf-8")
+    _write_ipset_xml(ipset_name, addresses)
+
+    reload_res = sudo_run(["firewall-cmd", "--reload"])
+    if not reload_res.ok:
+        raise RuntimeError(f"reload failed: {reload_res.stderr.strip()}")
+
+    updated_entry = dict(entry)
+    updated_entry.update({
+        "last_updated": _dt.datetime.now().isoformat(timespec="seconds"),
+        "entry_count": len(addresses),
+        "addresses": addresses,
+    })
+    with _store().transaction(MODULE_NAME, _default()) as stored:
+        _normalise_data(stored)
+        for idx, item in enumerate(stored["dynamic_ipsets"]):
+            if item.get("id") == set_id:
+                stored["dynamic_ipsets"][idx] = updated_entry
+                break
+        else:
+            stored["dynamic_ipsets"].append(updated_entry)
+    return updated_entry
+
+
+def _resolve_ahostsv4(hostname: str) -> list[str]:
+    if not hostname:
+        raise RuntimeError("hostname is empty")
+    res = run(["getent", "ahostsv4", hostname], timeout=DOWNLOAD_TIMEOUT)
+    if not res.ok:
+        raise RuntimeError((res.stderr or res.stdout or "getent failed").strip())
+    addresses: list[str] = []
+    for line in res.stdout.splitlines():
+        first = line.split(None, 1)[0] if line.split() else ""
+        if not first:
+            continue
+        try:
+            address = str(ipaddress.IPv4Address(first))
+        except ValueError:
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    return sorted(addresses, key=ipaddress.IPv4Address)
 
 
 def _download_cidrs(url: str) -> list[str]:

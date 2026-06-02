@@ -20,6 +20,9 @@ LOG = Path("/var/log/server-gui/geoip.log")
 TMP_DIR = Path("/var/tmp/server-gui")
 IPSET_DIR = Path("/etc/firewalld/ipsets")
 IPDENY_URL = "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+SIPIS_ID = "acrobits-sipis"
+SIPIS_HOSTNAME = "all.sipis.acrobits.cz"
+SIPIS_IPSET = "acrobits-sipis-ipv4"
 LOG.parent.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -31,6 +34,39 @@ def _log(msg: str) -> None:
 
 def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _builtin_dynamic_ipsets() -> list[dict]:
+    return [{
+        "id": SIPIS_ID,
+        "name": "Acrobits SIPIS",
+        "ipset": SIPIS_IPSET,
+        "hostname": SIPIS_HOSTNAME,
+        "resolver": "getent-ahostsv4",
+        "last_updated": None,
+        "entry_count": 0,
+        "source": f"DNS A records for {SIPIS_HOSTNAME}",
+    }]
+
+
+def _normalise_data(data: dict) -> dict:
+    if not isinstance(data, dict):
+        data = {"countries": []}
+    if not isinstance(data.get("countries"), list):
+        data["countries"] = []
+    if not isinstance(data.get("dynamic_ipsets"), list):
+        data["dynamic_ipsets"] = []
+    dynamic = data["dynamic_ipsets"]
+    known = {str(item.get("id")): item for item in dynamic if isinstance(item, dict)}
+    for builtin in _builtin_dynamic_ipsets():
+        current = known.get(builtin["id"])
+        if current is None:
+            dynamic.append(dict(builtin))
+            continue
+        for key, value in builtin.items():
+            if key not in current or current[key] in (None, ""):
+                current[key] = value
+    return data
 
 
 def _validated_cidrs(text: str) -> list[str]:
@@ -94,6 +130,47 @@ def _refresh(country: dict) -> str:
     return f"{ipset_name}: {len(cidrs)} entries (updated {now})"
 
 
+def _resolve_ahostsv4(hostname: str) -> list[str]:
+    if not hostname:
+        raise RuntimeError("hostname is empty")
+    res = _run(["getent", "ahostsv4", hostname], timeout=30)
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "getent failed").strip())
+    addresses: list[str] = []
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        first = parts[0] if parts else ""
+        if not first:
+            continue
+        try:
+            address = str(ipaddress.IPv4Address(first))
+        except ValueError:
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    return sorted(addresses, key=ipaddress.IPv4Address)
+
+
+def _refresh_dynamic(entry: dict) -> str:
+    set_id = entry["id"]
+    ipset_name = entry["ipset"]
+    hostname = entry["hostname"]
+    addresses = _resolve_ahostsv4(hostname)
+    if not addresses:
+        raise RuntimeError(f"no IPv4 addresses returned for {hostname}")
+
+    list_file = TMP_DIR / f"{set_id}.zone"
+    list_file.write_text("\n".join(addresses) + "\n", encoding="utf-8")
+    _write_ipset_xml(ipset_name, addresses)
+
+    reload = _run(["firewall-cmd", "--reload"])
+    if reload.returncode != 0:
+        raise RuntimeError(f"reload failed: {reload.stderr.strip()}")
+
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    return f"{ipset_name}: {len(addresses)} entries (updated {now})"
+
+
 def main() -> int:
     if not CONFIG.exists():
         _log("no /etc/server-gui/geoip.json; nothing to do")
@@ -103,9 +180,11 @@ def main() -> int:
     except (OSError, json.JSONDecodeError) as e:
         _log(f"config unreadable: {e}")
         return 1
+    data = _normalise_data(data)
     countries = data.get("countries", [])
-    if not countries:
-        _log("no countries managed; nothing to do")
+    dynamic_ipsets = data.get("dynamic_ipsets", [])
+    if not countries and not dynamic_ipsets:
+        _log("no ipsets managed; nothing to do")
         return 0
 
     updated_any = False
@@ -123,6 +202,16 @@ def main() -> int:
             _log(f"OK   {entry['code']}: {msg}")
         except Exception as e:
             _log(f"FAIL {entry['code']}: {e}")
+
+    for entry in dynamic_ipsets:
+        try:
+            msg = _refresh_dynamic(entry)
+            entry["last_updated"] = now
+            entry["entry_count"] = int(msg.split(":")[1].split()[0]) if ":" in msg else entry.get("entry_count", 0)
+            updated_any = True
+            _log(f"OK   {entry['id']}: {msg}")
+        except Exception as e:
+            _log(f"FAIL {entry.get('id', 'dynamic')}: {e}")
 
     if updated_any:
         tmp = CONFIG.with_suffix(".json.new")

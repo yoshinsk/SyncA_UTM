@@ -35,6 +35,32 @@
     </div>
 </div>
 
+<!-- Managed dynamic ipsets -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-broadcast-pin text-secondary"></i>
+        <strong>管理中の動的 IPSet</strong>
+        <span class="badge bg-info-subtle text-info-emphasis">DNS 更新</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>名前</th>
+                        <th>ipset 名</th>
+                        <th>取得元</th>
+                        <th>エントリ数</th>
+                        <th>最終更新</th>
+                        <th style="width:300px">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="dynamic-ipset-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <!-- Discovered ipsets -->
 <div class="card border-0 shadow-sm">
     <div class="card-header bg-white d-flex justify-content-between align-items-center">
@@ -131,9 +157,11 @@
 {% block scripts %}
 <script>
 let countries = [];
+let dynamicIpsets = [];
 let ipsets = [];
 let addModal, attachModal;
 let attachTargetCode = null;
+let attachTargetType = 'country';
 
 function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 
@@ -151,6 +179,7 @@ async function refresh() {
     const data = await api.get('/geoip/api/countries');
     if (!data) return;
     countries = data.countries || [];
+    dynamicIpsets = data.dynamic_ipsets || [];
     const tbody = document.getElementById('country-tbody');
     tbody.innerHTML = countries.length === 0
         ? '<tr><td colspan="5" class="text-center text-secondary py-4">未登録</td></tr>'
@@ -172,6 +201,30 @@ async function refresh() {
                     </button>
                     <button class="btn btn-sm btn-outline-danger" onclick="deleteCountry('${escapeJs(c.code)}')">
                         <i class="bi bi-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+    renderDynamicIpsets();
+}
+
+function renderDynamicIpsets() {
+    const tbody = document.getElementById('dynamic-ipset-tbody');
+    tbody.innerHTML = dynamicIpsets.length === 0
+        ? '<tr><td colspan="6" class="text-center text-secondary py-4">未登録</td></tr>'
+        : dynamicIpsets.map(d => {
+            return `<tr>
+                <td class="fw-semibold">${escapeHtml(d.name || d.id)}</td>
+                <td class="font-monospace">${escapeHtml(d.ipset)}</td>
+                <td class="font-monospace small">${escapeHtml(d.hostname || d.source || '—')}</td>
+                <td>${(d.entry_count || 0).toLocaleString()}</td>
+                <td class="small">${escapeHtml(d.last_updated || '—')}</td>
+                <td class="d-flex gap-1 flex-wrap">
+                    <button class="btn btn-sm btn-outline-primary" onclick="refreshDynamicIpset('${escapeJs(d.id)}')" title="DNS から再取得">
+                        <i class="bi bi-arrow-repeat"></i> 更新
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="openAttachDynamic('${escapeJs(d.id)}')">
+                        <i class="bi bi-link-45deg"></i> zone
                     </button>
                 </td>
             </tr>`;
@@ -246,6 +299,14 @@ async function refreshCountry(code) {
     if (res && res.country) { toast(`${code}: ${res.country.entry_count} 件に更新`); refreshAll(); }
 }
 
+async function refreshDynamicIpset(id) {
+    const res = await api.send(`/geoip/api/dynamic-ipsets/${encodeURIComponent(id)}/refresh`, 'POST');
+    if (res && res.dynamic_ipset) {
+        toast(`${res.dynamic_ipset.name || id}: ${res.dynamic_ipset.entry_count} 件に更新`);
+        refreshAll();
+    }
+}
+
 async function deleteCountry(code) {
     const choice = confirm(`${code} を GUI 管理から外しますか?\n\nOK = ipset は保持\nキャンセル = 何もしない`);
     if (!choice) return;
@@ -262,7 +323,17 @@ async function deleteIpset(name) {
 
 function openAttach(code) {
     attachTargetCode = code;
+    attachTargetType = 'country';
     document.getElementById('attach-modal-title').textContent = `${code} を zone に紐付け`;
+    document.getElementById('attach-zone').value = '';
+    attachModal.show();
+}
+
+function openAttachDynamic(id) {
+    attachTargetCode = id;
+    attachTargetType = 'dynamic';
+    const item = dynamicIpsets.find(d => d.id === id) || { name: id };
+    document.getElementById('attach-modal-title').textContent = `${item.name || id} を zone に紐付け`;
     document.getElementById('attach-zone').value = '';
     attachModal.show();
 }
@@ -270,14 +341,20 @@ function openAttach(code) {
 async function attachToZone() {
     const zone = document.getElementById('attach-zone').value.trim();
     if (!zone) return toast('zone 名を入力してください', true);
-    const res = await api.send(`/geoip/api/countries/${attachTargetCode}/attach`, 'POST', { zone });
+    const url = attachTargetType === 'dynamic'
+        ? `/geoip/api/dynamic-ipsets/${encodeURIComponent(attachTargetCode)}/attach`
+        : `/geoip/api/countries/${attachTargetCode}/attach`;
+    const res = await api.send(url, 'POST', { zone });
     if (res && res.ok) { toast(`${attachTargetCode} を ${zone} に紐付けました`); attachModal.hide(); }
 }
 
 async function detachFromZone() {
     const zone = document.getElementById('attach-zone').value.trim();
     if (!zone) return toast('zone 名を入力してください', true);
-    const res = await api.send(`/geoip/api/countries/${attachTargetCode}/detach`, 'POST', { zone });
+    const url = attachTargetType === 'dynamic'
+        ? `/geoip/api/dynamic-ipsets/${encodeURIComponent(attachTargetCode)}/detach`
+        : `/geoip/api/countries/${attachTargetCode}/detach`;
+    const res = await api.send(url, 'POST', { zone });
     if (res && res.ok) { toast(`${attachTargetCode} を ${zone} から外しました`); attachModal.hide(); }
 }
 

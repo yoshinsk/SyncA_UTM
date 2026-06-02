@@ -538,6 +538,18 @@ PY
 {
   "countries": [
     {"code": "jp", "name": "Japan", "ipset": "jp-ipv4", "zone": "japan", "adopted": false, "last_updated": null, "entry_count": 0}
+  ],
+  "dynamic_ipsets": [
+    {
+      "id": "acrobits-sipis",
+      "name": "Acrobits SIPIS",
+      "ipset": "acrobits-sipis-ipv4",
+      "hostname": "all.sipis.acrobits.cz",
+      "resolver": "getent-ahostsv4",
+      "last_updated": null,
+      "entry_count": 0,
+      "source": "DNS A records for all.sipis.acrobits.cz"
+    }
   ]
 }
 JSON

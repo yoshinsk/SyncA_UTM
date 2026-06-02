@@ -40,6 +40,12 @@
       "family": "inet",
       "type": "hash:net",
       "source": "first-online-geoip-refresh"
+    },
+    {
+      "name": "acrobits-sipis-ipv4",
+      "family": "inet",
+      "type": "hash:net",
+      "source": "dns:getent-ahostsv4 all.sipis.acrobits.cz"
     }
   ],
   "services": [
