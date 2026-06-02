@@ -342,7 +342,6 @@ TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
-RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
