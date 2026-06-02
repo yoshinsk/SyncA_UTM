@@ -271,7 +271,7 @@ UNIT
 [Unit]
 Description=SyncA UTM first boot console setup
 After=systemd-user-sessions.service network.target
-Before=getty@tty1.service server-gui.service nginx.service
+Before=getty@tty1.service
 Conflicts=getty@tty1.service
 ConditionPathExists=!/etc/synca/firstboot.done
 

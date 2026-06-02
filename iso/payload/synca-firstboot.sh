@@ -739,9 +739,9 @@ start_services() {
         systemctl start --no-block dnsmasq || true
     fi
     systemctl enable nginx server-gui
-    systemctl restart server-gui || true
     nginx -t
     systemctl reload-or-restart nginx || true
+    systemctl restart server-gui || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable server-gui-ddns.timer server-gui-geoip.timer
         systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
