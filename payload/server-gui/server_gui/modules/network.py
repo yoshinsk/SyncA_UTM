@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from pathlib import Path
 from typing import Optional
 
 from flask import Blueprint, Flask, jsonify, render_template, request
@@ -26,6 +27,9 @@ from ..shell import run, sudo_run
 from ..validators import ValidationError, validate_interface, validate_ipv4, validate_ipv4_cidr
 
 _IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,63}$")
+_SYNCA_DIR = Path("/etc/synca")
+_PPPOE_PARENT_IP_CONFIG = _SYNCA_DIR / "pppoe-parent-ip.json"
+_PPPOE_PARENT_IP_DISPATCHER = Path("/etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip")
 
 bp = Blueprint("network", __name__, url_prefix="/network")
 
@@ -386,6 +390,8 @@ def create_vlan():
             "nmcli", "connection", "modify", name,
             "ipv4.method", "manual",
             "ipv4.addresses", address,
+            "ipv4.never-default", "no" if gateway else "yes",
+            "ipv6.method", "ignore",
         ]
         if gateway:
             cmd.extend(["ipv4.gateway", gateway])
@@ -396,7 +402,19 @@ def create_vlan():
             sudo_run(["nmcli", "connection", "delete", name])
             return jsonify({"ok": False, "error": ip_res.stderr.strip()}), 500
     else:
-        sudo_run(["nmcli", "connection", "modify", name, "ipv4.method", "disabled"])
+        # A VLAN with no configured address is still useful as a bridge member
+        # or L2 test interface. NetworkManager may refuse to activate a profile
+        # with all address families disabled, so use IPv4 link-local and forbid
+        # default-route contribution.
+        ip_res = sudo_run([
+            "nmcli", "connection", "modify", name,
+            "ipv4.method", "link-local",
+            "ipv4.never-default", "yes",
+            "ipv6.method", "ignore",
+        ])
+        if not ip_res.ok:
+            sudo_run(["nmcli", "connection", "delete", name])
+            return jsonify({"ok": False, "error": ip_res.stderr.strip()}), 500
 
     output = res.stdout + res.stderr
     if activate:
@@ -407,7 +425,7 @@ def create_vlan():
                 "ok": False, "created": True, "activated": False,
                 "error": "created but failed to activate",
                 "output": output.strip(),
-            }), 500
+            })
 
     return jsonify({
         "ok": True,
@@ -552,6 +570,25 @@ def update_pppoe(name: str):
     return jsonify({"ok": True, "changed": changed, "mss_clamp": clamp_result})
 
 
+@bp.route("/api/pppoe/parent-ip", methods=["PUT"])
+@login_required
+@csrf_protect
+def update_pppoe_parent_ip():
+    """Persist and apply auxiliary IPv4 addresses on the PPPoE parent NIC."""
+    payload = request.get_json(force=True, silent=True) or {}
+    parent = (payload.get("ifname") or "").strip()
+    if not parent:
+        parent = _pppoe_parent(_active_pppoe_connection())
+    try:
+        parent = validate_interface(parent)
+        result = _set_pppoe_parent_ip(parent, payload)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    if not result.get("ok"):
+        return jsonify(result), 500
+    return jsonify(result)
+
+
 # ---- nmcli helpers -----------------------------------------------------
 
 def _nmcli_terse(args: list[str]) -> list[list[str]]:
@@ -636,6 +673,172 @@ def _pppoe_parent(conn: Optional[dict]) -> str:
     return pppoe.get("parent") or detail.get("interface") or conn.get("device") or ""
 
 
+def _read_pppoe_parent_ip_config() -> dict:
+    """Read persisted auxiliary IPv4 addresses for PPPoE parent interfaces."""
+    if not _PPPOE_PARENT_IP_CONFIG.exists():
+        return {"interfaces": {}}
+    try:
+        data = json.loads(_PPPOE_PARENT_IP_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"interfaces": {}}
+    if not isinstance(data, dict):
+        return {"interfaces": {}}
+    interfaces = data.get("interfaces")
+    if not isinstance(interfaces, dict):
+        data["interfaces"] = {}
+    return data
+
+
+def _write_pppoe_parent_ip_config(data: dict) -> None:
+    """Persist PPPoE parent auxiliary IPv4 settings under /etc/synca."""
+    _SYNCA_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+    _PPPOE_PARENT_IP_CONFIG.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _PPPOE_PARENT_IP_CONFIG.chmod(0o600)
+
+
+def _ensure_pppoe_parent_ip_dispatcher() -> None:
+    """Install the NetworkManager dispatcher that reapplies parent NIC IPs."""
+    _PPPOE_PARENT_IP_DISPATCHER.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    _PPPOE_PARENT_IP_DISPATCHER.write_text("""#!/usr/bin/env bash
+# /etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip
+# Reapply SyncA UTM auxiliary IPv4 addresses on PPPoE parent interfaces.
+
+set -euo pipefail
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+CONFIG="/etc/synca/pppoe-parent-ip.json"
+
+case "$ACTION" in
+    up|dhcp4-change|connectivity-change|reapply) ;;
+    *) exit 0 ;;
+esac
+
+[[ -n "$IFACE" && -f "$CONFIG" ]] || exit 0
+
+python3 - "$IFACE" "$CONFIG" <<'PY'
+import json
+import subprocess
+import sys
+
+iface, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+
+entry = (data.get("interfaces") or {}).get(iface) or {}
+addresses = [str(addr).strip() for addr in entry.get("addresses", []) if str(addr).strip()]
+if not addresses:
+    sys.exit(0)
+
+subprocess.run(["ip", "link", "set", iface, "up"],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+shown = subprocess.run(["ip", "-o", "-4", "addr", "show", "dev", iface],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+live = shown.stdout
+for address in addresses:
+    if address in live:
+        continue
+    subprocess.run(["ip", "addr", "add", address, "dev", iface],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+""", encoding="utf-8")
+    _PPPOE_PARENT_IP_DISPATCHER.chmod(0o755)
+
+
+def _payload_ipv4_addresses(payload: dict) -> list[str]:
+    """Extract primary + secondary IPv4 CIDR values from a request payload."""
+    addresses_raw = payload.get("addresses")
+    if isinstance(addresses_raw, list):
+        candidates = [str(a).strip() for a in addresses_raw if str(a).strip()]
+    else:
+        primary = (payload.get("address") or "").strip()
+        secondary_raw = payload.get("secondary_addresses") or []
+        candidates = [primary] if primary else []
+        if isinstance(secondary_raw, list):
+            candidates.extend(str(a).strip() for a in secondary_raw if str(a).strip())
+        elif isinstance(secondary_raw, str):
+            candidates.extend(part.strip() for part in re.split(r"[\n,;]+", secondary_raw) if part.strip())
+    addresses: list[str] = []
+    for address in candidates:
+        normalized = validate_ipv4_cidr(address)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    return addresses
+
+
+def _live_ipv4_addresses(ifname: str) -> list[str]:
+    """Return live IPv4 CIDR addresses currently assigned to an interface."""
+    return (_device_ip_map().get(ifname) or {}).get("ipv4", [])
+
+
+def _apply_pppoe_parent_ip_live(ifname: str, old_addresses: list[str], new_addresses: list[str]) -> dict:
+    """Apply auxiliary IPs directly to the parent NIC without touching PPPoE."""
+    if ifname not in _device_ip_map():
+        return {"ok": False, "error": f"interface not found: {ifname}"}
+    output: list[str] = []
+    sudo_run(["ip", "link", "set", ifname, "up"], timeout=10)
+    for address in sorted(set(old_addresses) - set(new_addresses)):
+        res = sudo_run(["ip", "addr", "del", address, "dev", ifname], timeout=10)
+        text = (res.stdout + res.stderr).strip()
+        if text:
+            output.append(text)
+    live = set(_live_ipv4_addresses(ifname))
+    for address in new_addresses:
+        if address in live:
+            continue
+        res = sudo_run(["ip", "addr", "add", address, "dev", ifname], timeout=10)
+        text = (res.stdout + res.stderr).strip()
+        if text:
+            output.append(text)
+        if not res.ok and "File exists" not in text:
+            return {"ok": False, "error": text or f"failed to add {address}"}
+    return {"ok": True, "output": "\n".join(output)}
+
+
+def _set_pppoe_parent_ip(ifname: str, payload: dict) -> dict:
+    """Persist and apply auxiliary IPv4 CIDR values for a PPPoE parent NIC."""
+    addresses = _payload_ipv4_addresses(payload)
+    config = _read_pppoe_parent_ip_config()
+    interfaces = config.setdefault("interfaces", {})
+    current = interfaces.get(ifname) or {}
+    old_addresses = [str(a).strip() for a in current.get("addresses", []) if str(a).strip()]
+    live_result = _apply_pppoe_parent_ip_live(ifname, old_addresses, addresses)
+    if not live_result.get("ok"):
+        return live_result
+    if addresses:
+        interfaces[ifname] = {"addresses": addresses}
+    else:
+        interfaces.pop(ifname, None)
+    _write_pppoe_parent_ip_config(config)
+    _ensure_pppoe_parent_ip_dispatcher()
+    return {
+        "ok": True,
+        "ifname": ifname,
+        "addresses": addresses,
+        "live_addresses": _live_ipv4_addresses(ifname),
+        "output": live_result.get("output", ""),
+    }
+
+
+def _pppoe_parent_ip_status(ifname: str) -> dict:
+    """Return persisted and live auxiliary IPv4 information for a parent NIC."""
+    if not ifname:
+        return {"ifname": "", "addresses": [], "live_addresses": []}
+    config = _read_pppoe_parent_ip_config()
+    entry = (config.get("interfaces") or {}).get(ifname) or {}
+    return {
+        "ifname": ifname,
+        "addresses": [str(a).strip() for a in entry.get("addresses", []) if str(a).strip()],
+        "live_addresses": _live_ipv4_addresses(ifname),
+    }
+
+
 def _device_ip_map() -> dict[str, dict]:
     """Return {ifname: {ipv4: [...], ipv6: [...], mac: str, mtu: int}}."""
     res = run(["ip", "-j", "addr", "show"])
@@ -714,14 +917,16 @@ def _describe_connection(name: str) -> dict:
     }
     pppoe = None
     if raw.get("connection.type") == "pppoe":
+        parent = raw.get("connection.interface-name")
         pppoe = {
             "username": raw.get("pppoe.username"),
             # password is not returned by nmcli (it's a Secret); placeholder only
             "mtu": raw.get("ppp.mtu") or raw.get("802-3-ethernet.mtu"),
             "mru": raw.get("ppp.mru"),
-            "parent": raw.get("connection.interface-name"),
+            "parent": parent,
             "service": raw.get("pppoe.service"),
         }
+        pppoe["parent_ip"] = _pppoe_parent_ip_status(parent)
     return {
         "name": raw.get("connection.id", name),
         "uuid": raw.get("connection.uuid"),
@@ -945,6 +1150,7 @@ def get_wan():
         details["device"] = wan_dev
         if wan_type == "pppoe":
             details["pppoe_parent"] = (details.get("pppoe") or {}).get("parent") or details.get("interface")
+            details["pppoe_parent_ip"] = _pppoe_parent_ip_status(details["pppoe_parent"])
         details["wan_type"] = wan_type
         details["wan_gateway"] = wan_gw
         return jsonify(details)

@@ -168,6 +168,61 @@ install_firewalld_profile() {
     fi
 }
 
+install_pppoe_parent_ip_dispatcher() {
+    # Applies auxiliary IPv4 addresses to the physical PPPoE parent NIC after
+    # NetworkManager events. The script is inert unless the GUI creates
+    # /etc/synca/pppoe-parent-ip.json.
+    install -d -m 0755 /etc/NetworkManager/dispatcher.d /etc/synca
+    cat > /etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip <<'DISPATCHER'
+#!/usr/bin/env bash
+# /etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip
+# Reapply SyncA UTM auxiliary IPv4 addresses on PPPoE parent interfaces.
+
+set -euo pipefail
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+CONFIG="/etc/synca/pppoe-parent-ip.json"
+
+case "$ACTION" in
+    up|dhcp4-change|connectivity-change|reapply) ;;
+    *) exit 0 ;;
+esac
+
+[[ -n "$IFACE" && -f "$CONFIG" ]] || exit 0
+
+python3 - "$IFACE" "$CONFIG" <<'PY'
+import json
+import subprocess
+import sys
+
+iface, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+
+entry = (data.get("interfaces") or {}).get(iface) or {}
+addresses = [str(addr).strip() for addr in entry.get("addresses", []) if str(addr).strip()]
+if not addresses:
+    sys.exit(0)
+
+subprocess.run(["ip", "link", "set", iface, "up"],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+shown = subprocess.run(["ip", "-o", "-4", "addr", "show", "dev", iface],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+live = shown.stdout
+for address in addresses:
+    if address in live:
+        continue
+    subprocess.run(["ip", "addr", "add", address, "dev", iface],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+DISPATCHER
+    chmod 0755 /etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip
+}
+
 install_private_overrides() {
     # Internal ISO builds may ship private systemd drop-ins from the build host.
     # The public repository never stores these files.
@@ -328,6 +383,7 @@ main() {
     install_wireguard_ui
     install_letsencrypt_hooks
     install_firewalld_profile
+    install_pppoe_parent_ip_dispatcher
     install_private_overrides
     normalize_lf_text_tree /etc/systemd/system/server-gui.service.d
     normalize_lf_text_tree /etc/systemd/system/server-gui-ddns.service.d

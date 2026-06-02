@@ -297,6 +297,22 @@
                     <strong>parent:</strong> <span id="pee-parent" class="font-monospace"></span><br>
                     <strong>type:</strong> <span class="font-monospace">pppoe</span>
                 </div>
+                <hr>
+                <h6 class="text-primary"><i class="bi bi-ethernet"></i> PPPoE親NIC 補助IPv4</h6>
+                <div class="text-secondary small mb-2">
+                    PPPoEセッションを維持したまま、物理WAN NICへデフォルト経路なしのIPv4アドレスを追加します。
+                    空欄で保存すると、この補助IP設定を解除します。
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">IPv4アドレス (CIDR)</label>
+                    <input id="pee-parent-ip" class="form-control font-monospace" placeholder="例: 192.0.2.2/24">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">セカンダリIPv4アドレス (1行に1つ)</label>
+                    <textarea id="pee-parent-secondary" class="form-control font-monospace" rows="2"
+                              placeholder="例: 192.0.2.3/24"></textarea>
+                </div>
+                <div id="pee-parent-ip-live" class="text-secondary small"></div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
@@ -376,6 +392,22 @@
                 <div class="form-text small mt-1">
                     <i class="bi bi-info-circle"></i>
                     <strong>MSS clamp</strong>: PPPoE 経由の TCP 接続で大きいパケットが silently drop されるのを防ぐため、firewalld direct rule で TCP SYN の MSS を path MTU にクランプします。常に ON 推奨。</div>
+                <hr>
+                <h6 class="text-primary"><i class="bi bi-ethernet"></i> PPPoE親NIC 補助IPv4 (任意)</h6>
+                <div class="text-secondary small mb-2">
+                    PPPoEとは別に、物理WAN NICへデフォルト経路なしのIPv4アドレスを追加する場合だけ入力してください。
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">IPv4アドレス (CIDR)</label>
+                        <input id="pe-parent-ip" class="form-control font-monospace" placeholder="例: 192.0.2.2/24">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">セカンダリIPv4アドレス</label>
+                        <textarea id="pe-parent-secondary" class="form-control font-monospace" rows="1"
+                                  placeholder="例: 192.0.2.3/24"></textarea>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
@@ -569,7 +601,16 @@ async function openPppoeEdit(name) {
     document.getElementById('pee-user').value = (detail.pppoe || {}).username || '';
     document.getElementById('pee-pass').value = '';
     document.getElementById('pee-mtu').value = (detail.pppoe || {}).mtu || '';
-    document.getElementById('pee-parent').textContent = (detail.pppoe || {}).parent || detail.interface || '—';
+    const parent = (detail.pppoe || {}).parent || detail.interface || '';
+    const parentIp = ((detail.pppoe || {}).parent_ip || {});
+    const parentAddresses = parentIp.addresses || [];
+    const liveAddresses = parentIp.live_addresses || [];
+    document.getElementById('pee-parent').textContent = parent || '—';
+    document.getElementById('pee-parent-ip').value = parentAddresses[0] || '';
+    document.getElementById('pee-parent-secondary').value = parentAddresses.slice(1).join('\n');
+    document.getElementById('pee-parent-ip-live').innerHTML = liveAddresses.length
+        ? `現在の親NIC IPv4: ${liveAddresses.map(a => `<code>${escapeHtml(a)}</code>`).join(' ')}`
+        : '現在の親NIC IPv4: なし';
     pppoeEditModal.show();
 }
 
@@ -583,12 +624,34 @@ async function submitPppoeEdit() {
     const res = await api.send(
         `/network/api/connections/${encodeURIComponent(editingPppoeName)}/pppoe`,
         'PUT', payload);
-    if (res && res.ok) {
-        toast(`PPPoE "${editingPppoeName}" 更新 (${(res.changed || []).join(', ') || 'no change'})`);
+    if (!res) return;
+    if (!res.ok) {
+        return toast(res.error || '失敗', true);
+    }
+
+    const parent = document.getElementById('pee-parent').textContent.trim();
+    const parentIpPayload = {
+        ifname: parent,
+        address: document.getElementById('pee-parent-ip').value.trim(),
+        secondary_addresses: document.getElementById('pee-parent-secondary').value
+            .split(/\n|,|;/).map(s => s.trim()).filter(Boolean),
+    };
+    let parentIpRes = { ok: true, addresses: [] };
+    if (parent && parent !== '—') {
+        parentIpRes = await api.send('/network/api/pppoe/parent-ip', 'PUT', parentIpPayload);
+        if (!parentIpRes) return;
+        if (!parentIpRes.ok) {
+            return toast(parentIpRes.error || 'PPPoE親NIC補助IPの更新に失敗しました', true);
+        }
+    }
+
+    if (res.ok) {
+        const ipSummary = (parentIpRes.addresses || []).length
+            ? ` / 親NIC補助IP: ${(parentIpRes.addresses || []).join(', ')}`
+            : ' / 親NIC補助IP: なし';
+        toast(`PPPoE "${editingPppoeName}" 更新 (${(res.changed || []).join(', ') || 'no change'})${ipSummary}`);
         pppoeEditModal.hide();
         refresh();
-    } else if (res) {
-        toast(res.error || '失敗', true);
     }
 }
 
@@ -661,7 +724,8 @@ async function submitVlan() {
         vlanModal.hide();
         refresh();
     } else {
-        toast(res.error || 'VLAN作成に失敗しました', true);
+        const detail = res.output ? `: ${res.output}` : '';
+        toast((res.error || 'VLAN作成に失敗しました') + detail, true);
     }
 }
 
@@ -700,6 +764,8 @@ function openPppoeModal() {
     document.getElementById('pe-pass').value = '';
     document.getElementById('pe-service').value = '';
     document.getElementById('pe-mtu').value = '1454';
+    document.getElementById('pe-parent-ip').value = '';
+    document.getElementById('pe-parent-secondary').value = '';
     document.getElementById('pe-autoconnect').checked = true;
     document.getElementById('pe-activate').checked = true;
     const sel = document.getElementById('pe-ifname');
@@ -729,6 +795,19 @@ async function submitPppoe() {
     const res = await api.send('/network/api/connections/pppoe', 'POST', payload);
     if (!res) return;
     if (res.ok) {
+        const parentIpPayload = {
+            ifname: payload.ifname,
+            address: document.getElementById('pe-parent-ip').value.trim(),
+            secondary_addresses: document.getElementById('pe-parent-secondary').value
+                .split(/\n|,|;/).map(s => s.trim()).filter(Boolean),
+        };
+        if (parentIpPayload.address || parentIpPayload.secondary_addresses.length) {
+            const parentIpRes = await api.send('/network/api/pppoe/parent-ip', 'PUT', parentIpPayload);
+            if (!parentIpRes) return;
+            if (!parentIpRes.ok) {
+                return toast(parentIpRes.error || 'PPPoE親NIC補助IPの設定に失敗しました', true);
+            }
+        }
         toast(`PPPoE 接続 "${payload.name}" を作成しました`);
         pppoeModal.hide();
         refresh();
