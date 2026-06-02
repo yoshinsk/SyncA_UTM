@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime as _dt
 import io
 import ipaddress
+import json
 import logging
 import re
 import shlex
@@ -138,7 +139,11 @@ def list_interfaces():
             if not INTERFACE_RE.match(name):
                 continue
             items.append({"name": name, "path": str(p), "active": _interface_is_active(name)})
-    return jsonify({"interfaces": items, "wan_endpoint": _detect_wan_endpoint()})
+    return jsonify({
+        "interfaces": items,
+        "wan_endpoint": _detect_wan_endpoint(),
+        "endpoint_candidates": _detect_endpoint_candidates(),
+    })
 
 
 @bp.route("/api/interfaces/<iface>", methods=["GET"])
@@ -161,6 +166,7 @@ def get_interface(iface: str):
     # Build merged peer list: conf + metadata + live status
     data = _load_data()
     peers_meta = data["peers"]
+    listen_port = parsed["interface"].get("listen_port")
 
     merged_peers: list[dict] = []
     for p in parsed["peers"]:
@@ -173,7 +179,7 @@ def get_interface(iface: str):
             "peer_address": meta.get("peer_address") or (p.get("allowed_ips", [None])[0] if p.get("allowed_ips") else None),
             "allowed_ips_in_conf": p.get("allowed_ips", []),
             "extra_allowed_ips": meta.get("extra_allowed_ips", []),
-            "endpoint": meta.get("endpoint"),
+            "endpoint": _effective_client_endpoint(meta.get("endpoint"), listen_port),
             "client_dns": meta.get("client_dns", []),
             "client_mtu": meta.get("client_mtu"),
             "client_allowed_ips": meta.get("client_allowed_ips", []),
@@ -219,6 +225,7 @@ def _compute_suggestions(parsed: dict, peers: list[dict]) -> dict:
         "client_allowed_ips": aips,
         "client_mtu": parsed["interface"].get("mtu") or 1450,
         "endpoint": _detect_wan_endpoint(parsed["interface"].get("listen_port")),
+        "endpoint_candidates": _detect_endpoint_candidates(parsed["interface"].get("listen_port")),
     }
 
 
@@ -358,7 +365,7 @@ def add_peer(iface: str):
 
     _save_meta(peer_pub, meta)
     server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
-    client_conf = _build_client_config(meta, server_pub)
+    client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
     return jsonify({
         "peer": _peer_summary(peer_pub, meta),
         "client_config": client_conf,
@@ -431,7 +438,7 @@ def update_peer(iface: str, pubkey: str):
 
     _save_meta(pubkey, meta)
     server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
-    client_conf = _build_client_config(meta, server_pub)
+    client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
     return jsonify({
         "peer": _peer_summary(pubkey, meta),
         "client_config": client_conf,
@@ -482,7 +489,7 @@ def get_client_config(iface: str, pubkey: str):
         return jsonify({"error": "interface not found"}), 404
     parsed = _parse_wg_conf(path)
     server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
-    client_conf = _build_client_config(meta, server_pub)
+    client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
     return jsonify({
         "client_config": client_conf,
         "qr_svg": _generate_qr_svg(client_conf),
@@ -551,7 +558,7 @@ def adopt_with_existing_key(iface: str, pubkey: str):
     _save_meta(pubkey, meta)
 
     server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
-    client_conf = _build_client_config(meta, server_pub)
+    client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
     return jsonify({
         "peer": _peer_summary(pubkey, meta),
         "client_config": client_conf,
@@ -635,7 +642,7 @@ def regenerate_peer_keys(iface: str, pubkey: str):
 
     _rename_pubkey_meta(pubkey, new_pub, meta)
     server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
-    client_conf = _build_client_config(meta, server_pub)
+    client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
     return jsonify({
         "new_public_key": new_pub,
         "peer": _peer_summary(new_pub, meta),
@@ -1084,14 +1091,235 @@ def _ensure_interface_running(iface: str) -> None:
 
 
 def _detect_wan_endpoint(listen_port: Optional[int] = None) -> str:
-    port = listen_port or 51820
+    """Return the best default endpoint for generated client configs."""
+    candidates = _detect_endpoint_candidates(listen_port)
+    if candidates:
+        return candidates[0]["value"]
+    port = _safe_listen_port(listen_port)
+    return f"YOUR-PUBLIC-IP:{port}"
+
+
+def _detect_endpoint_candidates(listen_port: Optional[int] = None) -> list[dict]:
+    """Build WireGuard endpoint candidates in operator-friendly priority order."""
+    port = _safe_listen_port(listen_port)
+    candidates: list[dict] = []
+    candidates.extend(_ddns_endpoint_candidates(port))
+    candidates.extend(_wan_ip_endpoint_candidates(port))
+    candidates.extend(_lan_ip_endpoint_candidates(port))
     try:
         host = Path("/etc/hostname").read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         host = ""
     if host:
-        return f"{host}:{port}"
-    return f"YOUR-PUBLIC-IP:{port}"
+        candidates.append({
+            "value": f"{host}:{port}",
+            "label": f"ホスト名: {host} (ローカルDNSがある場合)",
+            "kind": "hostname",
+        })
+    return _dedupe_endpoint_candidates(candidates)
+
+
+def _effective_client_endpoint(endpoint: Optional[str], listen_port: Optional[int] = None) -> str:
+    """Replace the old auto-generated short hostname endpoint with a usable candidate."""
+    raw = (endpoint or "").strip()
+    if not raw:
+        return _detect_wan_endpoint(listen_port)
+    host, port = _split_endpoint(raw)
+    local_host = _read_local_hostname()
+    if host and local_host and host == local_host:
+        return _detect_wan_endpoint(port or listen_port)
+    return raw
+
+
+def _safe_listen_port(listen_port: Optional[int]) -> int:
+    try:
+        port = int(listen_port or 51820)
+    except (TypeError, ValueError):
+        return 51820
+    return port if 1 <= port <= 65535 else 51820
+
+
+def _read_local_hostname() -> str:
+    try:
+        return Path("/etc/hostname").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _split_endpoint(endpoint: str) -> tuple[str, Optional[int]]:
+    match = re.match(r"^([A-Za-z0-9._\-]+):(\d{1,5})$", endpoint.strip())
+    if not match:
+        return endpoint.strip(), None
+    try:
+        return match.group(1), int(match.group(2))
+    except ValueError:
+        return match.group(1), None
+
+
+def _ddns_endpoint_candidates(port: int) -> list[dict]:
+    data = _load_ddns_state()
+    candidates: list[dict] = []
+    for provider in data.get("providers", []) or []:
+        if not provider.get("enabled", True):
+            continue
+        account = str(provider.get("account") or provider.get("name") or "").strip().strip(".")
+        domain = str(provider.get("domain") or "").strip().strip(".")
+        if not account or not domain:
+            continue
+        host = account if account.endswith(f".{domain}") else f"{account}.{domain}"
+        candidates.append({"value": f"{host}:{port}", "label": f"DDNS: {host}", "kind": "ddns"})
+    return candidates
+
+
+def _load_ddns_state() -> dict:
+    paths = []
+    try:
+        paths.append(Path(current_app.config["CONFIG_DIR"]) / "ddns.json")
+    except RuntimeError:
+        pass
+    paths.append(Path("/etc/server-gui/ddns.json"))
+    for path in paths:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {}
+
+
+def _wan_ip_endpoint_candidates(port: int) -> list[dict]:
+    candidates: list[dict] = []
+    for ip in _detect_wan_global_ipv4s():
+        candidates.append({"value": f"{ip}:{port}", "label": f"WAN IP: {ip}", "kind": "wan_ip"})
+    return candidates
+
+
+def _detect_wan_global_ipv4s() -> list[str]:
+    route_res = run(["ip", "-j", "route", "show", "default"])
+    route_devs: list[str] = []
+    route_srcs: list[str] = []
+    if route_res.ok:
+        try:
+            routes = json.loads(route_res.stdout)
+        except json.JSONDecodeError:
+            routes = []
+        for route in routes if isinstance(routes, list) else []:
+            dev = route.get("dev")
+            if dev and dev not in route_devs:
+                route_devs.append(dev)
+            src = route.get("prefsrc") or route.get("src")
+            if _is_global_ipv4(src) and src not in route_srcs:
+                route_srcs.append(src)
+
+    ips: list[str] = list(route_srcs)
+    for dev in route_devs:
+        for ip in _interface_ipv4s(dev):
+            if _is_global_ipv4(ip) and ip not in ips:
+                ips.append(ip)
+    if ips:
+        return ips
+
+    res = run(["ip", "-j", "addr", "show"])
+    if not res.ok:
+        return []
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return []
+    for entry in data if isinstance(data, list) else []:
+        if entry.get("ifname") in ("lo",) or str(entry.get("ifname", "")).startswith("wg"):
+            continue
+        for addr in entry.get("addr_info", []) or []:
+            if addr.get("family") == "inet" and _is_global_ipv4(addr.get("local")):
+                ip = addr["local"]
+                if ip not in ips:
+                    ips.append(ip)
+    return ips
+
+
+def _interface_ipv4s(ifname: str) -> list[str]:
+    res = run(["ip", "-j", "addr", "show", "dev", ifname])
+    if not res.ok:
+        return []
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return []
+    out: list[str] = []
+    for entry in data if isinstance(data, list) else []:
+        for addr in entry.get("addr_info", []) or []:
+            if addr.get("family") == "inet" and addr.get("local"):
+                out.append(addr["local"])
+    return out
+
+
+def _lan_ip_endpoint_candidates(port: int) -> list[dict]:
+    candidates: list[dict] = []
+    for ip in _detect_lan_private_ipv4s():
+        candidates.append({"value": f"{ip}:{port}", "label": f"LAN IP: {ip}", "kind": "lan_ip"})
+    return candidates
+
+
+def _detect_lan_private_ipv4s() -> list[str]:
+    route_res = run(["ip", "-j", "route", "show", "default"])
+    wan_ifnames: set[str] = set()
+    if route_res.ok:
+        try:
+            routes = json.loads(route_res.stdout)
+        except json.JSONDecodeError:
+            routes = []
+        for route in routes if isinstance(routes, list) else []:
+            if route.get("dev"):
+                wan_ifnames.add(route["dev"])
+
+    res = run(["ip", "-j", "addr", "show"])
+    if not res.ok:
+        return []
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return []
+    ips: list[str] = []
+    for entry in data if isinstance(data, list) else []:
+        ifname = entry.get("ifname", "")
+        if not ifname or ifname in wan_ifnames or ifname == "lo" or ifname.startswith("wg"):
+            continue
+        for addr in entry.get("addr_info", []) or []:
+            ip = addr.get("local")
+            if addr.get("family") == "inet" and _is_private_ipv4(ip) and ip not in ips:
+                ips.append(ip)
+    return ips
+
+
+def _is_global_ipv4(value: object) -> bool:
+    try:
+        ip = ipaddress.IPv4Address(str(value))
+    except ValueError:
+        return False
+    return ip.is_global
+
+
+def _is_private_ipv4(value: object) -> bool:
+    try:
+        ip = ipaddress.IPv4Address(str(value))
+    except ValueError:
+        return False
+    return ip.is_private
+
+
+def _dedupe_endpoint_candidates(candidates: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        value = str(candidate.get("value") or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append({
+            "value": value,
+            "label": str(candidate.get("label") or value),
+            "kind": str(candidate.get("kind") or "custom"),
+        })
+    return out
 
 
 def _parse_wg_conf(path: Path) -> dict:
@@ -1406,7 +1634,7 @@ def _pubkey_from_priv(privkey: Optional[str]) -> Optional[str]:
     return res.stdout.strip() if res.ok else None
 
 
-def _build_client_config(meta: dict, server_pub: Optional[str]) -> str:
+def _build_client_config(meta: dict, server_pub: Optional[str], listen_port: Optional[int] = None) -> str:
     address = meta.get("peer_address", "")
     lines = [
         "[Interface]",
@@ -1424,8 +1652,9 @@ def _build_client_config(meta: dict, server_pub: Optional[str]) -> str:
         lines.append(f"PresharedKey = {meta['preshared_key']}")
     aips = meta.get("client_allowed_ips") or ["0.0.0.0/0", "::/0"]
     lines.append(f"AllowedIPs = {', '.join(aips)}")
-    if meta.get("endpoint"):
-        lines.append(f"Endpoint = {meta['endpoint']}")
+    endpoint = _effective_client_endpoint(meta.get("endpoint"), listen_port)
+    if endpoint:
+        lines.append(f"Endpoint = {endpoint}")
     if meta.get("persistent_keepalive"):
         lines.append(f"PersistentKeepalive = {meta['persistent_keepalive']}")
     return "\n".join(lines) + "\n"

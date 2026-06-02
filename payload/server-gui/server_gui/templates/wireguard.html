@@ -263,7 +263,13 @@
                     </div>
                     <div class="col-md-8">
                         <label class="form-label">Endpoint (サーバ接続先)</label>
-                        <input id="pf-endpoint" class="form-control font-monospace" placeholder="vpn.example.com:51820">
+                        <input id="pf-endpoint" class="form-control font-monospace"
+                               list="pf-endpoint-datalist" placeholder="vpn.example.com:51820">
+                        <datalist id="pf-endpoint-datalist"></datalist>
+                        <select id="pf-endpoint-select" class="form-select form-select-sm mt-2"
+                                onchange="applyEndpointCandidate(this.value)">
+                            <option value="">Endpoint 候補を選択</option>
+                        </select>
                     </div>
                     <div class="col-md-4">
                         <label class="form-label">PersistentKeepalive (秒)</label>
@@ -372,6 +378,7 @@
 <script>
 let interfaces = [];
 let wanEndpoint = '';
+let endpointCandidates = [];
 let currentIface = null;
 let currentData = null;
 let peerModal = null;
@@ -403,6 +410,7 @@ async function refresh() {
     if (!data) return;
     interfaces = data.interfaces || [];
     wanEndpoint = data.wan_endpoint || '';
+    endpointCandidates = data.endpoint_candidates || [];
     const sel = document.getElementById('iface-select');
     if (interfaces.length === 0) {
         sel.innerHTML = '<option>(なし)</option>';
@@ -560,8 +568,50 @@ async function loadSelected() {
     const data = await api.get(`/wg/api/interfaces/${encodeURIComponent(currentIface)}`);
     if (!data) return;
     currentData = data;
+    renderEndpointCandidates();
     renderIface(data);
     renderPeers(data);
+}
+
+function currentEndpointCandidates() {
+    const seen = new Set();
+    const out = [];
+    const lists = [
+        (currentData?.suggestions?.endpoint_candidates || []),
+        endpointCandidates,
+        wanEndpoint ? [{ value: wanEndpoint, label: '既定値', kind: 'default' }] : [],
+    ];
+    for (const list of lists) {
+        for (const item of list) {
+            const value = String((item && item.value) || '').trim();
+            if (!value || seen.has(value)) continue;
+            seen.add(value);
+            out.push({
+                value,
+                label: String((item && item.label) || value),
+                kind: String((item && item.kind) || 'custom'),
+            });
+        }
+    }
+    return out;
+}
+
+function renderEndpointCandidates() {
+    const candidates = currentEndpointCandidates();
+    const datalist = document.getElementById('pf-endpoint-datalist');
+    const select = document.getElementById('pf-endpoint-select');
+    if (!datalist || !select) return;
+    datalist.innerHTML = candidates.map(c =>
+        `<option value="${escapeHtml(c.value)}" label="${escapeHtml(c.label)}"></option>`
+    ).join('');
+    select.innerHTML = '<option value="">Endpoint 候補を選択</option>' + candidates.map(c =>
+        `<option value="${escapeHtml(c.value)}">${escapeHtml(c.label)} (${escapeHtml(c.value)})</option>`
+    ).join('');
+}
+
+function applyEndpointCandidate(value) {
+    if (!value) return;
+    document.getElementById('pf-endpoint').value = value;
 }
 
 function _suggestionsOrEmpty() {
@@ -671,6 +721,7 @@ function openPeerModal(peer) {
     if (!currentIface) return toast('Interface を選択してください', true);
     const sug = _suggestionsOrEmpty();
     if (peer) {
+        renderEndpointCandidates();
         editingPubkey = peer.public_key;
         document.getElementById('peer-modal-title').textContent = `ピア編集: ${peer.comment || peer.public_key.slice(0,16)}…`;
         document.getElementById('pf-submit-label').textContent = '更新を保存 (鍵は変更しない)';
@@ -692,6 +743,7 @@ function openPeerModal(peer) {
         document.getElementById('pf-psk-regen').checked = false;
         document.getElementById('pf-psk-drop').checked = false;
     } else {
+        renderEndpointCandidates();
         editingPubkey = null;
         document.getElementById('peer-modal-title').textContent = '新規ピア追加';
         document.getElementById('pf-submit-label').textContent = '追加して鍵生成';
