@@ -44,7 +44,7 @@ prompt_secret() {
     local value
     while [[ -z "${value:-}" ]]; do
         read -r -s -p "${label}: " value
-        echo
+        printf '\n' >&2
     done
     printf '%s' "$value"
 }
@@ -739,7 +739,9 @@ start_services() {
         systemctl start --no-block dnsmasq || true
     fi
     systemctl enable nginx server-gui
-    systemctl start --no-block nginx server-gui || true
+    systemctl restart server-gui || true
+    nginx -t
+    systemctl reload-or-restart nginx || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable server-gui-ddns.timer server-gui-geoip.timer
         systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
@@ -750,7 +752,6 @@ start_services() {
         systemctl enable wgui-worker || true
         systemctl start --no-block wgui-worker || true
     fi
-    nginx -t
 }
 
 main() {

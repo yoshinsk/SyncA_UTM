@@ -39,7 +39,16 @@ install_server_gui() {
     install -d -m 0755 /opt
     rm -rf /opt/server-gui
     install -d -m 0755 /opt/server-gui
-    tar -xzf "$APP_ARCHIVE" -C /opt/server-gui
+    local listing_file first_entry
+    listing_file="$(mktemp)"
+    tar -tzf "$APP_ARCHIVE" > "$listing_file"
+    first_entry="$(sed -n '1p' "$listing_file")"
+    rm -f "$listing_file"
+    if [[ "$first_entry" == server-gui/* ]]; then
+        tar -xzf "$APP_ARCHIVE" --strip-components=1 -C /opt/server-gui
+    else
+        tar -xzf "$APP_ARCHIVE" -C /opt/server-gui
+    fi
     chown -R root:root /opt/server-gui
     chmod 0755 /opt/server-gui
 
@@ -56,11 +65,35 @@ install_server_gui() {
     normalize_lf_text_tree /opt/server-gui
 }
 
+install_console_rpms() {
+    # dialog is required before synca-firstboot runs. Install it from the
+    # bundled offline RPM closure even when Kickstart --ignoremissing skipped it.
+    local rpm console_rpms=()
+    for rpm in \
+        "$RPM_DIR"/Packages/slang-*.rpm "$RPM_DIR"/slang-*.rpm \
+        "$RPM_DIR"/Packages/newt-*.rpm "$RPM_DIR"/newt-*.rpm \
+        "$RPM_DIR"/Packages/dialog-*.rpm "$RPM_DIR"/dialog-*.rpm
+    do
+        [[ -f "$rpm" ]] && console_rpms+=("$rpm")
+    done
+    if rpm -q dialog >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "${#console_rpms[@]}" -gt 0 ]]; then
+        dnf install -y --disablerepo='*' --nogpgcheck \
+            --setopt=metadata_timer_sync=0 --setopt=install_weak_deps=False \
+            "${console_rpms[@]}" || {
+            echo "warning: console RPM installation failed; firstboot will fall back to text prompts" >&2
+        }
+    fi
+}
+
 install_extra_rpms() {
     # Optional local RPM closure for packages not present on the AlmaLinux DVD,
     # for example nginx-mod-modsecurity from EPEL. The build process must place
     # all dependency RPMs in this directory for fully offline installation.
     local rpm_glob=()
+    install_console_rpms
     if [[ -d "$RPM_DIR" ]] && compgen -G "$RPM_DIR/*.rpm" >/dev/null; then
         rpm_glob+=("$RPM_DIR"/*.rpm)
     fi
@@ -68,7 +101,9 @@ install_extra_rpms() {
         rpm_glob+=("$RPM_DIR"/Packages/*.rpm)
     fi
     if [[ "${#rpm_glob[@]}" -gt 0 ]]; then
-        dnf install -y "${rpm_glob[@]}" || {
+        dnf install -y --disablerepo='*' --nogpgcheck --skip-broken \
+            --setopt=metadata_timer_sync=0 --setopt=install_weak_deps=False \
+            "${rpm_glob[@]}" || {
             echo "warning: optional SyncA RPM installation failed; continuing because Kickstart already installs required packages" >&2
         }
     fi
