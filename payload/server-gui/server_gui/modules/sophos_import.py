@@ -311,6 +311,7 @@ def _import_plan(plan: dict, source_name: str, replace: bool = False, apply_syst
         "pppoe_profiles": appliance_result["pppoe_profiles"],
         "pppoe_alias_addresses": sum(len(p.get("alias_addresses", [])) for p in appliance_data["pppoe_profiles"]),
         "static_routes": appliance_result["static_routes"],
+        "sophos_nat_rules": appliance_result["sophos_nat_rules"],
         "nat_forward_ports": appliance_result["nat_forward_ports"],
         "masquerade_rules": appliance_result["masquerade_rules"],
         "skipped": converted["skipped"],
@@ -544,6 +545,7 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
     static_interfaces: list[dict] = []
     pppoe_profiles: list[dict] = []
     static_routes: list[dict] = []
+    sophos_nat_rules: list[dict] = []
     nat_forward_ports: list[dict] = []
     masquerade_rules: list[dict] = []
 
@@ -609,6 +611,7 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
             if _valid_cidr(route["destination"]):
                 static_routes.append(route)
         elif descr == "NAT rule" and fields.get("status switch") == "1":
+            sophos_nat_rules.append(_sophos_nat_rule(index, fields, source_id, ref))
             for forward in _nat_forward_ports(index, fields, source_id, ref):
                 nat_forward_ports.append(forward)
         elif descr == "masquerading rule" and fields.get("status switch") == "1":
@@ -628,8 +631,37 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
         "static_interfaces": static_interfaces,
         "pppoe_profiles": pppoe_profiles,
         "static_routes": static_routes,
+        "sophos_nat_rules": sophos_nat_rules,
         "nat_forward_ports": nat_forward_ports,
         "masquerade_rules": masquerade_rules,
+    }
+
+
+def _sophos_nat_rule(index: dict[str, dict], fields: dict[str, str], source_id: str, ref: str) -> dict:
+    traffic_service = _service(index, fields.get("traffic service", ""))
+    destination_service = _service(index, fields.get("destination service", ""))
+    destination_address_ref = fields.get("destination address", "")
+    traffic_destination_ref = fields.get("traffic destination", "")
+    return {
+        "id": uuid.uuid4().hex,
+        "ref": ref,
+        "type": "DNAT",
+        "traffic_source": _name(index, fields.get("traffic source", "")),
+        "traffic_source_ref": fields.get("traffic source", ""),
+        "traffic_service": traffic_service or {},
+        "traffic_service_ref": fields.get("traffic service", ""),
+        "traffic_destination": _name(index, traffic_destination_ref),
+        "traffic_destination_ref": traffic_destination_ref,
+        "destination_address": _name(index, destination_address_ref),
+        "destination_address_ref": destination_address_ref,
+        "destination_address_ip": _resolve_host(index, destination_address_ref),
+        "destination_service": destination_service or {},
+        "destination_service_ref": fields.get("destination service", ""),
+        "auto_firewall_rule": fields.get("auto-packetfilter rule switch") == "1",
+        "log_initial_packets": fields.get("log switch") == "1",
+        "comment": fields.get("comment", ""),
+        "origin": _origin(source_id, ref),
+        "apply_status": "expanded_to_forward_ports",
     }
 
 
@@ -735,6 +767,7 @@ def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace
         "static_interfaces": [],
         "pppoe_profiles": [],
         "static_routes": [],
+        "sophos_nat_rules": [],
         "nat_forward_ports": [],
         "masquerade_rules": [],
     }
@@ -743,6 +776,7 @@ def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace
             "static_interfaces": ("name", "address", "gateway"),
             "pppoe_profiles": ("name", "username"),
             "static_routes": ("destination", "gateway", "interface"),
+            "sophos_nat_rules": ("ref",),
             "nat_forward_ports": ("port", "proto", "toport", "toaddr"),
             "masquerade_rules": ("source", "outgoing_interface_ref"),
         }.items():
@@ -752,12 +786,14 @@ def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace
         added_static_interfaces = _append_unique(data["static_interfaces"], imported["static_interfaces"], ("name", "address", "gateway"))
         added_pppoe = _append_unique(data["pppoe_profiles"], imported["pppoe_profiles"], ("name", "username"))
         added_routes = _append_unique(data["static_routes"], imported["static_routes"], ("destination", "gateway", "interface"))
+        added_sophos_nat = _append_unique(data["sophos_nat_rules"], imported["sophos_nat_rules"], ("ref",))
         added_nat = _append_unique(data["nat_forward_ports"], imported["nat_forward_ports"], ("port", "proto", "toport", "toaddr"))
         added_masq = _append_unique(data["masquerade_rules"], imported["masquerade_rules"], ("source", "outgoing_interface_ref"))
     return {
         "static_interfaces": added_static_interfaces,
         "pppoe_profiles": added_pppoe,
         "static_routes": added_routes,
+        "sophos_nat_rules": added_sophos_nat,
         "nat_forward_ports": added_nat,
         "masquerade_rules": added_masq,
     }

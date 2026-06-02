@@ -379,7 +379,8 @@ function renderImportResult(data) {
             <div class="col-md-3"><strong>PPPoE alias IP:</strong> ${summary.pppoe_alias_addresses || 0}</div>
             <div class="col-md-3"><strong>Static IF:</strong> ${summary.static_interfaces || 0}</div>
             <div class="col-md-3"><strong>Static routes:</strong> ${summary.static_routes || 0}</div>
-            <div class="col-md-3"><strong>NAT/forward:</strong> ${summary.nat_forward_ports || 0}</div>
+            <div class="col-md-3"><strong>Sophos DNAT:</strong> ${summary.sophos_nat_rules || 0}</div>
+            <div class="col-md-3"><strong>Forward ports:</strong> ${summary.nat_forward_ports || 0}</div>
             <div class="col-md-3"><strong>Masquerade:</strong> ${summary.masquerade_rules || 0}</div>
             <div class="col-md-3"><strong>DHCP ranges:</strong> ${summary.dhcp_ranges || 0}</div>
             <div class="col-md-3"><strong>DHCP options:</strong> ${summary.dhcp_options || 0}</div>
