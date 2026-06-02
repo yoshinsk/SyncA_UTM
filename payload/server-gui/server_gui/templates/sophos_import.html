@@ -376,6 +376,8 @@ function renderImportResult(data) {
     document.getElementById('summary').innerHTML = `
         <div class="row g-2 small">
             <div class="col-md-3"><strong>PPPoE:</strong> ${summary.pppoe_profiles || 0}</div>
+            <div class="col-md-3"><strong>PPPoE alias IP:</strong> ${summary.pppoe_alias_addresses || 0}</div>
+            <div class="col-md-3"><strong>Static IF:</strong> ${summary.static_interfaces || 0}</div>
             <div class="col-md-3"><strong>Static routes:</strong> ${summary.static_routes || 0}</div>
             <div class="col-md-3"><strong>NAT/forward:</strong> ${summary.nat_forward_ports || 0}</div>
             <div class="col-md-3"><strong>Masquerade:</strong> ${summary.masquerade_rules || 0}</div>

@@ -307,7 +307,9 @@ def _import_plan(plan: dict, source_name: str, replace: bool = False, apply_syst
         "nginx_backends": nginx_result["backends"],
         "nginx_vhosts": nginx_result["vhosts"],
         "ipsec_connections": ipsec_result["connections"],
+        "static_interfaces": appliance_result["static_interfaces"],
         "pppoe_profiles": appliance_result["pppoe_profiles"],
+        "pppoe_alias_addresses": sum(len(p.get("alias_addresses", [])) for p in appliance_data["pppoe_profiles"]),
         "static_routes": appliance_result["static_routes"],
         "nat_forward_ports": appliance_result["nat_forward_ports"],
         "masquerade_rules": appliance_result["masquerade_rules"],
@@ -539,6 +541,7 @@ def _convert_ipsec(index: dict[str, dict], source_id: str) -> dict:
 
 
 def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
+    static_interfaces: list[dict] = []
     pppoe_profiles: list[dict] = []
     static_routes: list[dict] = []
     nat_forward_ports: list[dict] = []
@@ -547,7 +550,30 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
     for ref, obj in sorted(index.items()):
         fields = obj.get("fields", {})
         descr = obj.get("descr")
-        if descr == "PPPoE DSL interface" and fields.get("status switch") == "1":
+        if _is_static_ip_interface(fields) and fields.get("status switch") == "1":
+            primary_ref = fields.get("primary address", "")
+            primary = _fields(index, primary_ref)
+            static_interfaces.append({
+                "id": uuid.uuid4().hex,
+                "name": _identifier(fields.get("name", ""), ref),
+                "sophos_name": fields.get("name", ""),
+                "hardware_ref": fields.get("interface hardware", ""),
+                "hardware_name": _name(index, fields.get("interface hardware", "")),
+                "primary_address_ref": primary_ref,
+                "address": primary.get("IPv4 address", ""),
+                "netmask": _prefix_to_netmask(_ipv4_mask_value(primary)),
+                "cidr": _address_cidr(index, primary_ref),
+                "gateway": primary.get("IPv4 gateway", "") if primary.get("IPv4 default gateway switch") == "1" else "",
+                "gateway_type": primary.get("gateway type", ""),
+                "default_gateway": primary.get("IPv4 default gateway switch") == "1",
+                "additional_addresses": [_resolve_address(index, r) for r in _split_refs(fields.get("additional addresses", ""))],
+                "mtu": _int_or_default(fields.get("maximum transmission unit"), 1500),
+                "comment": fields.get("comment", ""),
+                "origin": _origin(source_id, ref),
+                "apply_status": "needs_linux_ifname",
+            })
+        elif descr == "PPPoE DSL interface" and fields.get("status switch") == "1":
+            alias_addresses = _interface_aliases(index, fields.get("name", ""), fields.get("additional addresses", ""))
             pppoe_profiles.append({
                 "id": uuid.uuid4().hex,
                 "name": _identifier(fields.get("name", ""), ref),
@@ -560,6 +586,7 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
                 "vlan_tag": fields.get("VLAN tag", ""),
                 "primary_address": _resolve_address(index, fields.get("primary address", "")),
                 "additional_addresses": [_resolve_address(index, r) for r in _split_refs(fields.get("additional addresses", ""))],
+                "alias_addresses": alias_addresses,
                 "comment": fields.get("comment", ""),
                 "origin": _origin(source_id, ref),
                 "apply_status": "needs_parent_ifname",
@@ -598,6 +625,7 @@ def _convert_appliance(index: dict[str, dict], source_id: str) -> dict:
             })
 
     return {
+        "static_interfaces": static_interfaces,
         "pppoe_profiles": pppoe_profiles,
         "static_routes": static_routes,
         "nat_forward_ports": nat_forward_ports,
@@ -704,6 +732,7 @@ def _merge_ipsec(store: ConfigStore, imported: dict, source_id: str, replace: bo
 
 def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace: bool) -> dict:
     default = {
+        "static_interfaces": [],
         "pppoe_profiles": [],
         "static_routes": [],
         "nat_forward_ports": [],
@@ -711,6 +740,7 @@ def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace
     }
     with store.transaction(IMPORT_MODULE, default) as data:
         for key, keys in {
+            "static_interfaces": ("name", "address", "gateway"),
             "pppoe_profiles": ("name", "username"),
             "static_routes": ("destination", "gateway", "interface"),
             "nat_forward_ports": ("port", "proto", "toport", "toaddr"),
@@ -719,11 +749,13 @@ def _merge_appliance(store: ConfigStore, imported: dict, source_id: str, replace
             data.setdefault(key, [])
             if replace:
                 _remove_origin(data[key], source_id)
+        added_static_interfaces = _append_unique(data["static_interfaces"], imported["static_interfaces"], ("name", "address", "gateway"))
         added_pppoe = _append_unique(data["pppoe_profiles"], imported["pppoe_profiles"], ("name", "username"))
         added_routes = _append_unique(data["static_routes"], imported["static_routes"], ("destination", "gateway", "interface"))
         added_nat = _append_unique(data["nat_forward_ports"], imported["nat_forward_ports"], ("port", "proto", "toport", "toaddr"))
         added_masq = _append_unique(data["masquerade_rules"], imported["masquerade_rules"], ("source", "outgoing_interface_ref"))
     return {
+        "static_interfaces": added_static_interfaces,
         "pppoe_profiles": added_pppoe,
         "static_routes": added_routes,
         "nat_forward_ports": added_nat,
@@ -798,6 +830,8 @@ def _field_map(element: ET.Element) -> dict[str, str]:
         value = (child.findtext("content") or "").strip()
         if key:
             fields[key] = value
+        if child.tag:
+            fields.setdefault(child.tag, value)
     return fields
 
 
@@ -829,6 +863,7 @@ def _preview_network(index: dict[str, dict]) -> list[dict]:
         if "interface hardware" not in f or "primary address" not in f:
             continue
         primary = _resolve_address(index, f.get("primary address", ""))
+        primary_fields = _fields(index, f.get("primary address", ""))
         secondary = [_resolve_address(index, r) for r in _split_refs(f.get("additional addresses", ""))]
         secondary = [v for v in secondary if v]
         if f.get("username") or f.get("password"):
@@ -850,7 +885,14 @@ def _preview_network(index: dict[str, dict]) -> list[dict]:
                 "VLANタグ": f.get("VLAN tag", ""),
                 "MTU": f.get("maximum transmission unit", ""),
             }
-        rows.append({"ref": ref, "mode": mode, "enabled": f.get("status switch") == "1", "form": form})
+        rows.append({
+            "ref": ref,
+            "mode": mode,
+            "enabled": f.get("status switch") == "1",
+            "gateway": primary_fields.get("IPv4 gateway", "") if primary_fields.get("IPv4 default gateway switch") == "1" else "",
+            "default_gateway": primary_fields.get("IPv4 default gateway switch") == "1",
+            "form": form,
+        })
     return rows
 
 
@@ -1066,19 +1108,83 @@ def _name(index: dict[str, dict], ref: str) -> str:
     return _fields(index, ref).get("name", ref)
 
 
+def _interface_aliases(index: dict[str, dict], interface_name: str, refs: str) -> list[dict]:
+    aliases: list[dict] = []
+    for ref in _split_refs(refs):
+        f = _fields(index, ref)
+        addr = f.get("IPv4 address", "").strip()
+        cidr = _address_cidr(index, ref)
+        if not addr and not cidr:
+            continue
+        aliases.append({
+            "ref": ref,
+            "name": f.get("name", ""),
+            "address": addr,
+            "netmask": _prefix_to_netmask(_ipv4_mask_value(f)),
+            "cidr": cidr or _resolve_address(index, ref),
+            "interface_address_refs": _matching_interface_address_refs(index, interface_name, f),
+            "comment": f.get("comment", ""),
+            "enabled": f.get("status switch") == "1",
+        })
+    return aliases
+
+
+def _matching_interface_address_refs(index: dict[str, dict], interface_name: str, alias_fields: dict[str, str]) -> list[str]:
+    addr = alias_fields.get("IPv4 address", "").strip()
+    alias_name = alias_fields.get("name", "").strip()
+    if not addr:
+        return []
+    refs: list[str] = []
+    for ref, obj in sorted(index.items()):
+        if obj.get("descr") != "interface address":
+            continue
+        f = obj.get("fields", {})
+        if f.get("IPv4 address", "").strip() != addr:
+            continue
+        text = " ".join([f.get("name", ""), f.get("comment", "")])
+        if (interface_name and interface_name in text) or (alias_name and alias_name in text):
+            refs.append(ref)
+    return refs
+
+
 def _resolve_address(index: dict[str, dict], ref: str) -> str:
     f = _fields(index, ref)
     addr = f.get("IPv4 address") or f.get("address")
-    mask = f.get("IPv4 netmask")
+    mask = _ipv4_mask_value(f)
     if addr and mask:
         return f"{addr}/{mask}"
     return addr or ref
 
 
+def _address_cidr(index: dict[str, dict], ref: str) -> str:
+    f = _fields(index, ref)
+    addr = f.get("IPv4 address", "").strip()
+    mask = _ipv4_mask_value(f)
+    if _valid_ipv4(addr) and mask:
+        return f"{addr}/{mask}"
+    return ""
+
+
+def _ipv4_mask_value(fields: dict[str, str]) -> str:
+    value = str(fields.get("IPv4 netmask", "") or fields.get("netmask", "") or "").strip()
+    if value:
+        return value
+    if _valid_ipv4(fields.get("IPv4 address", "")):
+        fallback = str(fields.get("IPv6 netmask", "") or "").strip()
+        if fallback.isdigit() and 0 <= int(fallback) <= 32:
+            return fallback
+    return ""
+
+
+def _is_static_ip_interface(fields: dict[str, str]) -> bool:
+    primary = fields.get("primary address", "")
+    return bool(fields.get("interface hardware") and primary and not fields.get("username") and not fields.get("password"))
+
+
 def _resolve_network(index: dict[str, dict], ref: str) -> str:
     f = _fields(index, ref)
     addr = f.get("IPv4 address")
-    mask = f.get("IPv4 netmask")
+    mask = _ipv4_mask_value(f)
     if addr and mask:
         return f"{addr}/{mask}"
     return f.get("name", ref)
@@ -1253,8 +1359,8 @@ def _proposal_token(value: str, default: str) -> str:
 
 def _conversion_warnings(index: dict[str, dict]) -> list[str]:
     warnings: list[str] = []
-    if any(obj.get("descr") in {"PPPoE DSL interface", "static route"} for obj in index.values()):
-        warnings.append("PPPoE and static routes are imported into the Sophos import queue; applying them still requires mapping Sophos interface refs to Linux NetworkManager connection names.")
+    if any(obj.get("descr") in {"PPPoE DSL interface", "static route"} or _is_static_ip_interface(obj.get("fields", {})) for obj in index.values()):
+        warnings.append("Static IP interfaces, PPPoE, and static routes are imported into the Sophos import queue; applying them still requires mapping Sophos interface refs to Linux NetworkManager connection names.")
     if any(obj.get("descr") == "firewall rule" for obj in index.values()):
         warnings.append("NAT/masquerade rules are imported; plain Sophos packet filter rules still require manual review before firewalld translation.")
     return warnings
