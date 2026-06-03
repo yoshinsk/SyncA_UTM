@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import gzip
 import hashlib
 import lzma
@@ -83,6 +84,14 @@ class Package:
         return self.repo.baseurl.rstrip("/") + "/" + self.location.lstrip("/")
 
 
+@dataclass
+class RepodataPayload:
+    data_type: str
+    filename: str
+    compressed: bytes
+    open_data: bytes
+
+
 def default_repos(mirror: str, version: str) -> list[RepoSpec]:
     base = mirror.rstrip("/")
     return [
@@ -138,7 +147,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def repomd_locations(repo: RepoSpec) -> tuple[str, str]:
+def repomd_data_locations(repo: RepoSpec) -> dict[str, str]:
     repomd = ET.fromstring(fetch_bytes(f"{repo.baseurl.rstrip('/')}/repodata/repomd.xml"))
     locations: dict[str, str] = {}
     for data in repomd.findall(f"{{{REPO_NS}}}data"):
@@ -146,6 +155,11 @@ def repomd_locations(repo: RepoSpec) -> tuple[str, str]:
         location = data.find(f"{{{REPO_NS}}}location")
         if location is not None and "href" in location.attrib:
             locations[data_type] = location.attrib["href"]
+    return locations
+
+
+def repomd_locations(repo: RepoSpec) -> tuple[str, str]:
+    locations = repomd_data_locations(repo)
     if "primary" not in locations or "filelists" not in locations:
         raise RuntimeError(f"primary/filelists metadata not found for {repo.repo_id}")
     return locations["primary"], locations["filelists"]
@@ -233,6 +247,101 @@ def attach_filelists(repo: RepoSpec, cache_dir: Path, packages: dict[str, Packag
                 package.files.append(file_el.text.strip())
 
 
+def load_extra_repodata(repo: RepoSpec, cache_dir: Path, data_type: str) -> RepodataPayload | None:
+    location = repomd_data_locations(repo).get(data_type)
+    if not location:
+        return None
+    metadata_path = cache_dir / repo.repo_id / location.rsplit("/", 1)[-1]
+    download_file(repo.baseurl.rstrip("/") + "/" + location, metadata_path)
+    compressed = metadata_path.read_bytes()
+    with open_metadata(metadata_path) as fh:
+        open_data = fh.read()
+    return RepodataPayload(
+        data_type=data_type,
+        filename=metadata_path.name,
+        compressed=compressed,
+        open_data=open_data,
+    )
+
+
+def filter_module_metadata(metadata: RepodataPayload, packages: list[Package]) -> RepodataPayload | None:
+    selected_artifacts = {
+        package.nevra.encode("utf-8")
+        for package in packages
+        if ".module_" in package.rel
+    }
+    if not selected_artifacts:
+        return None
+
+    docs = split_yaml_documents(metadata.open_data)
+    selected_module_names: set[str] = set()
+    keep_indexes: set[int] = set()
+    for index, doc in enumerate(docs):
+        if yaml_document_type(doc) != "modulemd":
+            continue
+        if any(artifact in doc for artifact in selected_artifacts):
+            keep_indexes.add(index)
+            module_name = yaml_document_name(doc)
+            if module_name:
+                selected_module_names.add(module_name)
+
+    if not keep_indexes:
+        artifact_sample = sorted(artifact.decode("utf-8") for artifact in selected_artifacts)[:5]
+        raise RuntimeError(f"module metadata not found for selected modular RPMs: {artifact_sample}")
+
+    for index, doc in enumerate(docs):
+        if yaml_document_type(doc) != "modulemd-defaults":
+            continue
+        if yaml_document_name(doc) in selected_module_names:
+            keep_indexes.add(index)
+
+    open_data = b"".join(doc for index, doc in enumerate(docs) if index in keep_indexes)
+    compressed = gzip.compress(open_data, mtime=0)
+    filename = f"{sha256_bytes(compressed)}-modules.yaml.gz"
+    print(
+        "modules: kept "
+        f"{len(keep_indexes)} of {len(docs)} documents "
+        f"for {', '.join(sorted(selected_module_names))}"
+    )
+    return RepodataPayload(metadata.data_type, filename, compressed, open_data)
+
+
+def split_yaml_documents(data: bytes) -> list[bytes]:
+    docs: list[list[bytes]] = []
+    current: list[bytes] = []
+    for line in data.splitlines(keepends=True):
+        if line.startswith(b"---"):
+            if current:
+                docs.append(current)
+            current = [line]
+            continue
+        current.append(line)
+    if current:
+        docs.append(current)
+    return [b"".join(doc) for doc in docs]
+
+
+def yaml_document_type(doc: bytes) -> str:
+    for line in doc.splitlines():
+        if line.startswith(b"document:"):
+            return yaml_scalar_value(line)
+    return ""
+
+
+def yaml_document_name(doc: bytes) -> str:
+    for line in doc.splitlines():
+        if line.startswith(b"  name:"):
+            return yaml_scalar_value(line)
+    return ""
+
+
+def yaml_scalar_value(line: bytes) -> str:
+    value = line.split(b":", 1)[1].strip().decode("utf-8")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def text_of(element: ET.Element, child: str) -> str:
     found = element.find(f"{{{COMMON_NS}}}{child}")
     return (found.text or "").strip() if found is not None else ""
@@ -257,15 +366,81 @@ def build_indexes(packages: Iterable[Package]) -> tuple[dict[str, list[Package]]
         for provide in package_provides:
             by_provide.setdefault(provide.name, []).append((provide, package))
     for candidates in by_name.values():
-        candidates.sort(key=package_sort_key)
+        candidates.sort(key=functools.cmp_to_key(compare_packages))
     for candidates in by_provide.values():
-        candidates.sort(key=lambda item: package_sort_key(item[1]))
+        candidates.sort(key=functools.cmp_to_key(lambda left, right: compare_packages(left[1], right[1])))
     return by_name, by_provide
 
 
-def package_sort_key(package: Package) -> tuple[int, int, str]:
+def package_base_sort_key(package: Package) -> tuple[int, int, str]:
     arch_score = 0 if package.arch == "x86_64" else 1
-    return (package.repo.priority, arch_score, package.nevra)
+    return (package.repo.priority, arch_score, package.name)
+
+
+def compare_packages(left: Package, right: Package) -> int:
+    left_base = package_base_sort_key(left)
+    right_base = package_base_sort_key(right)
+    if left_base != right_base:
+        return -1 if left_base < right_base else 1
+    evr = compare_evr(left, right)
+    if evr:
+        return -evr
+    return -1 if left.nevra < right.nevra else (1 if left.nevra > right.nevra else 0)
+
+
+def compare_evr(left: Package, right: Package) -> int:
+    left_epoch = int(left.epoch or "0")
+    right_epoch = int(right.epoch or "0")
+    if left_epoch != right_epoch:
+        return 1 if left_epoch > right_epoch else -1
+    version = rpmvercmp(left.ver, right.ver)
+    if version:
+        return version
+    return rpmvercmp(left.rel, right.rel)
+
+
+def rpmvercmp(left: str, right: str) -> int:
+    left_tokens = rpm_tokens(left)
+    right_tokens = rpm_tokens(right)
+    for left_token, right_token in zip(left_tokens, right_tokens):
+        if left_token == right_token:
+            continue
+        left_is_num = left_token.isdigit()
+        right_is_num = right_token.isdigit()
+        if left_is_num and right_is_num:
+            left_num = left_token.lstrip("0") or "0"
+            right_num = right_token.lstrip("0") or "0"
+            if len(left_num) != len(right_num):
+                return 1 if len(left_num) > len(right_num) else -1
+            return 1 if left_num > right_num else -1
+        if left_is_num != right_is_num:
+            return 1 if left_is_num else -1
+        return 1 if left_token > right_token else -1
+    if len(left_tokens) == len(right_tokens):
+        return 0
+    return 1 if len(left_tokens) > len(right_tokens) else -1
+
+
+def rpm_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    current = []
+    current_is_digit: bool | None = None
+    for char in value:
+        if not char.isalnum():
+            if current:
+                tokens.append("".join(current))
+                current = []
+                current_is_digit = None
+            continue
+        is_digit = char.isdigit()
+        if current and current_is_digit != is_digit:
+            tokens.append("".join(current))
+            current = []
+        current.append(char)
+        current_is_digit = is_digit
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def requirement_is_skippable(requirement: Requirement) -> bool:
@@ -342,7 +517,12 @@ def resolve(goals: list[str], packages: list[Package]) -> tuple[dict[str, Packag
     return selected, unresolved
 
 
-def write_repo_metadata(repo_name: str, packages: list[Package], repo_dir: Path) -> None:
+def write_repo_metadata(
+    repo_name: str,
+    packages: list[Package],
+    repo_dir: Path,
+    extra_metadata: list[RepodataPayload] | None = None,
+) -> None:
     repodata = repo_dir / "repodata"
     repodata.mkdir(parents=True, exist_ok=True)
 
@@ -366,11 +546,22 @@ def write_repo_metadata(repo_name: str, packages: list[Package], repo_dir: Path)
     filelists_name = f"{sha256_bytes(filelists_gz)}-filelists.xml.gz"
     (repodata / primary_name).write_bytes(primary_gz)
     (repodata / filelists_name).write_bytes(filelists_gz)
+    for metadata in extra_metadata or []:
+        (repodata / metadata.filename).write_bytes(metadata.compressed)
 
     repomd_root = ET.Element(f"{{{REPO_NS}}}repomd")
     timestamp = str(int(time.time()))
     add_repomd_data(repomd_root, "primary", primary_name, primary_gz, primary_open, timestamp)
     add_repomd_data(repomd_root, "filelists", filelists_name, filelists_gz, filelists_open, timestamp)
+    for metadata in extra_metadata or []:
+        add_repomd_data(
+            repomd_root,
+            metadata.data_type,
+            metadata.filename,
+            metadata.compressed,
+            metadata.open_data,
+            timestamp,
+        )
     repomd_bytes = serialize_with_default_namespace(repomd_root, REPO_NS)
     (repodata / "repomd.xml").write_bytes(repomd_bytes)
     print(f"{repo_name}: wrote metadata for {len(packages)} packages")
@@ -429,10 +620,14 @@ def main() -> int:
 
     all_packages: list[Package] = []
     packages_by_repo: dict[str, dict[str, Package]] = {}
+    extra_metadata_by_dest: dict[str, dict[str, RepodataPayload]] = {}
     for repo in repos:
         print(f"reading metadata: {repo.repo_id}")
         parsed = parse_primary(repo, args.cache_dir)
         attach_filelists(repo, args.cache_dir, parsed)
+        modules = load_extra_repodata(repo, args.cache_dir, "modules")
+        if modules is not None:
+            extra_metadata_by_dest.setdefault(repo.dest_repo, {}).setdefault("modules", modules)
         packages_by_repo[repo.repo_id] = parsed
         all_packages.extend(parsed.values())
         print(f"  packages: {len(parsed)}")
@@ -465,7 +660,15 @@ def main() -> int:
     for dest_repo, repo_packages in selected_by_dest.items():
         repo_dir = tmp_dir / dest_repo
         (repo_dir / "Packages").mkdir(parents=True, exist_ok=True)
-        write_repo_metadata(dest_repo, repo_packages, repo_dir)
+        extra_metadata: list[RepodataPayload] = []
+        for metadata in extra_metadata_by_dest.get(dest_repo, {}).values():
+            if metadata.data_type == "modules":
+                filtered = filter_module_metadata(metadata, repo_packages)
+                if filtered is not None:
+                    extra_metadata.append(filtered)
+                continue
+            extra_metadata.append(metadata)
+        write_repo_metadata(dest_repo, repo_packages, repo_dir, extra_metadata)
 
     if args.output_dir.exists():
         shutil.rmtree(args.output_dir)

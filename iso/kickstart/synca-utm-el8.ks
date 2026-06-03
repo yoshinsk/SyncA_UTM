@@ -20,6 +20,10 @@ bootloader --location=mbr
 
 repo --name="SyncA-Extra" --baseurl=file:///run/install/repo/synca/rpms
 
+module --name=nginx --stream=1.24
+module --name=python36 --stream=3.6
+module --name=python39 --stream=3.9
+
 %packages --ignoremissing
 bash
 ca-certificates
@@ -69,8 +73,6 @@ util-linux
 vim-minimal
 wireguard-tools
 xfsprogs
-mod_security
-mod_security_crs
 %end
 
 %post --nochroot --log=/mnt/sysroot/root/synca-utm-nochroot-post.log

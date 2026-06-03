@@ -12,7 +12,7 @@ export SYNCA_ISO_LABEL="${SYNCA_ISO_LABEL:-SYNCA_UTM_8}"
 export BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/output/iso-build-almalinux8}"
 export OUTPUT_ISO="${OUTPUT_ISO:-${ROOT_DIR}/output/SyncA-UTM-AlmaLinux-8.10.iso}"
 export KICKSTART_FILE="${KICKSTART_FILE:-${ROOT_DIR}/iso/kickstart/synca-utm-el8.ks}"
-export SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-0}"
+export SYNC_PRUNE_DVD_REPOS="${SYNC_PRUNE_DVD_REPOS:-1}"
 
 if [[ -z "${RPM_DIR_SRC:-}" && -d "${ROOT_DIR}/output/rpms-almalinux8" ]]; then
     export RPM_DIR_SRC="${ROOT_DIR}/output/rpms-almalinux8"

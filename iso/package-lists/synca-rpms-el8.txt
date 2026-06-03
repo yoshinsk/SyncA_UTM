@@ -26,10 +26,7 @@ glibc-langpack-ja
 iproute
 iptables
 langpacks-ja
-mod_security
-mod_security_crs
 nginx
-libmodsecurity
 nftables
 openssh-server
 openssl
@@ -44,7 +41,6 @@ rootfiles
 rsync
 shadow-utils
 slang
-ssdeep-libs
 strongswan
 sudo
 systemd
