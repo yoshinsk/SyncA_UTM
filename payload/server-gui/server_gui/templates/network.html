@@ -260,7 +260,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
-                <button class="btn btn-primary" onclick="submitBridge()">
+                <button id="bridge-submit-btn" class="btn btn-primary" onclick="submitBridge()">
                     <i class="bi bi-check2"></i> Bridge 作成
                 </button>
             </div>
@@ -518,6 +518,8 @@ let pppoeEditModal;
 let bridgeModal;
 let vlanModal;
 let editingPppoeName = null;
+let bridgeMode = 'create';
+let editingBridgeName = null;
 let currentWanType = 'unknown';
 let currentWanDevice = '';
 let currentWanParent = '';
@@ -656,8 +658,12 @@ async function submitPppoeEdit() {
 }
 
 function openBridgeModal() {
+    bridgeMode = 'create';
+    editingBridgeName = null;
     document.getElementById('br-name').value = 'br-lan';
+    document.getElementById('br-name').disabled = false;
     document.getElementById('br-ifname').value = '';
+    document.getElementById('br-ifname').disabled = false;
     document.getElementById('br-address').value = '';
     document.getElementById('br-dns').value = '';
     document.getElementById('br-stp').checked = true;
@@ -666,6 +672,12 @@ function openBridgeModal() {
     document.getElementById('br-hello-time').value = '2';
     document.getElementById('br-autoconnect').checked = true;
     document.getElementById('br-activate').checked = true;
+    document.getElementById('bridge-submit-btn').innerHTML = '<i class="bi bi-check2"></i> Bridge 作成';
+    populateBridgeMembers(new Set());
+    bridgeModal.show();
+}
+
+function populateBridgeMembers(selectedMembers) {
     // Build member checkboxes from ethernet devices, excluding WAN and PPPoE parent interfaces.
     const blocked = new Set([currentWanDevice, currentWanParent].filter(Boolean));
     const candidates = devices.filter(d => d.type === 'ethernet' && d.bridge_eligible !== false && !blocked.has(d.device));
@@ -675,12 +687,36 @@ function openBridgeModal() {
     } else {
         wrap.innerHTML = candidates.map(d => `
             <div class="form-check">
-                <input class="form-check-input br-member" type="checkbox" value="${escapeHtml(d.device)}" id="br-m-${escapeHtml(d.device)}">
+                <input class="form-check-input br-member" type="checkbox" value="${escapeHtml(d.device)}" id="br-m-${escapeHtml(d.device)}" ${selectedMembers.has(d.device) ? 'checked' : ''}>
                 <label class="form-check-label font-monospace" for="br-m-${escapeHtml(d.device)}">
                     ${escapeHtml(d.device)} <span class="text-secondary small">(${(d.ipv4 || []).join(', ') || 'no IP'}, ${escapeHtml(d.state)})</span>
                 </label>
             </div>`).join('');
     }
+}
+
+async function openBridgeEdit(name) {
+    const detail = await api.get(`/network/api/connections/${encodeURIComponent(name)}/bridge`);
+    if (!detail) return;
+    bridgeMode = 'edit';
+    editingBridgeName = name;
+    const ipv4 = detail.ipv4 || {};
+    const bridge = detail.bridge || {};
+    const addresses = ipv4.addresses_list || (ipv4.addresses ? [ipv4.addresses] : []);
+    document.getElementById('br-name').value = detail.name || name;
+    document.getElementById('br-name').disabled = true;
+    document.getElementById('br-ifname').value = detail.interface || name;
+    document.getElementById('br-ifname').disabled = true;
+    document.getElementById('br-address').value = addresses[0] || '';
+    document.getElementById('br-dns').value = ipv4.dns || '';
+    document.getElementById('br-stp').checked = bridge.stp !== false;
+    document.getElementById('br-stp-priority').value = bridge.priority || '32768';
+    document.getElementById('br-forward-delay').value = bridge.forward_delay || '4';
+    document.getElementById('br-hello-time').value = bridge.hello_time || '2';
+    document.getElementById('br-autoconnect').checked = detail.autoconnect !== false;
+    document.getElementById('br-activate').checked = true;
+    document.getElementById('bridge-submit-btn').innerHTML = '<i class="bi bi-check2"></i> Bridge 更新';
+    populateBridgeMembers(new Set(detail.members || []));
     bridgeModal.show();
 }
 
@@ -732,8 +768,9 @@ async function submitVlan() {
 async function submitBridge() {
     const members = Array.from(document.querySelectorAll('.br-member:checked')).map(c => c.value);
     if (members.length === 0) return toast('メンバーを 1 つ以上選択してください', true);
+    const bridgeName = bridgeMode === 'edit' ? editingBridgeName : document.getElementById('br-name').value.trim();
     const payload = {
-        name: document.getElementById('br-name').value.trim(),
+        name: bridgeName,
         ifname: document.getElementById('br-ifname').value.trim() || undefined,
         members,
         address: document.getElementById('br-address').value.trim(),
@@ -746,11 +783,16 @@ async function submitBridge() {
         activate: document.getElementById('br-activate').checked,
     };
     if (!payload.name) return toast('Bridge 名は必須', true);
-    if (!confirm(`Bridge "${payload.name}" を作成しますか?\n\nメンバー: ${members.join(', ')}\nLAN IP: ${payload.address || '(無し)'}\nSTP: ${payload.stp ? 'ON (priority=' + payload.stp_priority + ')' : 'OFF'}`)) return;
-    const res = await api.send('/network/api/connections/bridge', 'POST', payload);
+    const action = bridgeMode === 'edit' ? '更新' : '作成';
+    if (!confirm(`Bridge "${payload.name}" を${action}しますか?\n\nメンバー: ${members.join(', ')}\nLAN IP: ${payload.address || '(無し)'}\nSTP: ${payload.stp ? 'ON (priority=' + payload.stp_priority + ')' : 'OFF'}`)) return;
+    const url = bridgeMode === 'edit'
+        ? `/network/api/connections/${encodeURIComponent(payload.name)}/bridge`
+        : '/network/api/connections/bridge';
+    const method = bridgeMode === 'edit' ? 'PUT' : 'POST';
+    const res = await api.send(url, method, payload);
     if (!res) return;
     if (res.ok) {
-        toast(`Bridge "${payload.name}" を作成しました`);
+        toast(`Bridge "${payload.name}" を${action}しました`);
         bridgeModal.hide();
         refresh();
     } else {
@@ -856,9 +898,13 @@ function renderConnections() {
                 ? `<button class="btn btn-sm btn-outline-primary" onclick="openPppoeEdit('${escapeJs(c.name)}')">
                        <i class="bi bi-pencil"></i> 編集
                    </button>`
-                : `<button class="btn btn-sm btn-outline-primary" onclick="editConnection('${escapeJs(c.name)}')">
-                       <i class="bi bi-pencil"></i> 編集
-                   </button>`;
+                : c.type === 'bridge'
+                    ? `<button class="btn btn-sm btn-outline-primary" onclick="openBridgeEdit('${escapeJs(c.name)}')">
+                           <i class="bi bi-pencil"></i> 編集
+                       </button>`
+                    : `<button class="btn btn-sm btn-outline-primary" onclick="editConnection('${escapeJs(c.name)}')">
+                           <i class="bi bi-pencil"></i> 編集
+                       </button>`;
             return `<tr>
                 <td class="fw-semibold">${escapeHtml(c.name)}</td>
                 <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${escapeHtml(c.type)}</span></td>

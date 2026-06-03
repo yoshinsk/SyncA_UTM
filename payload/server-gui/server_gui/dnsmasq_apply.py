@@ -12,6 +12,7 @@ from .config_store import ConfigStore
 from .shell import sudo_run
 
 CONFIG_PATH = Path("/etc/dnsmasq.d/server-gui.conf")
+LEGACY_FIRSTBOOT_CONFIG_PATH = Path("/etc/dnsmasq.d/synca-lan.conf")
 MODULE_NAME = "dnsmasq"
 
 
@@ -125,16 +126,29 @@ def apply(config_dir: Any) -> None:
         tmp_path.unlink(missing_ok=True)
         raise RuntimeError(f"failed to write {CONFIG_PATH}: {e}") from e
 
+    legacy_backup: bytes | None = None
+    legacy_removed = False
+    if data.get("dhcp", {}).get("ranges") and LEGACY_FIRSTBOOT_CONFIG_PATH.exists():
+        try:
+            legacy_backup = LEGACY_FIRSTBOOT_CONFIG_PATH.read_bytes()
+            LEGACY_FIRSTBOOT_CONFIG_PATH.unlink()
+            legacy_removed = True
+        except OSError as e:
+            _restore(backup)
+            raise RuntimeError(f"failed to disable {LEGACY_FIRSTBOOT_CONFIG_PATH}: {e}") from e
+
     # Validate with dnsmasq --test (covers the GENERATED file + main config)
     test = sudo_run(["dnsmasq", "--test"])
     if not test.ok:
         _restore(backup)
+        _restore_legacy(legacy_backup, legacy_removed)
         raise RuntimeError(f"dnsmasq --test failed:\n{test.stderr.strip() or test.stdout.strip()}")
 
     # Reload-safe restart
     restart = sudo_run(["systemctl", "restart", "dnsmasq"])
     if not restart.ok:
         _restore(backup)
+        _restore_legacy(legacy_backup, legacy_removed)
         sudo_run(["systemctl", "restart", "dnsmasq"])  # best-effort second try
         raise RuntimeError(f"dnsmasq restart failed:\n{restart.stderr.strip()}")
 
@@ -159,5 +173,15 @@ def _restore(backup: bytes | None) -> None:
         return
     try:
         CONFIG_PATH.write_bytes(backup)
+    except OSError:
+        pass
+
+
+def _restore_legacy(backup: bytes | None, removed: bool) -> None:
+    """Restore the firstboot dnsmasq snippet when generated config apply fails."""
+    if not removed or backup is None:
+        return
+    try:
+        LEGACY_FIRSTBOOT_CONFIG_PATH.write_bytes(backup)
     except OSError:
         pass

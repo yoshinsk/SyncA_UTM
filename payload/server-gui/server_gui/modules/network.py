@@ -241,12 +241,19 @@ def create_bridge():
             "error": f"refusing to enslave WAN interface {wan_dev!r} into the bridge. "
                      "Move the default route first or pick different members."
         }), 400
+    blocked_members = sorted(set(members) & _blocked_bridge_members())
+    if blocked_members:
+        return jsonify({
+            "error": "refusing to enslave WAN/PPPoE interface(s) into the bridge: "
+                     + ", ".join(blocked_members)
+        }), 400
 
     # ---- create bridge ----
     add_cmd = [
         "nmcli", "connection", "add", "type", "bridge",
         "con-name", name, "ifname", ifname,
         "connection.autoconnect", "yes" if autoconnect else "no",
+        "connection.zone", "trusted",
     ]
     res = sudo_run(add_cmd, timeout=30)
     if not res.ok:
@@ -292,9 +299,14 @@ def create_bridge():
     slave_failures = []
     for m in members:
         slave_name = f"{name}-port-{m}"
+        prep_result = _prepare_bridge_member(m, {name, slave_name})
+        if not prep_result["ok"]:
+            slave_failures.append({"member": m, "error": prep_result["error"]})
+            continue
         slave_res = sudo_run([
             "nmcli", "connection", "add", "type", "bridge-slave",
             "con-name", slave_name, "ifname", m, "master", name,
+            "connection.zone", "trusted",
         ])
         if not slave_res.ok:
             slave_failures.append({"member": m, "error": slave_res.stderr.strip()})
@@ -312,12 +324,120 @@ def create_bridge():
                 "ok": False, "created": True, "activated": False,
                 "error": "created but failed to activate", "output": output,
             }), 500
+        for m in members:
+            port_name = f"{name}-port-{m}"
+            port_up = sudo_run(["nmcli", "connection", "up", port_name], timeout=60)
+            port_output = (port_up.stdout + port_up.stderr).strip()
+            if port_output:
+                output = "\n".join(part for part in [output, port_output] if part)
+            if not port_up.ok:
+                return jsonify({
+                    "ok": False, "created": True, "activated": False,
+                    "error": f"created but failed to activate {port_name}",
+                    "output": output,
+                }), 500
 
     return jsonify({
         "ok": True, "name": name, "ifname": ifname,
         "members": members, "stp": stp, "address": address,
         "output": output,
     }), 201
+
+
+@bp.route("/api/connections/<name>/bridge", methods=["GET"])
+@login_required
+def get_bridge(name: str):
+    """Return editable bridge settings and current member interfaces."""
+    detail = _describe_connection(name)
+    if detail.get("error"):
+        return jsonify(detail), 404
+    if detail.get("type") != "bridge":
+        return jsonify({"error": "connection is not a bridge"}), 400
+    member_profiles = _bridge_member_profiles(name)
+    return jsonify({
+        **detail,
+        "members": sorted(member_profiles),
+        "member_profiles": member_profiles,
+    })
+
+
+@bp.route("/api/connections/<name>/bridge", methods=["PUT"])
+@login_required
+@csrf_protect
+def update_bridge(name: str):
+    """Update an existing bridge and reconcile its member interfaces."""
+    detail = _describe_connection(name)
+    if detail.get("error"):
+        return jsonify(detail), 404
+    if detail.get("type") != "bridge":
+        return jsonify({"error": "connection is not a bridge"}), 400
+
+    payload = request.get_json(force=True, silent=True) or {}
+    members_raw = payload.get("members") or []
+    address = (payload.get("address") or "").strip()
+    gateway = (payload.get("gateway") or "").strip()
+    dns_raw = payload.get("dns") or []
+    stp = bool(payload.get("stp", True))
+    stp_priority = int(payload.get("stp_priority", 32768))
+    forward_delay = int(payload.get("forward_delay", 4))
+    hello_time = int(payload.get("hello_time", 2))
+    autoconnect = bool(payload.get("autoconnect", True))
+    activate = bool(payload.get("activate", True))
+
+    try:
+        members = _validate_bridge_members(members_raw)
+        dns_list = _validate_bridge_ipv4(address, gateway, dns_raw)
+        _validate_bridge_timers(stp_priority, forward_delay, hello_time)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    blocked_members = sorted(set(members) & _blocked_bridge_members())
+    if blocked_members:
+        return jsonify({
+            "error": "refusing to enslave WAN/PPPoE interface(s) into the bridge: "
+                     + ", ".join(blocked_members)
+        }), 400
+
+    stp_result = _apply_bridge_stp(name, stp, stp_priority, forward_delay, hello_time)
+    if not stp_result["ok"]:
+        return jsonify({"ok": False, "error": "STP config failed: " + stp_result["error"]}), 500
+
+    ipv4_result = _apply_bridge_ipv4(name, address, gateway, dns_list)
+    if not ipv4_result["ok"]:
+        return jsonify({"ok": False, "error": "IPv4 config failed: " + ipv4_result["error"]}), 500
+
+    auto_res = sudo_run([
+        "nmcli", "connection", "modify", name,
+        "connection.autoconnect", "yes" if autoconnect else "no",
+        "connection.zone", "trusted",
+    ])
+    if not auto_res.ok:
+        return jsonify({"ok": False, "error": auto_res.stderr.strip()}), 500
+
+    reconcile = _reconcile_bridge_members(name, members, activate)
+    if not reconcile["ok"]:
+        return jsonify(reconcile), 500
+
+    output = list(reconcile.get("output", []))
+    if activate:
+        up = sudo_run(["nmcli", "connection", "up", name], timeout=60)
+        text = (up.stdout + up.stderr).strip()
+        if text:
+            output.append(text)
+        if not up.ok:
+            return jsonify({
+                "ok": False, "activated": False,
+                "error": "updated but failed to activate",
+                "output": "\n".join(output),
+            }), 500
+
+    return jsonify({
+        "ok": True,
+        "name": name,
+        "members": members,
+        "address": address,
+        "output": "\n".join(output),
+    })
 
 
 @bp.route("/api/connections/vlan", methods=["POST"])
@@ -839,6 +959,209 @@ def _pppoe_parent_ip_status(ifname: str) -> dict:
     }
 
 
+def _validate_bridge_members(members_raw) -> list[str]:
+    """Validate and de-duplicate requested bridge member interfaces."""
+    if not isinstance(members_raw, list) or not members_raw:
+        raise ValidationError("at least one member interface required")
+    members: list[str] = []
+    for raw_member in members_raw:
+        if not isinstance(raw_member, str):
+            raise ValidationError("invalid member")
+        member = validate_interface(raw_member.strip())
+        if member not in members:
+            members.append(member)
+    return members
+
+
+def _validate_bridge_ipv4(address: str, gateway: str, dns_raw) -> list[str]:
+    """Validate optional bridge IPv4 fields and return normalized DNS IPs."""
+    if address:
+        validate_ipv4_cidr(address)
+    if gateway:
+        validate_ipv4(gateway)
+    dns_candidates = dns_raw
+    if isinstance(dns_raw, str):
+        dns_candidates = [part.strip() for part in dns_raw.split(",")]
+    dns_list: list[str] = []
+    if isinstance(dns_candidates, list):
+        for item in dns_candidates:
+            value = str(item).strip()
+            if value:
+                dns_list.append(validate_ipv4(value))
+    elif dns_candidates:
+        raise ValidationError("dns must be a list or comma-separated string")
+    return dns_list
+
+
+def _validate_bridge_timers(stp_priority: int, forward_delay: int, hello_time: int) -> None:
+    """Validate NetworkManager bridge STP timer ranges."""
+    if not (0 <= stp_priority <= 65535):
+        raise ValidationError("stp_priority out of range (0-65535)")
+    if not (2 <= forward_delay <= 30):
+        raise ValidationError("forward_delay out of range (2-30)")
+    if not (1 <= hello_time <= 10):
+        raise ValidationError("hello_time out of range (1-10)")
+
+
+def _blocked_bridge_members() -> set[str]:
+    """Return interfaces that must never be enslaved into a LAN bridge."""
+    blocked = {_default_route_device()}
+    pppoe_parent = _pppoe_parent(_active_pppoe_connection())
+    if pppoe_parent:
+        blocked.add(pppoe_parent)
+    return {name for name in blocked if name}
+
+
+def _connection_profiles_for_interface(ifname: str) -> list[dict]:
+    """Return NetworkManager profiles bound to an interface, active or inactive."""
+    profiles: list[dict] = []
+    for conn in _list_connections():
+        name = conn.get("name")
+        if not name:
+            continue
+        detail = _describe_connection(name)
+        if detail.get("error"):
+            continue
+        if detail.get("interface") == ifname or conn.get("device") == ifname:
+            profiles.append(detail)
+    return profiles
+
+
+def _bridge_member_profiles(bridge_name: str) -> dict[str, str]:
+    """Return {interface: connection_name} for ports enslaved to a bridge."""
+    members: dict[str, str] = {}
+    for conn in _list_connections():
+        name = conn.get("name")
+        if not name:
+            continue
+        detail = _describe_connection(name)
+        if detail.get("master") == bridge_name and detail.get("slave_type") == "bridge":
+            interface = detail.get("interface")
+            if interface:
+                members[interface] = name
+    return members
+
+
+def _prepare_bridge_member(ifname: str, keep_connections: set[str]) -> dict:
+    """Disable conflicting profiles so the member NIC cannot keep its own IP."""
+    output: list[str] = []
+    for profile in _connection_profiles_for_interface(ifname):
+        conn_name = profile.get("name")
+        if not conn_name or conn_name in keep_connections:
+            continue
+        if profile.get("type") == "pppoe":
+            return {"ok": False, "error": f"{ifname} is used by PPPoE profile {conn_name}"}
+        master = profile.get("master") or ""
+        if master and master not in keep_connections:
+            return {"ok": False, "error": f"{ifname} is already enslaved by {master}"}
+
+        auto = sudo_run(["nmcli", "connection", "modify", conn_name, "connection.autoconnect", "no"])
+        if not auto.ok:
+            return {"ok": False, "error": auto.stderr.strip() or auto.stdout.strip()}
+        down = sudo_run(["nmcli", "connection", "down", conn_name], timeout=20)
+        text = (down.stdout + down.stderr).strip()
+        if text and "not an active connection" not in text and "no active connection provided" not in text:
+            output.append(text)
+
+    flush = sudo_run(["ip", "-4", "addr", "flush", "dev", ifname], timeout=10)
+    text = (flush.stdout + flush.stderr).strip()
+    if text:
+        output.append(text)
+    return {"ok": True, "output": output}
+
+
+def _apply_bridge_stp(
+    name: str,
+    stp: bool,
+    stp_priority: int,
+    forward_delay: int,
+    hello_time: int,
+) -> dict:
+    """Apply STP settings to a bridge connection."""
+    res = sudo_run([
+        "nmcli", "connection", "modify", name,
+        "bridge.stp", "yes" if stp else "no",
+        "bridge.priority", str(stp_priority),
+        "bridge.forward-delay", str(forward_delay),
+        "bridge.hello-time", str(hello_time),
+    ])
+    return {"ok": res.ok, "error": (res.stderr or res.stdout).strip()}
+
+
+def _apply_bridge_ipv4(name: str, address: str, gateway: str, dns_list: list[str]) -> dict:
+    """Apply optional IPv4 settings to a bridge connection."""
+    if address:
+        cmd = [
+            "nmcli", "connection", "modify", name,
+            "ipv4.method", "manual",
+            "ipv4.addresses", address,
+            "ipv4.gateway", gateway or "",
+            "ipv4.dns", ",".join(dns_list),
+            "ipv4.never-default", "no" if gateway else "yes",
+            "ipv6.method", "ignore",
+        ]
+    else:
+        cmd = [
+            "nmcli", "connection", "modify", name,
+            "ipv4.method", "disabled",
+            "ipv4.addresses", "",
+            "ipv4.gateway", "",
+            "ipv4.dns", "",
+            "ipv6.method", "ignore",
+        ]
+    res = sudo_run(cmd)
+    return {"ok": res.ok, "error": (res.stderr or res.stdout).strip()}
+
+
+def _reconcile_bridge_members(bridge_name: str, members: list[str], activate: bool) -> dict:
+    """Create/delete bridge-slave profiles so the bridge has exactly members."""
+    existing = _bridge_member_profiles(bridge_name)
+    desired = set(members)
+    output: list[str] = []
+
+    for ifname, conn_name in existing.items():
+        if ifname in desired:
+            continue
+        sudo_run(["nmcli", "connection", "down", conn_name], timeout=20)
+        deleted = sudo_run(["nmcli", "connection", "delete", conn_name], timeout=20)
+        text = (deleted.stdout + deleted.stderr).strip()
+        if text:
+            output.append(text)
+
+    keep_connections = {bridge_name, *existing.values()}
+    for ifname in members:
+        slave_name = existing.get(ifname) or f"{bridge_name}-port-{ifname}"
+        prep = _prepare_bridge_member(ifname, keep_connections | {slave_name})
+        if not prep["ok"]:
+            return {"ok": False, "error": prep["error"], "output": output}
+        output.extend(prep.get("output", []))
+        if ifname not in existing:
+            added = sudo_run([
+                "nmcli", "connection", "add", "type", "bridge-slave",
+                "con-name", slave_name, "ifname", ifname, "master", bridge_name,
+                "connection.zone", "trusted",
+            ], timeout=30)
+            text = (added.stdout + added.stderr).strip()
+            if text:
+                output.append(text)
+            if not added.ok:
+                return {"ok": False, "error": text or f"failed to add {ifname}", "output": output}
+        else:
+            sudo_run([
+                "nmcli", "connection", "modify", slave_name,
+                "connection.autoconnect", "yes",
+                "connection.zone", "trusted",
+            ])
+        if activate:
+            up = sudo_run(["nmcli", "connection", "up", slave_name], timeout=60)
+            text = (up.stdout + up.stderr).strip()
+            if text:
+                output.append(text)
+            if not up.ok:
+                return {"ok": False, "error": text or f"failed to activate {slave_name}", "output": output}
+    return {"ok": True, "output": output}
+
+
 def _device_ip_map() -> dict[str, dict]:
     """Return {ifname: {ipv4: [...], ipv6: [...], mac: str, mtu: int}}."""
     res = run(["ip", "-j", "addr", "show"])
@@ -927,16 +1250,27 @@ def _describe_connection(name: str) -> dict:
             "service": raw.get("pppoe.service"),
         }
         pppoe["parent_ip"] = _pppoe_parent_ip_status(parent)
+    bridge = None
+    if raw.get("connection.type") == "bridge":
+        bridge = {
+            "stp": raw.get("bridge.stp") == "yes",
+            "priority": raw.get("bridge.priority"),
+            "forward_delay": raw.get("bridge.forward-delay"),
+            "hello_time": raw.get("bridge.hello-time"),
+        }
     return {
         "name": raw.get("connection.id", name),
         "uuid": raw.get("connection.uuid"),
         "type": raw.get("connection.type"),
         "interface": raw.get("connection.interface-name") or raw.get("GENERAL.DEVICES"),
+        "master": raw.get("connection.master"),
+        "slave_type": raw.get("connection.slave-type"),
         "autoconnect": raw.get("connection.autoconnect") == "yes",
         "state": raw.get("GENERAL.STATE"),
         "ipv4": ipv4,
         "live": live,
         "pppoe": pppoe,
+        "bridge": bridge,
         "routes": routes,
     }
 
