@@ -9,6 +9,7 @@ APP_ARCHIVE="${INSTALLER_DIR}/server-gui.tar.gz"
 WHEELHOUSE="${INSTALLER_DIR}/wheelhouse"
 WGUI_BINARY="${INSTALLER_DIR}/wireguard-ui"
 RPM_DIR="${INSTALLER_DIR}/rpms"
+SERVER_GUI_PYTHON="${SERVER_GUI_PYTHON:-python3}"
 
 require_root() {
     # The installer writes /opt, /etc, and systemd units.
@@ -52,7 +53,7 @@ install_server_gui() {
     chown -R root:root /opt/server-gui
     chmod 0755 /opt/server-gui
 
-    python3 -m venv /opt/server-gui/venv
+    "$SERVER_GUI_PYTHON" -m venv /opt/server-gui/venv
     if [[ -d "$WHEELHOUSE" ]] && compgen -G "$WHEELHOUSE/*.whl" >/dev/null; then
         /opt/server-gui/venv/bin/pip install --no-index --find-links "$WHEELHOUSE" \
             -r /opt/server-gui/requirements.txt

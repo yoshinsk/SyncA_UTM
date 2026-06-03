@@ -5,10 +5,34 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ALMA_MAJOR="${ALMA_MAJOR:-9}"
+ALMA_VERSION="${ALMA_VERSION:-latest}"
+ALMA_ARCH="${ALMA_ARCH:-x86_64}"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/output/iso-build}"
-OUTPUT_ISO="${OUTPUT_ISO:-${ROOT_DIR}/output/SyncA-UTM-AlmaLinux-9.iso}"
-ALMA_ISO_URL="${ALMA_ISO_URL:-https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-dvd.iso}"
+OUTPUT_ISO="${OUTPUT_ISO:-${ROOT_DIR}/output/SyncA-UTM-AlmaLinux-${ALMA_MAJOR}.iso}"
+if [[ -z "${ALMA_ISO_URL:-}" ]]; then
+    case "${ALMA_MAJOR}:${ALMA_VERSION}" in
+        8:latest|8:8.10)
+            ALMA_ISO_URL="https://repo.almalinux.org/almalinux/8.10/isos/${ALMA_ARCH}/AlmaLinux-8.10-${ALMA_ARCH}-dvd.iso"
+            ;;
+        8:*)
+            ALMA_ISO_URL="https://repo.almalinux.org/almalinux/${ALMA_VERSION}/isos/${ALMA_ARCH}/AlmaLinux-${ALMA_VERSION}-${ALMA_ARCH}-dvd.iso"
+            ;;
+        9:latest)
+            ALMA_ISO_URL="https://repo.almalinux.org/almalinux/9/isos/${ALMA_ARCH}/AlmaLinux-9-latest-${ALMA_ARCH}-dvd.iso"
+            ;;
+        9:*)
+            ALMA_ISO_URL="https://repo.almalinux.org/almalinux/${ALMA_VERSION}/isos/${ALMA_ARCH}/AlmaLinux-${ALMA_VERSION}-${ALMA_ARCH}-dvd.iso"
+            ;;
+        *)
+            echo "unsupported ALMA_MAJOR/ALMA_VERSION: ${ALMA_MAJOR}/${ALMA_VERSION}" >&2
+            exit 1
+            ;;
+    esac
+fi
 ALMA_ISO="${ALMA_ISO:-${BUILD_DIR}/$(basename "$ALMA_ISO_URL")}"
+SYNCA_ISO_LABEL="${SYNCA_ISO_LABEL:-SYNCA_UTM_${ALMA_MAJOR}}"
+KICKSTART_FILE="${KICKSTART_FILE:-${ROOT_DIR}/iso/kickstart/synca-utm.ks}"
 SYNC_BUILD_WHEELHOUSE="${SYNC_BUILD_WHEELHOUSE:-0}"
 WHEELHOUSE_SRC="${WHEELHOUSE_SRC:-}"
 RPM_DIR_SRC="${RPM_DIR_SRC:-}"
@@ -43,6 +67,14 @@ normalize_lf_text_tree() {
 }
 
 prepare_workspace() {
+    if (( ${#SYNCA_ISO_LABEL} > 32 )); then
+        echo "SYNCA_ISO_LABEL must be 32 characters or fewer: $SYNCA_ISO_LABEL" >&2
+        exit 1
+    fi
+    if [[ ! -f "$KICKSTART_FILE" ]]; then
+        echo "Kickstart file not found: $KICKSTART_FILE" >&2
+        exit 1
+    fi
     mkdir -p "$BUILD_DIR" "$(dirname "$OUTPUT_ISO")"
     rm -rf "${BUILD_DIR}/payload"
     mkdir -p "${BUILD_DIR}/payload/synca" "${BUILD_DIR}/payload/ks"
@@ -86,7 +118,7 @@ package_wheelhouse() {
 }
 
 copy_payload_files() {
-    install -m 0644 "${ROOT_DIR}/iso/kickstart/synca-utm.ks" \
+    install -m 0644 "$KICKSTART_FILE" \
         "${BUILD_DIR}/payload/ks/synca-utm.ks"
     if [[ -n "$SYNCA_INITIAL_ADMIN_USER" || -n "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
         if [[ -z "$SYNCA_INITIAL_ADMIN_USER" || -z "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
@@ -163,17 +195,19 @@ extract_boot_configs() {
         -extract /isolinux/isolinux.cfg "${BUILD_DIR}/bootcfg/isolinux/isolinux.cfg" \
         -extract /EFI/BOOT/grub.cfg "${BUILD_DIR}/bootcfg/EFI/BOOT/grub.cfg" \
         >/dev/null 2>&1 || true
+    chmod -R u+w "${BUILD_DIR}/bootcfg" 2>/dev/null || true
 }
 
 patch_isolinux() {
     local cfg="${BUILD_DIR}/bootcfg/isolinux/isolinux.cfg"
     [[ -f "$cfg" ]] || return 0
-    python3 - "$cfg" <<'PY'
+    python3 - "$cfg" "$SYNCA_ISO_LABEL" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
+label = sys.argv[2]
 text = path.read_text()
 header = []
 for line in text.splitlines():
@@ -191,7 +225,7 @@ label synca-utm
   menu label Install SyncA UTM
   menu default
   kernel vmlinuz
-  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
+  append initrd=initrd.img inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.ks=hd:LABEL=@@LABEL@@:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
 
 menu begin ^Troubleshooting
   menu title Troubleshooting
@@ -199,12 +233,12 @@ menu begin ^Troubleshooting
 label text
   menu label Install SyncA UTM using ^text mode
   kernel vmlinuz
-  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
+  append initrd=initrd.img inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.ks=hd:LABEL=@@LABEL@@:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
 
 label rescue
   menu label ^Rescue an installed system
   kernel vmlinuz
-  append initrd=initrd.img inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.rescue rd.multipath=0 inst.nompath quiet
+  append initrd=initrd.img inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.rescue rd.multipath=0 inst.nompath quiet
 
 label local
   menu label Boot from ^local drive
@@ -215,7 +249,7 @@ label returntomain
   menu exit
 
 menu end
-"""
+""".replace("@@LABEL@@", label)
 while header and not header[-1].strip():
     header.pop()
 path.write_text("\n".join(header) + "\n\n" + menu_block.rstrip("\n") + "\n")
@@ -225,12 +259,13 @@ PY
 patch_grub() {
     local cfg="${BUILD_DIR}/bootcfg/EFI/BOOT/grub.cfg"
     [[ -f "$cfg" ]] || return 0
-    python3 - "$cfg" <<'PY'
+    python3 - "$cfg" "$SYNCA_ISO_LABEL" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
+label = sys.argv[2]
 text = path.read_text()
 lines = []
 skipping_entry = False
@@ -254,7 +289,7 @@ for line in text.splitlines():
     if stripped.startswith("set timeout="):
         line = "set timeout=15"
     if "search --no-floppy --set=root -l " in line:
-        line = "search --no-floppy --set=root -l 'SYNCA_UTM_9'"
+        line = f"search --no-floppy --set=root -l '{label}'"
     lines.append(line)
 
 if not any(line.lstrip().startswith("set default=") for line in lines):
@@ -262,21 +297,21 @@ if not any(line.lstrip().startswith("set default=") for line in lines):
 
 menu_block = """\
 menuentry 'Install SyncA UTM' --id synca-utm --class fedora --class gnu-linux --class gnu --class os {
-    linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
+    linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.ks=hd:LABEL=@@LABEL@@:/ks/synca-utm.ks rd.multipath=0 inst.nompath quiet
     initrdefi /images/pxeboot/initrd.img
 }
 
 submenu 'Troubleshooting' {
     menuentry 'Install SyncA UTM using text mode' --class fedora --class gnu-linux --class gnu --class os {
-        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.ks=hd:LABEL=SYNCA_UTM_9:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
+        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.ks=hd:LABEL=@@LABEL@@:/ks/synca-utm.ks inst.text rd.multipath=0 inst.nompath quiet
         initrdefi /images/pxeboot/initrd.img
     }
     menuentry 'Rescue an installed system' --class fedora --class gnu-linux --class gnu --class os {
-        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=SYNCA_UTM_9 inst.repo=hd:LABEL=SYNCA_UTM_9 inst.rescue rd.multipath=0 inst.nompath quiet
+        linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=@@LABEL@@ inst.repo=hd:LABEL=@@LABEL@@ inst.rescue rd.multipath=0 inst.nompath quiet
         initrdefi /images/pxeboot/initrd.img
     }
 }
-"""
+""".replace("@@LABEL@@", label)
 while lines and not lines[-1].strip():
     lines.pop()
 path.write_text("\n".join(lines) + "\n\n" + menu_block.rstrip("\n") + "\n")
@@ -284,6 +319,15 @@ PY
 }
 
 build_iso() {
+    local base_real output_real
+    base_real="$(readlink -f "$ALMA_ISO")"
+    output_real="$(readlink -m "$OUTPUT_ISO")"
+    if [[ "$base_real" == "$output_real" ]]; then
+        echo "OUTPUT_ISO must not point to the base AlmaLinux ISO: $OUTPUT_ISO" >&2
+        exit 1
+    fi
+    rm -f "$OUTPUT_ISO"
+
     local cmd=(
         xorriso
         -indev "$ALMA_ISO"
@@ -309,7 +353,7 @@ build_iso() {
     if [[ -f "${BUILD_DIR}/bootcfg/EFI/BOOT/grub.cfg" ]]; then
         cmd+=(-map "${BUILD_DIR}/bootcfg/EFI/BOOT/grub.cfg" /EFI/BOOT/grub.cfg)
     fi
-    cmd+=(-volid "SYNCA_UTM_9" -commit -end)
+    cmd+=(-volid "$SYNCA_ISO_LABEL" -commit -end)
     "${cmd[@]}"
 }
 
