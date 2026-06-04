@@ -774,6 +774,10 @@ CONF
         fi
         firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
         firewall-cmd --permanent --zone=public --add-masquerade
+        if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$LAN_IF" -o "$nat_out_if" -j ACCEPT || true
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$nat_out_if" -o "$LAN_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT || true
+        fi
         firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$nat_out_if" -j MASQUERADE || true
     fi
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
