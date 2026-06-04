@@ -728,6 +728,7 @@ CONF
 
     install_sip_custom_firewalld_service
     systemctl enable --now firewalld
+    firewall-cmd --reload || true
     firewall-cmd --set-default-zone=public
     firewall-cmd --permanent --zone=public --add-service=ssh || true
     firewall-cmd --permanent --zone=public --add-service=sip-custom || true
