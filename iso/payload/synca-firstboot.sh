@@ -720,6 +720,23 @@ XML
     chmod 0644 /etc/firewalld/services/sip-custom.xml
 }
 
+install_wireguard_firewalld_service() {
+    # AlmaLinux 8 firewalld does not ship a built-in WireGuard service
+    # definition. The GUI still adds the explicit ListenPort, but keeping this
+    # service present preserves compatibility with the SyncA firewalld profile
+    # and the common service selector.
+    install -d -m 0755 /etc/firewalld/services
+    cat > /etc/firewalld/services/wireguard.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>WireGuard</short>
+  <description>WireGuard VPN</description>
+  <port protocol="udp" port="51820"/>
+</service>
+XML
+    chmod 0644 /etc/firewalld/services/wireguard.xml
+}
+
 configure_firewall() {
     cat > /etc/sysctl.d/99-synca-utm.conf <<'CONF'
 net.ipv4.ip_forward = 1
@@ -727,6 +744,7 @@ CONF
     sysctl --system >/dev/null
 
     install_sip_custom_firewalld_service
+    install_wireguard_firewalld_service
     systemctl enable --now firewalld
     firewall-cmd --reload || true
     firewall-cmd --set-default-zone=public

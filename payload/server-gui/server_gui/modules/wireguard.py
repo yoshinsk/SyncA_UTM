@@ -1474,7 +1474,8 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
     listen_port = parsed.get("interface", {}).get("listen_port")
     endpoint_zone = _preferred_wireguard_endpoint_zone()
     if endpoint_zone and listen_port:
-        changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "wireguard"])
+        if _firewalld_service_available("wireguard"):
+            changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "wireguard"])
         changed |= _firewalld_add(["--zone", endpoint_zone, "--add-port", f"{listen_port}/udp"])
 
     changed |= _firewalld_add(["--zone", "trusted", "--add-interface", iface])
@@ -1565,6 +1566,11 @@ def _firewalld_add(args: list[str]) -> bool:
     if "ALREADY_ENABLED" in text or "ZONE_ALREADY_SET" in text or "already" in text.lower():
         return False
     raise RuntimeError(text)
+
+
+def _firewalld_service_available(service: str) -> bool:
+    res = sudo_run(["firewall-cmd", "--get-services"], timeout=15)
+    return res.ok and service in set(res.stdout.split())
 
 
 def _add_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> bool:

@@ -66,6 +66,17 @@
       "modules": [
         "nf_conntrack_sip"
       ]
+    },
+    {
+      "name": "wireguard",
+      "short": "WireGuard",
+      "description": "WireGuard VPN endpoint service.",
+      "ports": [
+        {
+          "protocol": "udp",
+          "port": "51820"
+        }
+      ]
     }
   ],
   "default_zone": "public",

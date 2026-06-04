@@ -99,6 +99,7 @@ def default_repos(mirror: str, version: str) -> list[RepoSpec]:
         RepoSpec("al8-appstream", f"{base}/{version}/AppStream/x86_64/os", "AppStream", 20),
         RepoSpec("al8-powertools", f"{base}/{version}/PowerTools/x86_64/os", "SyncA-Extra", 30),
         RepoSpec("epel8", "https://download.fedoraproject.org/pub/epel/8/Everything/x86_64", "SyncA-Extra", 40),
+        RepoSpec("elrepo8", "https://elrepo.org/linux/elrepo/el8/x86_64", "SyncA-Extra", 50),
     ]
 
 

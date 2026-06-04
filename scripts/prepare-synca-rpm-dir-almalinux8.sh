@@ -21,7 +21,7 @@ podman run --rm --pull=missing \
     "$IMAGE" \
     bash -lc '
 set -euo pipefail
-dnf install -y dnf-plugins-core epel-release
+dnf install -y dnf-plugins-core epel-release elrepo-release
 dnf config-manager --set-enabled powertools >/dev/null 2>&1 || true
 dnf install -y createrepo_c curl
 PACKAGE_LIST="$1" OUTPUT_DIR="$2" TMP_DIR="$3" /work/scripts/prepare-synca-rpm-dir.sh
