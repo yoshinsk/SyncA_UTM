@@ -1,4 +1,7 @@
-"""Flask application factory for server-gui."""
+"""payload/server-gui/server_gui/app.py
+
+Flask application factory for the SyncA UTM local server-gui.
+"""
 from __future__ import annotations
 
 import logging
@@ -38,7 +41,9 @@ def create_app(config_dir: str | None = None) -> Flask:
     app.config["CONFIG_DIR"] = config_dir_path
     app.config["SECRET_KEY"] = _load_or_create_secret(config_dir_path)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+    # Central SSO starts from another site and then redirects back into this
+    # GUI, so the session cookie must be usable on top-level navigation.
+    app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SERVER_GUI_SESSION_SAMESITE", "Lax")
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SERVER_GUI_INSECURE_COOKIE", "0") != "1"
     # Allow up to 50 MiB so the backup restore upload endpoint works.
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
