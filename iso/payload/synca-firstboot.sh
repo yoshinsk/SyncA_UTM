@@ -740,6 +740,8 @@ XML
 configure_firewall() {
     cat > /etc/sysctl.d/99-synca-utm.conf <<'CONF'
 net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 CONF
     sysctl --system >/dev/null
 

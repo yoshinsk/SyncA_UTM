@@ -23,7 +23,7 @@ from flask import Blueprint, Flask, current_app, jsonify, render_template, reque
 
 from ..auth import csrf_protect, login_required
 from ..config_store import ConfigStore
-from ..shell import sudo_run
+from ..shell import run, sudo_run
 from ..validators import ValidationError, validate_identifier
 
 logger = logging.getLogger(__name__)
@@ -699,6 +699,8 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
 
     if not local_remote_pairs and not remote_endpoints:
         return
+    if local_remote_pairs:
+        _ensure_ipsec_forwarding_sysctls()
 
     active = sudo_run(["systemctl", "is-active", "firewalld"], timeout=15)
     if not active.ok or active.stdout.strip() != "active":
@@ -737,6 +739,38 @@ def _extract_ipv4_networks(value: str) -> list[str]:
         if isinstance(net, ipaddress.IPv4Network):
             out.append(str(net))
     return out
+
+
+def _ensure_ipsec_forwarding_sysctls() -> None:
+    """Disable reverse path filtering for policy-based site-to-site IPsec."""
+    content = (
+        "# Managed by server-gui for SyncA UTM policy-based IPsec.\n"
+        "net.ipv4.ip_forward = 1\n"
+        "net.ipv4.conf.all.rp_filter = 0\n"
+        "net.ipv4.conf.default.rp_filter = 0\n"
+    )
+    write = sudo_run(["tee", "/etc/sysctl.d/99-synca-utm-ipsec.conf"], stdin=content, timeout=15)
+    if not write.ok:
+        raise RuntimeError(_strip_noise(write.stderr or write.stdout))
+    sudo_run(["chmod", "0644", "/etc/sysctl.d/99-synca-utm-ipsec.conf"], timeout=15)
+
+    settings = [
+        "net.ipv4.ip_forward=1",
+        "net.ipv4.conf.all.rp_filter=0",
+        "net.ipv4.conf.default.rp_filter=0",
+    ]
+    links = run(["ip", "-o", "link", "show"], timeout=15)
+    if links.ok:
+        for line in links.stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) >= 2:
+                ifname = parts[1].strip().split("@", 1)[0]
+                if ifname and re.match(r"^[A-Za-z0-9_.:-]+$", ifname):
+                    settings.append(f"net.ipv4.conf.{ifname}.rp_filter=0")
+    for setting in settings:
+        result = sudo_run(["sysctl", "-w", setting], timeout=15)
+        if not result.ok and ".rp_filter=" not in setting:
+            raise RuntimeError(_strip_noise(result.stderr or result.stdout))
 
 
 def _extract_ipv4_addresses(value: str) -> list[str]:
