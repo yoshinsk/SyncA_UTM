@@ -713,6 +713,9 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
         for endpoint in remote_endpoints:
             changed |= _firewalld_add(["--zone", endpoint_zone, "--add-source", endpoint])
 
+    if local_remote_pairs:
+        changed |= _firewalld_remove(["--zone", "public", "--remove-masquerade"])
+
     for local_net, remote_net in sorted(local_remote_pairs):
         changed |= _firewalld_add(["--zone", "trusted", "--add-source", remote_net])
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {local_net} -d {remote_net} -j ACCEPT")
@@ -808,6 +811,18 @@ def _firewalld_add(args: list[str]) -> bool:
         return True
     already_enabled = "ALREADY_ENABLED" in text or "already enabled" in text.lower()
     if already_enabled:
+        return False
+    raise RuntimeError(text)
+
+
+def _firewalld_remove(args: list[str]) -> bool:
+    """Run a permanent firewalld remove operation and report whether reload is needed."""
+    res = sudo_run(["firewall-cmd", "--permanent", *args], timeout=30)
+    text = _strip_noise(res.stderr or res.stdout)
+    if res.ok:
+        return True
+    already_disabled = "NOT_ENABLED" in text or "not enabled" in text.lower()
+    if already_disabled:
         return False
     raise RuntimeError(text)
 
