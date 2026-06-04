@@ -9,6 +9,7 @@ SYNC_DIR="/etc/synca"
 BACKTITLE="SyncA UTM initial setup"
 FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
 TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
+SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"
 export TERM="${TERM:-linux}"
 
 quiet_firstboot_console() {
@@ -298,6 +299,15 @@ cidr_prefix() {
     printf '%s' "${1#*/}"
 }
 
+cidr_network() {
+    python3 - "$1" <<'PY' 2>/dev/null || printf '%s' "$1"
+import ipaddress
+import sys
+
+print(ipaddress.ip_network(sys.argv[1], strict=False))
+PY
+}
+
 cidr_netmask() {
     # Converts common IPv4 CIDR prefixes used by appliance LANs.
     case "$(cidr_prefix "$1")" in
@@ -395,6 +405,15 @@ collect_auto_safe_config() {
     DDNS_DOMAIN="ddnsft.com"
 }
 
+update_branch() {
+    local branch="${SYNCA_UPDATE_BRANCH:-$SYNCA_DEFAULT_UPDATE_BRANCH}"
+    if [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+        printf '%s' "$branch"
+    else
+        printf '%s' "main"
+    fi
+}
+
 write_install_env() {
     install -d -m 0700 "$SYNC_DIR"
     cat > "${SYNC_DIR}/install.env" <<ENV
@@ -479,9 +498,10 @@ configure_network() {
 }
 
 write_server_gui_config() {
-    local lan_ip endpoint_host netmask
+    local lan_ip endpoint_host netmask update_branch_value
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
+    update_branch_value="$(update_branch)"
     endpoint_host="${DDNS_LEFT}.${DDNS_DOMAIN}"
     if [[ -z "$DDNS_LEFT" ]]; then
         endpoint_host="$lan_ip"
@@ -589,10 +609,10 @@ JSON
 {"backends": [], "vhosts": []}
 JSON
 
-    cat > "${CONFIG_DIR}/admin.json" <<'JSON'
+    cat > "${CONFIG_DIR}/admin.json" <<JSON
 {
   "github_url": "https://github.com/yoshinsk/SyncA_UTM",
-  "branch": "main",
+  "branch": "${update_branch_value}",
   "installed_sha": null,
   "last_check_at": null,
   "last_check_ok": null,
@@ -720,14 +740,35 @@ XML
     chmod 0644 /etc/firewalld/services/sip-custom.xml
 }
 
+install_wireguard_firewalld_service() {
+    # AlmaLinux 8 firewalld does not ship a built-in WireGuard service
+    # definition. The GUI still adds the explicit ListenPort, but keeping this
+    # service present preserves compatibility with the SyncA firewalld profile
+    # and the common service selector.
+    install -d -m 0755 /etc/firewalld/services
+    cat > /etc/firewalld/services/wireguard.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>WireGuard</short>
+  <description>WireGuard VPN</description>
+  <port protocol="udp" port="51820"/>
+</service>
+XML
+    chmod 0644 /etc/firewalld/services/wireguard.xml
+}
+
 configure_firewall() {
     cat > /etc/sysctl.d/99-synca-utm.conf <<'CONF'
 net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 CONF
     sysctl --system >/dev/null
 
     install_sip_custom_firewalld_service
+    install_wireguard_firewalld_service
     systemctl enable --now firewalld
+    firewall-cmd --reload || true
     firewall-cmd --set-default-zone=public
     firewall-cmd --permanent --zone=public --add-service=ssh || true
     firewall-cmd --permanent --zone=public --add-service=sip-custom || true
@@ -754,8 +795,14 @@ CONF
             firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p udp --dport "${WG_PORT}" -j ACCEPT || true
         fi
         firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
-        firewall-cmd --permanent --zone=public --add-masquerade
-        firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$nat_out_if" -j MASQUERADE || true
+        firewall-cmd --permanent --zone=public --remove-masquerade || true
+        if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$LAN_IF" -o "$nat_out_if" -j ACCEPT || true
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$nat_out_if" -o "$LAN_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT || true
+            firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -s "$(cidr_network "$LAN_CIDR")" -o "$nat_out_if" -j MASQUERADE || true
+        else
+            firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1 -o "$nat_out_if" -j MASQUERADE || true
+        fi
     fi
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" && "$WAN_MODE" == "pppoe" ]]; then
         firewall-cmd --permanent --direct --add-rule ipv4 mangle FORWARD 0 -o ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true

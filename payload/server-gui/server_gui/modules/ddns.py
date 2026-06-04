@@ -78,6 +78,8 @@ SMTP_USER = os.environ.get("SYNCA_DDNS_PIN_SMTP_USER", "")
 SMTP_PASS = os.environ.get("SYNCA_DDNS_PIN_SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SYNCA_DDNS_PIN_SMTP_FROM", PIN_RECIPIENT)
 SMTP_SSL = os.environ.get("SYNCA_DDNS_PIN_SMTP_SSL", "1") not in ("0", "false", "False")
+DDNSFT_AUTH_USER = os.environ.get("SYNCA_DDNSFT_AUTH_USER", "")
+DDNSFT_AUTH_PASS = os.environ.get("SYNCA_DDNSFT_AUTH_PASS", "")
 
 # Built-in presets. Selecting one auto-fills the provider form. Credentials
 # baked in here are *defaults* — the admin can override them via the API once
@@ -88,9 +90,9 @@ _PRESETS: dict = {
         "label": "ddnsft.com",
         "template": "https://update.ddnsft.com/update/update.php?host={account}&dm={domain}&ip={ip}",
         "domain": "ddnsft.com",
-        "auth_user": "",
-        "auth_pass": "",
-        "hide_auth": False,
+        "auth_user": DDNSFT_AUTH_USER,
+        "auth_pass": DDNSFT_AUTH_PASS,
+        "hide_auth": bool(DDNSFT_AUTH_USER and DDNSFT_AUTH_PASS),
     },
     "dyn": {
         "label": "DynDNS 互換",

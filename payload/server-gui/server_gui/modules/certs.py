@@ -133,7 +133,7 @@ def issue_certificate():
     finally:
         _close_http_for_acme(firewall_state)
     applied = None
-    if res.ok and bool(payload.get("apply_to_gui", True)):
+    if res.ok and bool(payload.get("apply_to_gui", False)):
         applied = _apply_gui_certificate(fqdns[0])
     return jsonify({
         "ok": res.ok,
@@ -185,6 +185,7 @@ def renew_certificate():
 def list_certificates():
     """Discover and parse available certificates."""
     certs: list[dict] = []
+    gui_cert = _current_gui_certificate()
     if LETSENCRYPT_LIVE.exists():
         # Skip the symlink-traversal "README" file inside live/
         for d in sorted(LETSENCRYPT_LIVE.iterdir()):
@@ -206,11 +207,17 @@ def list_certificates():
                 "not_after": None,
                 "sans": [],
                 "days_remaining": None,
+                "used_by_gui": False,
             }
             if info:
                 entry.update(info)
+            entry["used_by_gui"] = (
+                bool(gui_cert)
+                and gui_cert.get("cert_path") == entry["cert_path"]
+                and gui_cert.get("key_path") == entry["key_path"]
+            )
             certs.append(entry)
-    return jsonify({"certificates": certs})
+    return jsonify({"certificates": certs, "gui_certificate": gui_cert})
 
 
 def _ensure_letsencrypt_hooks() -> dict:
@@ -429,6 +436,23 @@ conf.write_text(text, encoding="utf-8")
         "key_path": str(key),
         "output": (test.stdout + test.stderr + reload_res.stdout + reload_res.stderr).strip(),
     }
+
+
+def _current_gui_certificate() -> dict | None:
+    """Return the certificate paths currently configured for the 4444 GUI vhost."""
+    if not GUI_NGINX_CONF.exists():
+        return None
+    try:
+        text = GUI_NGINX_CONF.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    cert_match = re.search(r"^\s*ssl_certificate\s+([^;]+);", text, flags=re.M)
+    key_match = re.search(r"^\s*ssl_certificate_key\s+([^;]+);", text, flags=re.M)
+    if not cert_match or not key_match:
+        return None
+    cert_path = cert_match.group(1).strip().strip('"').strip("'")
+    key_path = key_match.group(1).strip().strip('"').strip("'")
+    return {"cert_path": cert_path, "key_path": key_path}
 
 
 def _extract_cn(rdn_string: str) -> str:

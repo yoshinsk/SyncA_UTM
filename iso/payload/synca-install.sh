@@ -9,6 +9,7 @@ APP_ARCHIVE="${INSTALLER_DIR}/server-gui.tar.gz"
 WHEELHOUSE="${INSTALLER_DIR}/wheelhouse"
 WGUI_BINARY="${INSTALLER_DIR}/wireguard-ui"
 RPM_DIR="${INSTALLER_DIR}/rpms"
+SERVER_GUI_PYTHON="${SERVER_GUI_PYTHON:-python3}"
 
 require_root() {
     # The installer writes /opt, /etc, and systemd units.
@@ -52,7 +53,7 @@ install_server_gui() {
     chown -R root:root /opt/server-gui
     chmod 0755 /opt/server-gui
 
-    python3 -m venv /opt/server-gui/venv
+    "$SERVER_GUI_PYTHON" -m venv /opt/server-gui/venv
     if [[ -d "$WHEELHOUSE" ]] && compgen -G "$WHEELHOUSE/*.whl" >/dev/null; then
         /opt/server-gui/venv/bin/pip install --no-index --find-links "$WHEELHOUSE" \
             -r /opt/server-gui/requirements.txt
@@ -257,6 +258,7 @@ Group=root
 WorkingDirectory=/opt/server-gui
 Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/synca-installer/private/firstboot.env
 ExecStart=/opt/server-gui/venv/bin/gunicorn --bind 127.0.0.1:5010 --workers 2 --timeout 60 --access-logfile - --error-logfile - 'server_gui.app:create_app()'
 Restart=on-failure
 RestartSec=5
@@ -277,6 +279,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
+EnvironmentFile=-/opt/synca-installer/private/firstboot.env
 ExecStart=/opt/server-gui/bin/ddns-check
 StandardOutput=journal
 StandardError=journal

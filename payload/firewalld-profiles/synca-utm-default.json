@@ -66,6 +66,17 @@
       "modules": [
         "nf_conntrack_sip"
       ]
+    },
+    {
+      "name": "wireguard",
+      "short": "WireGuard",
+      "description": "WireGuard VPN endpoint service.",
+      "ports": [
+        {
+          "protocol": "udp",
+          "port": "51820"
+        }
+      ]
     }
   ],
   "default_zone": "public",
@@ -97,7 +108,7 @@
         "4444/tcp",
         "5011/tcp"
       ],
-      "masquerade": true,
+      "masquerade": false,
       "forward_ports": []
     },
     "public": {
@@ -106,7 +117,7 @@
         "${wan_interface}"
       ],
       "forward": true,
-      "masquerade": true
+      "masquerade": false
     },
     "trusted": {
       "target": "ACCEPT",
@@ -197,7 +208,7 @@
       "table": "nat",
       "chain": "POSTROUTING",
       "priority": 1,
-      "args": "-o ${wan_interface} -j MASQUERADE"
+      "args": "-s ${lan_cidr} -o ${wan_interface} -j MASQUERADE"
     },
     {
       "ipv": "ipv4",
