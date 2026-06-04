@@ -43,6 +43,7 @@ SYNCA_PRIVATE_SMTP_DROPIN="${SYNCA_PRIVATE_SMTP_DROPIN:-}"
 SYNCA_PRIVATE_FIRSTBOOT_ENV="${SYNCA_PRIVATE_FIRSTBOOT_ENV:-}"
 SYNCA_INITIAL_ADMIN_USER="${SYNCA_INITIAL_ADMIN_USER:-}"
 SYNCA_INITIAL_ADMIN_PASSWORD="${SYNCA_INITIAL_ADMIN_PASSWORD:-}"
+SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -73,6 +74,10 @@ prepare_workspace() {
     fi
     if [[ ! -f "$KICKSTART_FILE" ]]; then
         echo "Kickstart file not found: $KICKSTART_FILE" >&2
+        exit 1
+    fi
+    if [[ ! "$SYNCA_DEFAULT_UPDATE_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+        echo "invalid SYNCA_DEFAULT_UPDATE_BRANCH: $SYNCA_DEFAULT_UPDATE_BRANCH" >&2
         exit 1
     fi
     mkdir -p "$BUILD_DIR" "$(dirname "$OUTPUT_ISO")"
@@ -155,6 +160,19 @@ PY
         "${BUILD_DIR}/payload/synca/synca-install.sh"
     install -m 0755 "${ROOT_DIR}/iso/payload/synca-firstboot.sh" \
         "${BUILD_DIR}/payload/synca/synca-firstboot.sh"
+    python3 - "${BUILD_DIR}/payload/synca/synca-firstboot.sh" "$SYNCA_DEFAULT_UPDATE_BRANCH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+branch = sys.argv[2]
+old = 'SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"'
+new = f'SYNCA_DEFAULT_UPDATE_BRANCH="${{SYNCA_DEFAULT_UPDATE_BRANCH:-{branch}}}"'
+text = path.read_text(encoding="utf-8")
+if old not in text:
+    raise SystemExit("default update branch marker not found")
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
     mkdir -p "${BUILD_DIR}/payload/synca/firewalld-profiles"
     install -m 0644 "${ROOT_DIR}/payload/firewalld-profiles/synca-utm-default.json" \
         "${BUILD_DIR}/payload/synca/firewalld-profiles/synca-utm-default.json"

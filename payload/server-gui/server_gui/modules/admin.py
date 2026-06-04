@@ -35,6 +35,7 @@ import datetime as _dt
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -61,6 +62,7 @@ INSTALL_DIR = Path("/opt/server-gui")
 SERVER_GUI_PKG = INSTALL_DIR / "server_gui"
 SERVER_GUI_BIN = INSTALL_DIR / "bin"
 DEFAULT_GITHUB_URL = "https://github.com/yoshinsk/SyncA_UTM"
+DEFAULT_GITHUB_BRANCH = os.environ.get("SYNCA_UPDATE_BRANCH", "main").strip() or "main"
 
 # Match the GitHub URL formats we accept. Allow optional .git suffix and
 # optional trailing slash. https only.
@@ -89,7 +91,7 @@ def _store() -> ConfigStore:
 def _default() -> dict:
     return {
         "github_url": DEFAULT_GITHUB_URL,
-        "branch": "main",
+        "branch": DEFAULT_GITHUB_BRANCH,
         "installed_sha": "",
         "last_check_at": None,
         "latest_sha": "",

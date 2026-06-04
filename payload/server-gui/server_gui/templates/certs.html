@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}証明書 — SyncA UTM{% endblock %}
+{% block title %}証明書 - SyncA UTM{% endblock %}
 {% block content %}
 
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -28,10 +28,11 @@
                         <th>名前</th>
                         <th>Subject (CN)</th>
                         <th>SAN</th>
-                        <th>発行元</th>
+                        <th>発行者</th>
                         <th>有効期限</th>
                         <th>残日数</th>
                         <th>パス</th>
+                        <th>利用</th>
                     </tr>
                 </thead>
                 <tbody id="cert-tbody"></tbody>
@@ -40,7 +41,6 @@
     </div>
 </div>
 
-<!-- Issue cert modal -->
 <div class="modal fade" id="issue-modal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
@@ -51,11 +51,11 @@
             <div class="modal-body">
                 <div class="alert alert-warning small">
                     <i class="bi bi-exclamation-triangle-fill"></i>
-                    <strong>注意:</strong>
+                    <strong>注意</strong>
                     <ul class="mb-0 mt-1">
-                        <li>FQDN は外部 DNS で <strong>このサーバの公開 IP に解決されている</strong>必要があります。</li>
-                        <li><strong>standalone</strong>: certbot が 80 番を一時的に bind します。事前に Firewall で 80/tcp を開放、nginx が 80 番を占有していないこと。</li>
-                        <li><strong>webroot</strong>: 既存 nginx の 80 番 vhost が <code>/.well-known/acme-challenge</code> を <code>/var/www/letsencrypt</code> から配信する設定済みのとき。</li>
+                        <li>FQDN は外部 DNS でこのサーバーの公開 IP に解決されている必要があります。</li>
+                        <li>standalone は nginx を一時停止するため、GUI からの実行時は webroot に自動切替します。</li>
+                        <li>webroot は <code>/.well-known/acme-challenge</code> を <code>/var/www/letsencrypt</code> から配信します。</li>
                     </ul>
                 </div>
                 <div class="mb-3">
@@ -68,7 +68,7 @@
                 </div>
                 <div class="row g-3 mb-3">
                     <div class="col-md-6">
-                        <label class="form-label">取得方法</label>
+                        <label class="form-label">取得方式</label>
                         <select id="iss-method" class="form-select">
                             <option value="webroot">webroot</option>
                             <option value="standalone">standalone</option>
@@ -82,7 +82,13 @@
                 <div class="form-check">
                     <input id="iss-staging" type="checkbox" class="form-check-input">
                     <label class="form-check-label" for="iss-staging">
-                        staging (テスト用 — 本番取得前の動作確認に使用)
+                        staging (テスト用。実運用前の動作確認に使用)
+                    </label>
+                </div>
+                <div class="form-check mt-2">
+                    <input id="iss-apply-gui" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="iss-apply-gui">
+                        取得後に WEB GUI (4444) で使用する
                     </label>
                 </div>
 
@@ -101,7 +107,6 @@
     </div>
 </div>
 
-<!-- Renew modal -->
 <div class="modal fade" id="renew-modal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
@@ -110,9 +115,9 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <p class="small text-secondary">通常は <code>certbot</code> の systemd timer が自動で更新します。手動更新は以下で。</p>
+                <p class="small text-secondary">通常は certbot の systemd timer が自動更新します。手動更新は以下で実行できます。</p>
                 <div class="mb-3">
-                    <label class="form-label">対象 (空欄=全証明書)</label>
+                    <label class="form-label">対象 (空欄で全証明書)</label>
                     <select id="rnw-name" class="form-select"></select>
                 </div>
                 <div class="form-check mb-2">
@@ -159,6 +164,7 @@ function openIssueModal() {
     document.getElementById('iss-method').value = 'webroot';
     document.getElementById('iss-webroot-wrap').style.display = 'none';
     document.getElementById('iss-staging').checked = false;
+    document.getElementById('iss-apply-gui').checked = false;
     document.getElementById('iss-result').classList.add('d-none');
     document.getElementById('iss-output').textContent = '';
     issueModal.show();
@@ -171,8 +177,9 @@ async function issueCert() {
         method: document.getElementById('iss-method').value,
         webroot: document.getElementById('iss-webroot').value.trim(),
         staging: document.getElementById('iss-staging').checked,
+        apply_to_gui: document.getElementById('iss-apply-gui').checked,
     };
-    if (!payload.fqdns || !payload.email) return toast('FQDN とメールは必須', true);
+    if (!payload.fqdns || !payload.email) return toast('FQDN とメールを入力してください', true);
     document.getElementById('iss-submit').disabled = true;
     const res = await api.send('/certs/api/issue', 'POST', payload);
     document.getElementById('iss-submit').disabled = false;
@@ -181,10 +188,10 @@ async function issueCert() {
     document.getElementById('iss-output').textContent =
         `${res.warning ? res.warning + '\n\n' : ''}$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
     if (res.ok) {
-        toast('取得しました');
+        toast('証明書を取得しました');
         refresh();
     } else {
-        toast('certbot 失敗', true);
+        toast('certbot が失敗しました', true);
     }
 }
 
@@ -211,15 +218,15 @@ async function renewCert() {
     document.getElementById('rnw-output').textContent =
         `$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
     if (res.ok) {
-        toast(payload.dry_run ? 'dry-run 完了' : '更新しました');
+        toast(payload.dry_run ? 'dry-run が完了しました' : '証明書を更新しました');
         refresh();
     } else {
-        toast('certbot 失敗', true);
+        toast('certbot が失敗しました', true);
     }
 }
 
 function daysBadge(days) {
-    if (days === null || days === undefined) return '<span class="text-secondary">—</span>';
+    if (days === null || days === undefined) return '<span class="text-secondary">-</span>';
     let cls = 'bg-success-subtle text-success-emphasis';
     if (days < 7)        cls = 'bg-danger-subtle text-danger-emphasis';
     else if (days < 30)  cls = 'bg-warning-subtle text-warning-emphasis';
@@ -235,20 +242,48 @@ async function refresh() {
     const certs = data.certificates || [];
     currentCerts = certs;
     const tbody = document.getElementById('cert-tbody');
-    tbody.innerHTML = certs.length === 0
-        ? '<tr><td colspan="7" class="text-center text-secondary py-4">証明書未検出</td></tr>'
-        : certs.map(c => `
+    if (certs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-4">証明書は見つかりませんでした</td></tr>';
+        return;
+    }
+    tbody.innerHTML = certs.map(c => {
+        const guiBadge = c.used_by_gui
+            ? '<span class="badge bg-primary-subtle text-primary-emphasis ms-1">WEB GUI</span>'
+            : '';
+        const action = c.used_by_gui
+            ? '<span class="text-secondary small">使用中</span>'
+            : `<button class="btn btn-outline-primary btn-sm" onclick="applyGuiCert('${escapeJs(c.name)}')">WEB GUIで使用</button>`;
+        return `
             <tr>
                 <td class="fw-semibold">${escapeHtml(c.name)}
                     <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${escapeHtml(c.source)}</span>
+                    ${guiBadge}
                 </td>
-                <td class="font-monospace small">${escapeHtml(c.subject || '—')}</td>
-                <td class="font-monospace small">${(c.sans || []).map(escapeHtml).join('<br>') || '—'}</td>
-                <td class="font-monospace small">${escapeHtml(c.issuer || '—')}</td>
-                <td class="font-monospace small">${escapeHtml(c.not_after || '—')}</td>
+                <td class="font-monospace small">${escapeHtml(c.subject || '-')}</td>
+                <td class="font-monospace small">${(c.sans || []).map(escapeHtml).join('<br>') || '-'}</td>
+                <td class="font-monospace small">${escapeHtml(c.issuer || '-')}</td>
+                <td class="font-monospace small">${escapeHtml(c.not_after || '-')}</td>
                 <td>${daysBadge(c.days_remaining)}</td>
                 <td class="font-monospace small text-secondary text-break">${escapeHtml(c.cert_path)}</td>
-            </tr>`).join('');
+                <td>${action}</td>
+            </tr>`;
+    }).join('');
+}
+
+async function applyGuiCert(name) {
+    if (!confirm(`${name} を WEB GUI (4444) の証明書として使用しますか?`)) return;
+    const res = await api.send('/certs/api/apply-gui', 'POST', { name });
+    if (!res) return;
+    if (res.ok) {
+        toast('WEB GUI 証明書を更新しました');
+        refresh();
+    } else {
+        toast(res.error || '証明書の適用に失敗しました', true);
+    }
+}
+
+function escapeJs(s) {
+    return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
 }
 
 refresh();

@@ -9,6 +9,7 @@ SYNC_DIR="/etc/synca"
 BACKTITLE="SyncA UTM initial setup"
 FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
 TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
+SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"
 export TERM="${TERM:-linux}"
 
 quiet_firstboot_console() {
@@ -404,6 +405,15 @@ collect_auto_safe_config() {
     DDNS_DOMAIN="ddnsft.com"
 }
 
+update_branch() {
+    local branch="${SYNCA_UPDATE_BRANCH:-$SYNCA_DEFAULT_UPDATE_BRANCH}"
+    if [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+        printf '%s' "$branch"
+    else
+        printf '%s' "main"
+    fi
+}
+
 write_install_env() {
     install -d -m 0700 "$SYNC_DIR"
     cat > "${SYNC_DIR}/install.env" <<ENV
@@ -488,9 +498,10 @@ configure_network() {
 }
 
 write_server_gui_config() {
-    local lan_ip endpoint_host netmask
+    local lan_ip endpoint_host netmask update_branch_value
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
+    update_branch_value="$(update_branch)"
     endpoint_host="${DDNS_LEFT}.${DDNS_DOMAIN}"
     if [[ -z "$DDNS_LEFT" ]]; then
         endpoint_host="$lan_ip"
@@ -598,10 +609,10 @@ JSON
 {"backends": [], "vhosts": []}
 JSON
 
-    cat > "${CONFIG_DIR}/admin.json" <<'JSON'
+    cat > "${CONFIG_DIR}/admin.json" <<JSON
 {
   "github_url": "https://github.com/yoshinsk/SyncA_UTM",
-  "branch": "main",
+  "branch": "${update_branch_value}",
   "installed_sha": null,
   "last_check_at": null,
   "last_check_ok": null,
