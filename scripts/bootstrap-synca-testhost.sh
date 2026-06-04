@@ -178,6 +178,38 @@ JSON
 }
 JSON
 
+    SYNCA_CONFIG_DIR="/etc/server-gui" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+central_url = os.environ.get("SYNCA_CENTRAL_URL", "https://nsksys.com/syncautm/admin").strip().rstrip("/")
+enrollment_token = os.environ.get("SYNCA_CENTRAL_ENROLLMENT_TOKEN", "").strip()
+enabled = os.environ.get("SYNCA_CENTRAL_ENABLED", "1") not in ("0", "false", "False", "no", "No")
+version_id = ""
+try:
+    for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+        if line.startswith("VERSION_ID="):
+            version_id = line.split("=", 1)[1].strip().strip('"')
+            break
+except OSError:
+    pass
+
+path = Path(os.environ["SYNCA_CONFIG_DIR"]) / "central.json"
+data = {
+    "enabled": enabled,
+    "central_url": central_url,
+    "device_id": "",
+    "api_secret": "",
+    "sso_secret": "",
+    "enrollment_token": enrollment_token,
+    "gui_url": os.environ.get("SYNCA_CENTRAL_GUI_URL", "").strip(),
+    "family": os.environ.get("SYNCA_CENTRAL_FAMILY", version_id).strip(),
+    "backup_enabled": os.environ.get("SYNCA_CENTRAL_BACKUP_ENABLED", "1") not in ("0", "false", "False", "no", "No"),
+}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+
     chmod 0600 /etc/server-gui/*.json
 }
 
@@ -382,6 +414,61 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
+
+    cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 状態送信
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/server-gui/bin/central-agent --report
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/synca-central-report.timer <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 状態送信タイマー
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    cat > /etc/systemd/system/synca-central-backup.service <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 バックアップ送信
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/server-gui/bin/central-agent --backup-upload
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/synca-central-backup.timer <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 バックアップ送信タイマー
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
 }
 
 configure_firewall_for_bootstrap() {
@@ -408,6 +495,11 @@ start_services() {
     systemctl daemon-reload
     systemctl enable --now server-gui nginx wgui-worker
     systemctl enable server-gui-ddns.timer server-gui-geoip.timer
+    local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
+    local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
+    if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then
+        systemctl enable --now synca-central-report.timer synca-central-backup.timer
+    fi
     nginx -t
 }
 

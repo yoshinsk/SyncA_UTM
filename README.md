@@ -1,119 +1,116 @@
 # SyncA UTM
 
-SyncA UTM is an AlmaLinux 9 based UTM/router appliance project. It provides a local management GUI for network, firewall, VPN, DNS/DHCP, DDNS, certificates, backup, fail2ban, and Nginx reverse proxy operations.
+SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライアンスです。ローカル管理 GUI からネットワーク、ファイアウォール、VPN、DNS/DHCP、DDNS、証明書、バックアップ、fail2ban、Nginx リバースプロキシを管理します。
 
-## Status
+このリポジトリは、既存 SyncA UTM の公開アップデート元であり、オフラインインストール ISO を作成するためのソースツリーでもあります。
 
-This repository is prepared as the public update source for SyncA UTM appliances and as the source tree for building an installable offline ISO.
+## 検証済み基準
 
-Validated target baseline:
+- AlmaLinux 9.x、現時点では AlmaLinux 9.8 で検証
+- `AlmaLinux-9-latest-x86_64-dvd.iso` を基にしたオフラインインストール ISO
+- 初回起動時のコンソールセットアップ
+- WAN / LAN からの管理 GUI 初期アクセス
+- SyncA UTM 集中管理エージェントの 9.8 系 / 8.10 系対応
 
-- AlmaLinux 9.x, currently validated on AlmaLinux 9.8.
-- Offline install ISO based on `AlmaLinux-9-latest-x86_64-dvd.iso`.
-- First boot console setup for administrator, WAN, LAN, DHCP, WireGuard, and DDNS host label.
-- Initial access to the management GUI from both WAN and LAN when firewalld policy allows it.
+## 主な機能
 
-## Main Features
+### ネットワーク
 
-### Network
+- WAN の DHCP / 固定 IP / PPPoE
+- LAN アドレスと DHCP 範囲の設定
+- 静的ルート
+- WAN / LAN のセカンダリ IP
+- VLAN タグ付きインターフェース
+- 複数 NIC のブリッジ構成
+- PPPoE MTU / MSS 調整
 
-- WAN modes: DHCP client, Static IP, and PPPoE.
-- LAN address and DHCP range setup.
-- Static routes.
-- Secondary IP addresses on WAN and LAN interfaces.
-- VLAN tagged interfaces.
-- Multi-NIC bridge setup with STP control for LAN switching use cases.
-- PPPoE MTU/MSS handling for black-hole avoidance.
+### ファイアウォール
 
-### Firewall
-
-- firewalld based routing and filtering.
-- NAT/masquerade for LAN to WAN internet access.
-- Country IP set preparation for Japan on first successful internet access.
-- Template based firewalld profiles for ISO installation.
-- GUI support for easier rule management, including custom rule preservation.
-- VPN tunnel creation can add required firewall allowances for peer networks.
+- firewalld によるルーティングとフィルタリング
+- LAN から WAN への NAT / masquerade
+- 日本向け country ipset の初回準備
+- ISO インストール用 firewalld プロファイル
+- GUI からのルール管理と手動ルール維持
+- VPN トンネル作成時の必要許可追加
 
 ### VPN
 
-- WireGuard server and client management.
-- strongSwan site-to-site IPsec management.
-- Automatic firewall opening for site-to-site peer networks where possible.
+- WireGuard サーバー / クライアント管理
+- strongSwan site-to-site IPsec 管理
+- peer ネットワーク向けファイアウォール許可の自動追加
 
-### DNS and DHCP
+### DNS / DHCP
 
-- dnsmasq based LAN DNS/DHCP.
-- DHCP options import and preview support.
-- Local DHCP scope management from the GUI.
+- dnsmasq ベースの LAN DNS / DHCP
+- DHCP オプションのインポートとプレビュー
+- GUI からのローカル DHCP スコープ管理
 
-### DDNS and Certificates
+### DDNS / 証明書
 
-- `ddnsft.com` DDNS host label management.
-- Existing host detection before registration.
-- 4 digit PIN based overwrite approval for existing DDNS host labels.
-- PIN email delivery through build-time or runtime SMTP configuration.
-- Let's Encrypt certificate issuance and renewal.
+- `ddnsft.com` の DDNS ホスト名管理
+- 既存ホスト検出
+- 4 桁 PIN による既存 DDNS ホスト上書き承認
+- SMTP 設定による PIN メール送信
+- Let's Encrypt 証明書発行と更新
 
-### Nginx Reverse Proxy and WAF
+### Nginx リバースプロキシ / WAF
 
-- Nginx SSL acceleration / reverse proxy management.
-- Let's Encrypt challenge path handling.
-- ModSecurity / WAF controls when the module is installed.
-- ISO package set includes the modules needed to avoid missing WAF dependency warnings.
-- Large XML upload support for Sophos import preview.
+- Nginx SSL 終端 / リバースプロキシ管理
+- Let's Encrypt challenge パス処理
+- ModSecurity / WAF 管理
+- Sophos インポートプレビュー用の大きな XML アップロード対応
 
 ### fail2ban
 
-- Public service discovery and jail synchronization.
-- Ban list display with reason where available.
-- Unban operation.
-- Move banned IP addresses into ignore IP.
-- Japanese status messages for unsupported automatic filters.
+- 公開サービス検出と jail 同期
+- Ban IP 一覧表示
+- Unban 操作
+- Ban IP の ignore IP への移動
 
-### Backup
+### バックアップ
 
-- Appliance backup from the GUI.
-- Default retention: 10 generations or 2 GiB total, deleting older backups first.
+- GUI からのアプライアンスバックアップ
+- 既定保持: 10 世代または合計 2 GiB
+- SyncA UTM 集中管理へのバックアップアップロード
 
-### Sophos SG UTM Import
+### Sophos SG UTM インポート
 
-- Sophos SG UTM XML import preview.
-- Remote access settings are intentionally excluded from automatic restoration.
-- Import preview maps supported settings into SyncA UTM forms:
-  - interfaces
-  - static routes
-  - DHCP server settings
-  - DHCP options
-  - site-to-site VPN values for strongSwan
-  - Nginx reverse proxy values
-  - DDNS related FQDN candidates
-  - certificates and private key material where useful
-- WebAdmin and local user X509 certificates are filtered out because they are not needed for SyncA UTM restoration.
+- Sophos SG UTM XML インポートプレビュー
+- インターフェース、静的ルート、DHCP、DHCP オプション、IPsec、Nginx リバースプロキシ、DDNS 候補、証明書情報の変換
+- WebAdmin 証明書とローカルユーザー X509 証明書は自動復元対象外
 
-## Repository Layout
+## リポジトリ構成
 
-- `payload/server-gui/`: SyncA UTM management GUI application and helper scripts.
-- `payload/firewalld-profiles/`: variable-based firewalld profile templates for ISO installation.
-- `iso/`: Kickstart and installer payload used by the offline ISO.
-- `scripts/`: bootstrap, verification, and ISO build scripts.
-- `docs/`: public design notes and ISO requirements.
+- `payload/server-gui/`: SyncA UTM 管理 GUI と補助スクリプト
+- `payload/firewalld-profiles/`: ISO インストール用 firewalld プロファイル
+- `iso/`: Kickstart とインストーラ payload
+- `scripts/`: bootstrap、検証、ISO ビルド用スクリプト
+- `docs/`: 設計メモと ISO 要件
 
-Local investigation artifacts, captured server state, credentials, private keys, logs, screenshots, generated bundles, and test outputs are intentionally excluded from Git.
+調査成果物、取得したサーバー状態、認証情報、秘密鍵、ログ、スクリーンショット、生成物、テスト出力は Git から除外します。
 
-## ISO Build
+## SyncA UTM 集中管理
 
-The public build path does not contain private SMTP, DDNS, certificate, VPN, or appliance credentials.
-
-Internal ISO builds can inject private SMTP settings at build time by passing a local systemd drop-in file through `SYNCA_PRIVATE_SMTP_DROPIN`. The drop-in is copied into the ISO payload and installed under:
-
-```text
-/etc/systemd/system/server-gui.service.d/30-ddns-pin-smtp.conf
-/etc/systemd/system/server-gui-ddns.service.d/30-ddns-pin-smtp.conf
-```
-
-Example build variables:
+新規出荷環境では、private firstboot 環境ファイルに次の値を含めます。
 
 ```bash
+SYNCA_CENTRAL_ENABLED=1
+SYNCA_CENTRAL_URL=https://nsksys.com/syncautm/admin
+SYNCA_CENTRAL_ENROLLMENT_TOKEN=<中央管理 .env の ENROLLMENT_TOKEN>
+```
+
+通常は `SYNCA_CENTRAL_ENABLED=1` です。公開 GitHub リポジトリには実トークンを入れません。初回起動後にインターネットへ接続されると、`central-agent` が集中管理の自動登録 API に接続し、端末別の `device_id`、`api_secret`、`sso_secret` を取得して `/etc/server-gui/central.json` に保存します。
+
+既存 SyncA UTM は通常アップデートで `server_gui` と `bin` が更新されます。更新後の GUI 起動時に `central_sso` が集中管理用 systemd タイマーと `central.json` を補完します。出荷時環境変数または手動インストーラで登録トークンが入っていれば、状態レポートとバックアップアップロードが開始されます。
+
+## ISO ビルド
+
+公開ビルド経路には SMTP、DDNS、証明書、VPN、集中管理登録トークンなどの秘密情報を含めません。
+
+内部 ISO ビルドでは、ビルドホスト上の private firstboot 環境ファイルを `SYNCA_PRIVATE_FIRSTBOOT_ENV` で渡します。このファイルに `SYNCA_CENTRAL_URL` と `SYNCA_CENTRAL_ENROLLMENT_TOKEN` を含めます。
+
+```bash
+SYNCA_PRIVATE_FIRSTBOOT_ENV=/root/synca-internal/firstboot.env \
 SYNCA_PRIVATE_SMTP_DROPIN=/root/synca-internal-smtp/server-gui-ddns-smtp.conf \
 RPM_DIR_SRC=/root/synca-install-repos \
 SYNC_PRUNE_DVD_REPOS=1 \
@@ -123,24 +120,22 @@ OUTPUT_ISO=/root/SyncA-UTM-AlmaLinux-9-internal.iso \
 ./scripts/build-synca-utm-iso.sh
 ```
 
-## Public Update Source
+## 公開アップデート元
 
-Installed appliances use this repository as their default update source:
+既存 SyncA UTM は既定で次の GitHub リポジトリをアップデート元にします。
 
 ```text
 https://github.com/yoshinsk/SyncA_UTM
 ```
 
-The management GUI checks the configured branch, downloads the GitHub archive, and updates the deployed `server_gui` package from `payload/server-gui/server_gui`.
+管理 GUI は設定されたブランチを確認し、GitHub アーカイブを取得して `payload/server-gui/` 配下の `server_gui` と `bin` を更新します。
 
-## Security
+## セキュリティ
 
-Do not commit appliance backups, `evidence/`, `/etc/server-gui`, WireGuard keys, IPsec PSKs, DDNS credentials, SMTP credentials, Let's Encrypt private keys, NetworkManager connection secrets, or server logs.
+アプライアンスバックアップ、`evidence/`、`/etc/server-gui`、WireGuard 鍵、IPsec PSK、DDNS 認証情報、SMTP 認証情報、Let's Encrypt 秘密鍵、NetworkManager 接続秘密情報、サーバーログはコミットしません。
 
-The `.gitignore` excludes generated ISO output and common private credential file types. Keep internal ISO-only materials outside the repository or under ignored local paths.
+`.gitignore` は生成 ISO と一般的な秘密情報ファイルを除外します。内部 ISO 専用ファイルはリポジトリ外、または ignore 済みローカルパスで管理します。
 
-If this repository was previously private and contained real appliance artifacts, rotate any credentials that were ever committed before making the repository public.
+## ライセンス
 
-## License
-
-License is currently proprietary unless a separate license file is added.
+別途ライセンスファイルが追加されない限り、ライセンスは proprietary です。

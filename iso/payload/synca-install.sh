@@ -225,7 +225,7 @@ DISPATCHER
 }
 
 install_private_overrides() {
-    # Internal ISO builds may ship private systemd drop-ins from the build host.
+    # 内部向けISOビルドではビルドホスト上のprivate systemd drop-inを同梱できる。
     # The public repository never stores these files.
     local smtp_dropin="${INSTALLER_DIR}/private/server-gui-ddns-smtp.conf"
     if [[ -f "$smtp_dropin" ]]; then
@@ -319,6 +319,61 @@ Description=Run server-gui GeoIP ipset refresh periodically
 [Timer]
 OnBootSec=3min
 OnUnitActiveSec=1w
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 状態送信
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/server-gui/bin/central-agent --report
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/synca-central-report.timer <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 状態送信タイマー
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    cat > /etc/systemd/system/synca-central-backup.service <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 バックアップ送信
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/server-gui/bin/central-agent --backup-upload
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/synca-central-backup.timer <<'UNIT'
+[Unit]
+Description=SyncA UTM 集中管理 バックアップ送信タイマー
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=20min
 Persistent=true
 
 [Install]
