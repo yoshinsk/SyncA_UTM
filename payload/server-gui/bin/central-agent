@@ -185,30 +185,30 @@ def service_states():
         active = run(["systemctl", "is-active", service], timeout=8)
         enabled = run(["systemctl", "is-enabled", service], timeout=8)
         states[service] = {
-            "active": active.stdout.strip() if active.stdout.strip() else "unknown",
-            "enabled": enabled.stdout.strip() if enabled.stdout.strip() else "unknown",
+            "active": active["stdout"].strip() if active["stdout"].strip() else "unknown",
+            "enabled": enabled["stdout"].strip() if enabled["stdout"].strip() else "unknown",
         }
     return states
 
 
 def fail2ban_status():
     status = run(["fail2ban-client", "status"], timeout=10)
-    result = {"installed": status.returncode != 127, "jails": [], "bans": [], "ban_count": 0}
-    if not status.ok:
-        result["error"] = status.stderr.strip() or status.stdout.strip()
+    result = {"installed": status["returncode"] != 127, "jails": [], "bans": [], "ban_count": 0}
+    if not status["ok"]:
+        result["error"] = status["stderr"].strip() or status["stdout"].strip()
         return result
     jail_line = ""
-    for line in status.stdout.splitlines():
+    for line in status["stdout"].splitlines():
         if "Jail list:" in line:
             jail_line = line.split("Jail list:", 1)[1].strip()
     jails = [j.strip() for j in jail_line.split(",") if j.strip()]
     result["jails"] = jails
     for jail in jails:
         detail = run(["fail2ban-client", "status", jail], timeout=10)
-        if not detail.ok:
+        if not detail["ok"]:
             continue
         banned = []
-        for line in detail.stdout.splitlines():
+        for line in detail["stdout"].splitlines():
             stripped = line.strip(" `|-")
             if stripped.startswith("Banned IP list:"):
                 banned = [ip for ip in stripped.split(":", 1)[1].strip().split() if ip]
@@ -256,8 +256,8 @@ def certificate_state():
         if not os.path.isfile(path):
             continue
         res = run(["openssl", "x509", "-in", path, "-noout", "-subject", "-enddate"], timeout=10)
-        item = {"path": path, "ok": res.ok}
-        for line in res.stdout.splitlines():
+        item = {"path": path, "ok": res["ok"]}
+        for line in res["stdout"].splitlines():
             if line.startswith("subject="):
                 item["subject"] = line.split("=", 1)[1].strip()
             if line.startswith("notAfter="):
@@ -272,8 +272,8 @@ def network_state():
     addresses = run(["ip", "-o", "-4", "addr", "show"], timeout=8)
     return {
         "public_ip": public_ip,
-        "routes": routes.stdout.strip().splitlines() if routes.ok else [],
-        "addresses": addresses.stdout.strip().splitlines() if addresses.ok else [],
+        "routes": routes["stdout"].strip().splitlines() if routes["ok"] else [],
+        "addresses": addresses["stdout"].strip().splitlines() if addresses["ok"] else [],
     }
 
 
@@ -466,7 +466,7 @@ def create_backup():
     ] + targets
     result = run(command, timeout=600)
     if not os.path.isfile(path):
-        raise RuntimeError("backup creation failed: {0} {1}".format(result.stdout, result.stderr))
+        raise RuntimeError("backup creation failed: {0} {1}".format(result["stdout"], result["stderr"]))
     os.chmod(path, 0o600)
     return path
 
