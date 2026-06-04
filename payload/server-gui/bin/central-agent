@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -35,6 +36,7 @@ CONFIG_PATH = os.environ.get("SYNCA_CENTRAL_CONFIG", "/etc/server-gui/central.js
 AGENT_STATE_DIR = "/var/lib/synca-central-agent"
 AGENT_BACKUP_DIR = os.path.join(AGENT_STATE_DIR, "backups")
 LOG_PATH = "/var/log/synca-central-agent.log"
+DEFAULT_PUBLIC_IP_CHECK_URL = "https://update.ddnsft.com/checkip.php"
 
 SERVICES = [
     "server-gui",
@@ -218,8 +220,26 @@ def fail2ban_status():
     return result
 
 
+def detect_public_ip(check_url):
+    candidates = []
+    if check_url:
+        candidates.append(check_url)
+    candidates.append(DEFAULT_PUBLIC_IP_CHECK_URL)
+    for url in candidates:
+        try:
+            response = urlrequest.urlopen(url, timeout=10)
+            body = response.read(256).decode("utf-8", "replace")
+        except Exception:
+            continue
+        match = re.search(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", body)
+        if match:
+            return match.group(0)
+    return ""
+
+
 def ddns_state():
     data = read_json("/etc/server-gui/ddns.json", {})
+    current_ip = data.get("current_ip") or detect_public_ip(data.get("check_url"))
     providers = []
     for provider in data.get("providers", []) or []:
         providers.append({
@@ -232,7 +252,8 @@ def ddns_state():
             "last_update": provider.get("last_update"),
         })
     return {
-        "current_ip": data.get("current_ip"),
+        "current_ip": current_ip,
+        "check_url": data.get("check_url") or DEFAULT_PUBLIC_IP_CHECK_URL,
         "last_check": data.get("last_check"),
         "last_error": data.get("last_error"),
         "providers": providers,
