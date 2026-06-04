@@ -324,6 +324,25 @@ cidr_netmask() {
     esac
 }
 
+dhcp_default_ip() {
+    local cidr="$1"
+    local offset="$2"
+    local fallback="$3"
+    python3 - "$cidr" "$offset" "$fallback" <<'PY' 2>/dev/null || printf '%s' "$fallback"
+import ipaddress
+import sys
+
+network = ipaddress.ip_network(sys.argv[1], strict=False)
+offset = int(sys.argv[2])
+fallback = sys.argv[3]
+candidate = ipaddress.ip_address(int(network.network_address) + offset)
+if candidate not in network or candidate == network.network_address or candidate == network.broadcast_address:
+    print(fallback)
+else:
+    print(candidate)
+PY
+}
+
 collect_config() {
     clear || true
     ui_message "Welcome" "This wizard configures SyncA UTM for first use.
@@ -369,8 +388,8 @@ You will select WAN/LAN interfaces, WAN connection method, administrator account
     esac
 
     LAN_CIDR="$(ui_input "LAN address" "LAN-side IP address in CIDR form." "172.17.17.1/24")"
-    DHCP_START="$(ui_input "LAN DHCP start" "First DHCP address for LAN clients." "172.17.17.10")"
-    DHCP_END="$(ui_input "LAN DHCP end" "Last DHCP address for LAN clients." "172.17.17.20")"
+    DHCP_START="$(ui_input "LAN DHCP start" "First DHCP address for LAN clients." "$(dhcp_default_ip "$LAN_CIDR" 10 "172.17.17.10")")"
+    DHCP_END="$(ui_input "LAN DHCP end" "Last DHCP address for LAN clients." "$(dhcp_default_ip "$LAN_CIDR" 20 "172.17.17.20")")"
     WG_ADDR="$(ui_input "WireGuard address" "WireGuard interface address in CIDR form." "10.252.1.1/24")"
     WG_PORT="$(ui_input "WireGuard port" "WireGuard UDP listen port." "51820")"
     DDNS_LEFT="$(ui_input "DDNS host label" "ddnsft.com host label only. Leave blank to skip initial DDNS registration." "")"
@@ -397,8 +416,8 @@ collect_auto_safe_config() {
     PPPOE_USER="${SYNCA_PPPOE_USER:-}"
     PPPOE_PASS="${SYNCA_PPPOE_PASS:-}"
     LAN_CIDR="${SYNCA_LAN_CIDR:-172.17.17.1/24}"
-    DHCP_START="${SYNCA_DHCP_START:-172.17.17.10}"
-    DHCP_END="${SYNCA_DHCP_END:-172.17.17.20}"
+    DHCP_START="${SYNCA_DHCP_START:-$(dhcp_default_ip "$LAN_CIDR" 10 "172.17.17.10")}"
+    DHCP_END="${SYNCA_DHCP_END:-$(dhcp_default_ip "$LAN_CIDR" 20 "172.17.17.20")}"
     WG_ADDR="${SYNCA_WG_ADDR:-10.252.1.1/24}"
     WG_PORT="${SYNCA_WG_PORT:-51820}"
     DDNS_LEFT="${SYNCA_DDNS_LEFT:-}"
