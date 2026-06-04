@@ -12,6 +12,7 @@ from .auth import auth_bp, login_required
 from .modules import admin as admin_module
 from .modules import backup as backup_module
 from .modules import certs as certs_module
+from .modules import central_sso as central_sso_module
 from .modules import ddns as ddns_module
 from .modules import dhcp as dhcp_module
 from .modules import dns as dns_module
@@ -64,6 +65,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     backup_module.register(app)
     sophos_import_module.register(app)
     admin_module.register(app)
+    central_sso_module.register(app)
 
     @app.route("/")
     @login_required

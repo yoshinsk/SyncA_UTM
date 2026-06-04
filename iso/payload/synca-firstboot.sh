@@ -622,6 +622,38 @@ JSON
   "last_apply_log": ""
 }
 JSON
+
+    SYNCA_CONFIG_DIR="$CONFIG_DIR" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+central_url = os.environ.get("SYNCA_CENTRAL_URL", "https://nsksys.com/syncautm/admin").strip().rstrip("/")
+enrollment_token = os.environ.get("SYNCA_CENTRAL_ENROLLMENT_TOKEN", "").strip()
+enabled = os.environ.get("SYNCA_CENTRAL_ENABLED", "1") not in ("0", "false", "False", "no", "No")
+version_id = ""
+try:
+    for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+        if line.startswith("VERSION_ID="):
+            version_id = line.split("=", 1)[1].strip().strip('"')
+            break
+except OSError:
+    pass
+
+path = Path(os.environ["SYNCA_CONFIG_DIR"]) / "central.json"
+data = {
+    "enabled": enabled,
+    "central_url": central_url,
+    "device_id": "",
+    "api_secret": "",
+    "sso_secret": "",
+    "enrollment_token": enrollment_token,
+    "gui_url": os.environ.get("SYNCA_CENTRAL_GUI_URL", "").strip(),
+    "family": os.environ.get("SYNCA_CENTRAL_FAMILY", version_id).strip(),
+    "backup_enabled": os.environ.get("SYNCA_CENTRAL_BACKUP_ENABLED", "1") not in ("0", "false", "False", "no", "No"),
+}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
     chmod 0600 "${CONFIG_DIR}"/*.json
 }
 
@@ -824,6 +856,12 @@ start_services() {
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable server-gui-ddns.timer server-gui-geoip.timer
         systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
+        local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
+        local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
+        if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then
+            systemctl enable synca-central-report.timer synca-central-backup.timer || true
+            systemctl start --no-block synca-central-report.timer synca-central-backup.timer || true
+        fi
         systemctl enable wg-quick@wg0 || true
         systemctl start --no-block wg-quick@wg0 || true
     fi

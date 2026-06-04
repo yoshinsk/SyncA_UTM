@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+"""agents/synca-central-agent.py
+
+Collect SyncA UTM status, upload signed reports, and upload backup archives.
+The script intentionally uses Python 3.6-compatible standard library APIs so
+the same file can run on AlmaLinux 8.10 and 9.8 systems.
+"""
+
+from __future__ import print_function
+
+import base64
+import datetime
+import glob
+import hashlib
+import hmac
+import json
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+try:
+    from urllib import request as urlrequest
+    from urllib import error as urlerror
+except ImportError:  # pragma: no cover
+    import urllib2 as urlrequest
+    import urllib2 as urlerror
+
+
+CONFIG_PATH = os.environ.get("SYNCA_CENTRAL_CONFIG", "/etc/server-gui/central.json")
+AGENT_STATE_DIR = "/var/lib/synca-central-agent"
+AGENT_BACKUP_DIR = os.path.join(AGENT_STATE_DIR, "backups")
+LOG_PATH = "/var/log/synca-central-agent.log"
+
+SERVICES = [
+    "server-gui",
+    "nginx",
+    "firewalld",
+    "fail2ban",
+    "dnsmasq",
+    "strongswan",
+    "wg-quick@wg0",
+    "server-gui-ddns.timer",
+    "server-gui-geoip.timer",
+]
+
+BACKUP_PATHS = [
+    "/etc/server-gui",
+    "/etc/nginx",
+    "/etc/dnsmasq.conf",
+    "/etc/dnsmasq.d",
+    "/etc/wireguard",
+    "/etc/firewalld",
+    "/etc/NetworkManager",
+    "/etc/fail2ban",
+    "/etc/letsencrypt",
+    "/etc/systemd/system/server-gui.service",
+    "/etc/systemd/system/server-gui-ddns.service",
+    "/etc/systemd/system/server-gui-ddns.timer",
+    "/etc/systemd/system/synca-central-report.service",
+    "/etc/systemd/system/synca-central-report.timer",
+    "/etc/systemd/system/synca-central-backup.service",
+    "/etc/systemd/system/synca-central-backup.timer",
+]
+
+
+def log(message):
+    directory = os.path.dirname(LOG_PATH)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    with open(LOG_PATH, "a") as handle:
+        handle.write("{0} {1}\n".format(datetime.datetime.utcnow().isoformat(), message))
+
+
+def load_config():
+    with open(CONFIG_PATH, "r") as handle:
+        data = json.load(handle)
+    if not data.get("enabled", False):
+        return data
+    if not data.get("central_url"):
+        raise RuntimeError("missing central config key: central_url")
+    data["central_url"] = data["central_url"].rstrip("/")
+    return data
+
+
+def save_config(config):
+    directory = os.path.dirname(CONFIG_PATH)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    tmp_path = CONFIG_PATH + ".tmp"
+    with open(tmp_path, "w") as handle:
+        json.dump(config, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.rename(tmp_path, CONFIG_PATH)
+
+
+def run(command, timeout=15):
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.time() + timeout
+        while proc.poll() is None:
+            if time.time() > deadline:
+                proc.kill()
+                return {"ok": False, "stdout": "", "stderr": "timeout", "returncode": -1}
+            time.sleep(0.1)
+        out, err = proc.communicate()
+        return {
+            "ok": proc.returncode == 0,
+            "stdout": out.decode("utf-8", "replace"),
+            "stderr": err.decode("utf-8", "replace"),
+            "returncode": proc.returncode,
+        }
+    except OSError as exc:
+        return {"ok": False, "stdout": "", "stderr": str(exc), "returncode": 127}
+
+
+def read_text(path):
+    try:
+        with open(path, "r") as handle:
+            return handle.read()
+    except IOError:
+        return ""
+
+
+def read_json(path, default):
+    try:
+        with open(path, "r") as handle:
+            return json.load(handle)
+    except Exception:
+        return default
+
+
+def os_release():
+    data = {}
+    for line in read_text("/etc/os-release").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip().strip('"')
+    return data
+
+
+def disk_usage(path):
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    used_percent = round((float(usage.used) / float(usage.total)) * 100.0, 1) if usage.total else 0
+    return {
+        "path": path,
+        "total": usage.total,
+        "used": usage.used,
+        "free": usage.free,
+        "used_percent": used_percent,
+    }
+
+
+def memory_info():
+    values = {}
+    for line in read_text("/proc/meminfo").splitlines():
+        if ":" not in line:
+            continue
+        key, raw = line.split(":", 1)
+        parts = raw.strip().split()
+        if parts:
+            values[key] = int(parts[0]) * 1024
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", 0)
+    return {
+        "total": total,
+        "available": available,
+        "used": total - available if total and available else None,
+        "used_percent": round(((total - available) / float(total)) * 100.0, 1) if total else None,
+    }
+
+
+def service_states():
+    states = {}
+    for service in SERVICES:
+        active = run(["systemctl", "is-active", service], timeout=8)
+        enabled = run(["systemctl", "is-enabled", service], timeout=8)
+        states[service] = {
+            "active": active.stdout.strip() if active.stdout.strip() else "unknown",
+            "enabled": enabled.stdout.strip() if enabled.stdout.strip() else "unknown",
+        }
+    return states
+
+
+def fail2ban_status():
+    status = run(["fail2ban-client", "status"], timeout=10)
+    result = {"installed": status.returncode != 127, "jails": [], "bans": [], "ban_count": 0}
+    if not status.ok:
+        result["error"] = status.stderr.strip() or status.stdout.strip()
+        return result
+    jail_line = ""
+    for line in status.stdout.splitlines():
+        if "Jail list:" in line:
+            jail_line = line.split("Jail list:", 1)[1].strip()
+    jails = [j.strip() for j in jail_line.split(",") if j.strip()]
+    result["jails"] = jails
+    for jail in jails:
+        detail = run(["fail2ban-client", "status", jail], timeout=10)
+        if not detail.ok:
+            continue
+        banned = []
+        for line in detail.stdout.splitlines():
+            stripped = line.strip(" `|-")
+            if stripped.startswith("Banned IP list:"):
+                banned = [ip for ip in stripped.split(":", 1)[1].strip().split() if ip]
+        for ip in banned:
+            result["bans"].append({"jail": jail, "ip": ip})
+    result["ban_count"] = len(result["bans"])
+    return result
+
+
+def ddns_state():
+    data = read_json("/etc/server-gui/ddns.json", {})
+    providers = []
+    for provider in data.get("providers", []) or []:
+        providers.append({
+            "name": provider.get("name"),
+            "enabled": provider.get("enabled"),
+            "account": provider.get("account"),
+            "domain": provider.get("domain"),
+            "last_ip": provider.get("last_ip"),
+            "last_status": provider.get("last_status"),
+            "last_update": provider.get("last_update"),
+        })
+    return {
+        "current_ip": data.get("current_ip"),
+        "last_check": data.get("last_check"),
+        "last_error": data.get("last_error"),
+        "providers": providers,
+    }
+
+
+def ddns_host_from_state(state):
+    for provider in state.get("providers", []) or []:
+        account = (provider.get("account") or "").strip()
+        domain = (provider.get("domain") or "").strip()
+        if account and domain:
+            return "{0}.{1}".format(account, domain)
+    return ""
+
+
+def certificate_state():
+    certs = []
+    paths = glob.glob("/etc/letsencrypt/live/*/fullchain.pem")
+    paths += ["/etc/pki/server-gui/server-gui.crt"]
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        res = run(["openssl", "x509", "-in", path, "-noout", "-subject", "-enddate"], timeout=10)
+        item = {"path": path, "ok": res.ok}
+        for line in res.stdout.splitlines():
+            if line.startswith("subject="):
+                item["subject"] = line.split("=", 1)[1].strip()
+            if line.startswith("notAfter="):
+                item["not_after"] = line.split("=", 1)[1].strip()
+        certs.append(item)
+    return certs
+
+
+def network_state():
+    public_ip = ddns_state().get("current_ip")
+    routes = run(["ip", "-4", "route"], timeout=8)
+    addresses = run(["ip", "-o", "-4", "addr", "show"], timeout=8)
+    return {
+        "public_ip": public_ip,
+        "routes": routes.stdout.strip().splitlines() if routes.ok else [],
+        "addresses": addresses.stdout.strip().splitlines() if addresses.ok else [],
+    }
+
+
+def backup_inventory():
+    items = []
+    for pattern in ["/var/lib/server-gui/backups/*.tar.gz", os.path.join(AGENT_BACKUP_DIR, "*.tar.gz")]:
+        for path in glob.glob(pattern):
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            items.append({
+                "path": path,
+                "name": os.path.basename(path),
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+            })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items[:10]
+
+
+def collect_status(config):
+    release = os_release()
+    ddns = ddns_state()
+    now = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    gui_url = config.get("gui_url") or None
+    return {
+        "schema_version": 1,
+        "agent_version": "0.1.0",
+        "collected_at": now,
+        "device_id": config.get("device_id"),
+        "hostname": socket.gethostname(),
+        "identity_key": identity_key(),
+        "family": config.get("family") or release.get("VERSION_ID"),
+        "gui_url": gui_url,
+        "public_ip": ddns.get("current_ip"),
+        "ddns_host": ddns_host_from_state(ddns),
+        "os": {
+            "pretty_name": release.get("PRETTY_NAME"),
+            "id": release.get("ID"),
+            "version_id": release.get("VERSION_ID"),
+            "kernel": platform.release(),
+            "machine": platform.machine(),
+        },
+        "uptime_seconds": uptime_seconds(),
+        "loadavg": os.getloadavg() if hasattr(os, "getloadavg") else None,
+        "disk": {
+            "root": disk_usage("/"),
+            "var": disk_usage("/var"),
+            "backup": disk_usage("/var/lib/server-gui/backups"),
+        },
+        "memory": memory_info(),
+        "services": service_states(),
+        "fail2ban": fail2ban_status(),
+        "ddns": ddns,
+        "network": network_state(),
+        "certificates": certificate_state(),
+        "backups": backup_inventory(),
+    }
+
+
+def identity_key():
+    machine_id = read_text("/etc/machine-id").strip()
+    if not machine_id:
+        machine_id = read_text("/var/lib/dbus/machine-id").strip()
+    if not machine_id:
+        machine_id = socket.gethostname()
+    return hashlib.sha256(("synca-utm:" + machine_id).encode("utf-8")).hexdigest()
+
+
+def enrollment_payload(config):
+    release = os_release()
+    ddns = ddns_state()
+    host = ddns_host_from_state(ddns)
+    gui_url = config.get("gui_url") or ("https://{0}:4444/".format(host) if host else "")
+    return {
+        "identity_key": identity_key(),
+        "hostname": socket.gethostname(),
+        "family": config.get("family") or release.get("VERSION_ID"),
+        "gui_url": gui_url,
+        "ddns_host": host,
+        "public_ip": ddns.get("current_ip"),
+        "os": {
+            "pretty_name": release.get("PRETTY_NAME"),
+            "id": release.get("ID"),
+            "version_id": release.get("VERSION_ID"),
+            "kernel": platform.release(),
+        },
+    }
+
+
+def post_enrollment(config):
+    token = config.get("enrollment_token") or ""
+    if not token:
+        raise RuntimeError("missing enrollment_token for automatic enrollment")
+    body = json.dumps(enrollment_payload(config), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-SyncA-Enrollment-Token": token,
+    }
+    req = urlrequest.Request(config["central_url"] + "/api/enroll.php", data=body, headers=headers)
+    try:
+        response = urlrequest.urlopen(req, timeout=30)
+        data = response.read().decode("utf-8", "replace")
+        return response.getcode(), data
+    except urlerror.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:
+        return 0, str(exc)
+
+
+def ensure_enrolled(config):
+    if config.get("device_id") and config.get("api_secret"):
+        return config
+    code, data = post_enrollment(config)
+    if code < 200 or code >= 300:
+        raise RuntimeError("automatic enrollment failed: status={0} response={1}".format(code, data[:500]))
+    payload = json.loads(data)
+    if not payload.get("ok"):
+        raise RuntimeError("automatic enrollment rejected: {0}".format(data[:500]))
+    config["device_id"] = payload["device_id"]
+    config["api_secret"] = payload["api_secret"]
+    config["sso_secret"] = payload.get("sso_secret", config.get("sso_secret", ""))
+    config["gui_url"] = payload.get("gui_url") or config.get("gui_url", "")
+    config.pop("enrollment_token", None)
+    save_config(config)
+    log("automatic enrollment completed device_id={0}".format(config["device_id"]))
+    return config
+
+
+def uptime_seconds():
+    raw = read_text("/proc/uptime").split()
+    if not raw:
+        return None
+    try:
+        return int(float(raw[0]))
+    except ValueError:
+        return None
+
+
+def body_headers(config, body):
+    timestamp = str(int(time.time()))
+    nonce = uuid.uuid4().hex
+    body_hash = hashlib.sha256(body).hexdigest()
+    message = (timestamp + "\n" + nonce + "\n" + body_hash).encode("utf-8")
+    secret = config["api_secret"].encode("utf-8")
+    signature = hmac.new(secret, message, hashlib.sha256).hexdigest()
+    return {
+        "X-SyncA-Device": config["device_id"],
+        "X-SyncA-Timestamp": timestamp,
+        "X-SyncA-Nonce": nonce,
+        "X-SyncA-Body-SHA256": body_hash,
+        "X-SyncA-Signature": signature,
+    }
+
+
+def post_json(config, path, payload):
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    headers = body_headers(config, body)
+    headers["Content-Type"] = "application/json"
+    req = urlrequest.Request(config["central_url"] + path, data=body, headers=headers)
+    try:
+        response = urlrequest.urlopen(req, timeout=30)
+        data = response.read().decode("utf-8", "replace")
+        return response.getcode(), data
+    except urlerror.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:
+        return 0, str(exc)
+
+
+def create_backup():
+    if not os.path.isdir(AGENT_BACKUP_DIR):
+        os.makedirs(AGENT_BACKUP_DIR)
+    name = "synca-central-{0}.tar.gz".format(datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S"))
+    path = os.path.join(AGENT_BACKUP_DIR, name)
+    targets = [p.lstrip("/") for p in BACKUP_PATHS if os.path.exists(p)]
+    if not targets:
+        raise RuntimeError("no backup targets exist")
+    command = [
+        "tar",
+        "--warning=no-file-changed",
+        "--ignore-failed-read",
+        "--exclude=var/lib/server-gui/backups",
+        "--exclude=var/lib/synca-central-agent/backups",
+        "-C",
+        "/",
+        "-czf",
+        path,
+    ] + targets
+    result = run(command, timeout=600)
+    if not os.path.isfile(path):
+        raise RuntimeError("backup creation failed: {0} {1}".format(result.stdout, result.stderr))
+    os.chmod(path, 0o600)
+    return path
+
+
+def latest_backup():
+    items = backup_inventory()
+    return items[0]["path"] if items else None
+
+
+def post_backup(config, path):
+    with open(path, "rb") as handle:
+        body = handle.read()
+    headers = body_headers(config, body)
+    metadata = {
+        "created_by": "synca-central-agent",
+        "source_path": path,
+        "mtime": int(os.path.getmtime(path)),
+    }
+    headers["X-SyncA-Backup-Name"] = os.path.basename(path)
+    headers["X-SyncA-Backup-Metadata"] = base64.b64encode(
+        json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    req = urlrequest.Request(config["central_url"] + "/api/backup.php", data=body, headers=headers)
+    try:
+        response = urlrequest.urlopen(req, timeout=300)
+        return response.getcode(), response.read().decode("utf-8", "replace")
+    except urlerror.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:
+        return 0, str(exc)
+
+
+def cmd_report(config):
+    if not config.get("enabled", False):
+        log("central reporting disabled")
+        return 0
+    config = ensure_enrolled(config)
+    payload = collect_status(config)
+    code, data = post_json(config, "/api/report.php", payload)
+    log("report status={0} response={1}".format(code, data[:500]))
+    return 0 if 200 <= code < 300 else 1
+
+
+def cmd_backup_upload(config):
+    if not config.get("enabled", False):
+        log("central backup disabled")
+        return 0
+    config = ensure_enrolled(config)
+    if not config.get("backup_enabled", True):
+        log("backup disabled")
+        return 0
+    path = create_backup()
+    code, data = post_backup(config, path)
+    log("backup status={0} file={1} response={2}".format(code, path, data[:500]))
+    return 0 if 200 <= code < 300 else 1
+
+
+def main(argv):
+    config = load_config()
+    if len(argv) < 2 or argv[1] == "--report":
+        return cmd_report(config)
+    if argv[1] == "--backup-upload":
+        return cmd_backup_upload(config)
+    if argv[1] == "--print-status":
+        print(json.dumps(collect_status(config), indent=2, sort_keys=True))
+        return 0
+    print("usage: synca-central-agent.py [--report|--backup-upload|--print-status]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as exc:
+        log("ERROR {0}".format(exc))
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
