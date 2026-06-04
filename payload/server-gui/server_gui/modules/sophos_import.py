@@ -532,7 +532,7 @@ def _convert_ipsec(index: dict[str, dict], source_id: str) -> dict:
                 "local_ts": local_ts,
                 "remote_ts": remote_ts,
                 "esp_proposals": _esp_proposal(policy),
-                "start_action": "trap",
+                "start_action": "start",
                 "dpd_action": "restart",
             }],
             "origin": _origin(source_id, ref),

@@ -483,7 +483,7 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
             "local_ts": default_ts,
             "remote_ts": "",
             "esp_proposals": "aes128-sha1",
-            "start_action": "" if auth_type == "eap" else "trap",
+            "start_action": "" if auth_type == "eap" else "start",
             "dpd_action": "clear" if auth_type == "eap" else "restart",
         }]
 
