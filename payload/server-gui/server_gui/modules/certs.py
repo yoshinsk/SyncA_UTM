@@ -33,6 +33,7 @@ LETSENCRYPT_LIVE = Path("/etc/letsencrypt/live")
 GUI_NGINX_CONF = Path("/etc/nginx/conf.d/vhost-server-gui.conf")
 ACME_NGINX_CONF = Path("/etc/nginx/conf.d/00-synca-acme.conf")
 ACME_WEBROOT = Path("/var/www/letsencrypt")
+CENTRAL_CONFIG = Path("/etc/server-gui/central.json")
 
 # Hook scripts dropped by the SyncA UTM installer. They temporarily open
 # HTTP in firewalld for ACME HTTP-01, but they do not stop nginx. GUI-driven
@@ -397,7 +398,7 @@ def _parse_cert(path: Path) -> Optional[dict]:
 
 
 def _apply_gui_certificate(name: str) -> dict:
-    """Point the GUI nginx vhost at /etc/letsencrypt/live/<name>/ cert files."""
+    """Point the GUI vhost and central GUI URL at a Let's Encrypt certificate."""
     live_dir = LETSENCRYPT_LIVE / name
     cert = live_dir / "fullchain.pem"
     key = live_dir / "privkey.pem"
@@ -413,16 +414,34 @@ payload = json.load(sys.stdin)
 conf = Path(payload["conf"])
 cert = payload["cert"]
 key = payload["key"]
+server_name = payload["server_name"]
+gui_url = payload["gui_url"]
+central_config = Path(payload["central_config"])
 if not conf.exists():
     raise SystemExit(f"{conf} does not exist")
 text = conf.read_text(encoding="utf-8", errors="replace")
+text, count = re.subn(r"^\s*server_name\s+[^;]+;", f"    server_name {server_name};", text, count=1, flags=re.M)
+if count == 0:
+    text = text.replace("    listen [::]:4444 ssl;\n", "    listen [::]:4444 ssl;\n    server_name " + server_name + ";\n", 1)
 text = re.sub(r"^\s*ssl_certificate\s+[^;]+;", f"    ssl_certificate {cert};", text, flags=re.M)
 text = re.sub(r"^\s*ssl_certificate_key\s+[^;]+;", f"    ssl_certificate_key {key};", text, flags=re.M)
 conf.write_text(text, encoding="utf-8")
+if central_config.exists():
+    data = json.loads(central_config.read_text(encoding="utf-8"))
+    data["gui_url"] = gui_url
+    central_config.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    central_config.chmod(0o600)
 '''
     res = sudo_run(
         ["python3", "-c", script],
-        stdin=json.dumps({"conf": str(GUI_NGINX_CONF), "cert": str(cert), "key": str(key)}),
+        stdin=json.dumps({
+            "conf": str(GUI_NGINX_CONF),
+            "cert": str(cert),
+            "key": str(key),
+            "server_name": name,
+            "gui_url": f"https://{name}:4444/",
+            "central_config": str(CENTRAL_CONFIG),
+        }),
     )
     if not res.ok:
         return {"ok": False, "error": res.stderr or res.stdout}
@@ -430,11 +449,17 @@ conf.write_text(text, encoding="utf-8")
     if not test.ok:
         return {"ok": False, "error": test.stderr or test.stdout}
     reload_res = sudo_run(["systemctl", "reload", "nginx"])
+    report_res = sudo_run(["systemctl", "start", "synca-central-report.service"])
     return {
         "ok": reload_res.ok,
         "cert_path": str(cert),
         "key_path": str(key),
-        "output": (test.stdout + test.stderr + reload_res.stdout + reload_res.stderr).strip(),
+        "gui_url": f"https://{name}:4444/",
+        "central_report_ok": report_res.ok,
+        "output": (
+            test.stdout + test.stderr + reload_res.stdout + reload_res.stderr +
+            report_res.stdout + report_res.stderr
+        ).strip(),
     }
 
 

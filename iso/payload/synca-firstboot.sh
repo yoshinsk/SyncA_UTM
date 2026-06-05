@@ -610,7 +610,7 @@ JSON
     "static_hosts": [],
     "options": [
       {"id": "router", "tag": "", "option": "router", "value": "${lan_ip}"},
-      {"id": "dns", "tag": "", "option": "dns-server", "value": "${lan_ip}"}
+      {"id": "dns", "tag": "", "option": "dns-server", "value": "${lan_ip},1.1.1.1,1.0.0.1"}
     ]
   }
 }
@@ -706,7 +706,7 @@ interface=${LAN_IF}
 bind-interfaces
 dhcp-range=${DHCP_START},${DHCP_END},${netmask},4h
 dhcp-option=option:router,${lan_ip}
-dhcp-option=option:dns-server,${lan_ip}
+dhcp-option=option:dns-server,${lan_ip},1.1.1.1,1.0.0.1
 server=1.1.1.1
 server=1.0.0.1
 domain-needed

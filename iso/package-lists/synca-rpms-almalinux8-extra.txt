@@ -1,0 +1,5 @@
+# iso/package-lists/synca-rpms-almalinux8-extra.txt
+# AlmaLinux 8.10 needs ELRepo's kmod package because its 4.18 kernel does not
+# provide the in-tree WireGuard module used by wg-quick@wg0.
+elrepo-release
+kmod-wireguard
