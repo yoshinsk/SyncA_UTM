@@ -12,6 +12,8 @@ grub2-efi-x64
 grub2-pc
 grub2-tools
 kernel
+kbd
+kbd-misc
 lvm2
 NetworkManager
 NetworkManager-ppp

@@ -247,6 +247,7 @@ if missing_modules:
 patched = []
 in_packages = False
 package_names = set()
+required_packages = ["elrepo-release", "kmod-wireguard"]
 for line in lines:
     stripped = line.strip()
     if stripped.startswith("%packages"):
@@ -254,6 +255,10 @@ for line in lines:
         patched.append(line)
         continue
     if in_packages and stripped == "%end":
+        for package in required_packages:
+            if package not in package_names:
+                patched.append(package)
+                package_names.add(package)
         if "python39" not in package_names:
             patched.insert(len(patched), "python39")
         if "python39-pip" not in package_names:

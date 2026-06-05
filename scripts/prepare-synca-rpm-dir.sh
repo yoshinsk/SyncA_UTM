@@ -5,7 +5,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGE_LIST="${PACKAGE_LIST:-${ROOT_DIR}/iso/package-lists/synca-rpms.txt}"
+DEFAULT_PACKAGE_LIST="${ROOT_DIR}/iso/package-lists/synca-rpms.txt"
+if [[ -z "${PACKAGE_LIST:-}" && "${ALMA_MAJOR:-}" == "8" ]]; then
+    EXTRA_PACKAGE_LIST="${EXTRA_PACKAGE_LIST:-${ROOT_DIR}/iso/package-lists/synca-rpms-almalinux8-extra.txt}"
+fi
+PACKAGE_LIST="${PACKAGE_LIST:-$DEFAULT_PACKAGE_LIST}"
+EXTRA_PACKAGE_LIST="${EXTRA_PACKAGE_LIST:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/rpms}"
 TMP_DIR="${TMP_DIR:-${OUTPUT_DIR}.tmp}"
 
@@ -17,7 +22,28 @@ require_tool() {
 }
 
 read_packages() {
-    grep -Ev '^\s*(#|$)' "$PACKAGE_LIST"
+    local list
+    for list in "$PACKAGE_LIST" ${EXTRA_PACKAGE_LIST:+"$EXTRA_PACKAGE_LIST"}; do
+        if [[ ! -f "$list" ]]; then
+            echo "package list not found: $list" >&2
+            exit 1
+        fi
+        grep -Ev '^\s*(#|$)' "$list"
+    done
+}
+
+ensure_optional_repos() {
+    local package
+    for package in "$@"; do
+        if [[ "$package" != "kmod-wireguard" ]]; then
+            continue
+        fi
+        if dnf -q list available kmod-wireguard >/dev/null 2>&1 || rpm -q kmod-wireguard >/dev/null 2>&1; then
+            return 0
+        fi
+        dnf install -y elrepo-release
+        return 0
+    done
 }
 
 main() {
@@ -34,6 +60,7 @@ main() {
         "$TMP_DIR/AppStream/Packages" \
         "$TMP_DIR/SyncA-Extra/Packages"
     mapfile -t packages < <(read_packages)
+    ensure_optional_repos "${packages[@]}"
     mapfile -t urls < <(
         dnf download --resolve --alldeps --url "${packages[@]}" |
             grep -E '^https?://' |

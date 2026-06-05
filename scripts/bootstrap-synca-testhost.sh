@@ -136,7 +136,7 @@ JSON
     "static_hosts": [],
     "options": [
       {"id": "router", "tag": "", "option": "router", "value": "${LAN_IP}"},
-      {"id": "dns", "tag": "", "option": "dns-server", "value": "${LAN_IP}"}
+      {"id": "dns", "tag": "", "option": "dns-server", "value": "${LAN_IP},1.1.1.1,1.0.0.1"}
     ]
   }
 }
