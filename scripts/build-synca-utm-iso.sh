@@ -125,6 +125,7 @@ package_wheelhouse() {
 copy_payload_files() {
     install -m 0644 "$KICKSTART_FILE" \
         "${BUILD_DIR}/payload/ks/synca-utm.ks"
+    patch_kickstart_for_platform "${BUILD_DIR}/payload/ks/synca-utm.ks"
     if [[ -n "$SYNCA_INITIAL_ADMIN_USER" || -n "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
         if [[ -z "$SYNCA_INITIAL_ADMIN_USER" || -z "$SYNCA_INITIAL_ADMIN_PASSWORD" ]]; then
             echo "SYNCA_INITIAL_ADMIN_USER and SYNCA_INITIAL_ADMIN_PASSWORD must be set together." >&2
@@ -204,6 +205,86 @@ PY
         rsync -a "${RPM_DIR_SRC%/}/SyncA-Extra/" "${BUILD_DIR}/payload/synca/rpms/"
     fi
     normalize_lf_text_tree "${BUILD_DIR}/payload"
+}
+
+patch_kickstart_for_platform() {
+    # AlmaLinux 8 uses modular AppStream packages. The installer transaction
+    # filters python36/python39/nginx RPMs unless the streams are explicitly
+    # enabled before %packages is resolved.
+    local ks_path="$1"
+    if [[ "$ALMA_MAJOR" != "8" ]]; then
+        return 0
+    fi
+    python3 - "$ks_path" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+
+required_modules = [
+    "module --name=nginx --stream=1.24",
+    "module --name=python36 --stream=3.6",
+    "module --name=python39 --stream=3.9",
+]
+
+lines = text.splitlines()
+present = set(line.strip() for line in lines)
+missing_modules = [line for line in required_modules if line not in present]
+if missing_modules:
+    insert_at = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("%packages"):
+            insert_at = idx
+            break
+    if insert_at is None:
+        raise SystemExit("kickstart %packages marker not found")
+    while insert_at > 0 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines[insert_at:insert_at] = [""] + missing_modules + [""]
+
+patched = []
+in_packages = False
+package_names = set()
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith("%packages"):
+        in_packages = True
+        patched.append(line)
+        continue
+    if in_packages and stripped == "%end":
+        if "python39" not in package_names:
+            patched.insert(len(patched), "python39")
+        if "python39-pip" not in package_names:
+            patched.insert(len(patched), "python39-pip")
+        patched.append(line)
+        in_packages = False
+        continue
+    if in_packages:
+        if stripped == "python3-pip":
+            if "python39" not in package_names:
+                patched.append("python39")
+                package_names.add("python39")
+            if "python39-pip" not in package_names:
+                patched.append("python39-pip")
+                package_names.add("python39-pip")
+            continue
+        if stripped == "iptables-nft":
+            stripped = "iptables"
+            line = "iptables"
+        if stripped and not stripped.startswith("#"):
+            package_names.add(stripped)
+    patched.append(line)
+
+text = "\n".join(patched) + "\n"
+old = "/opt/synca-installer/synca-install.sh --postinstall"
+new = "SERVER_GUI_PYTHON=python3.9 /opt/synca-installer/synca-install.sh --postinstall"
+if new not in text:
+    text = text.replace(old, new, 1)
+path.write_text(text, encoding="utf-8")
+PY
+    echo "Applied AlmaLinux 8 kickstart module and Python runtime adjustments."
 }
 
 extract_boot_configs() {
