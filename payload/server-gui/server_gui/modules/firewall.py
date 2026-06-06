@@ -348,9 +348,9 @@ def reload_firewall():
 # ---- helpers -----------------------------------------------------------
 
 def _allowlist_state() -> dict:
-    public = _describe_zone("public")
+    public = _describe_zone("public", permanent=True)
     allow_zone = "japan" if "japan" in _zone_names() else ""
-    allow = _describe_zone(allow_zone) if allow_zone else {}
+    allow = _describe_zone(allow_zone, permanent=True) if allow_zone else {}
     public_sources = public.get("sources", []) if isinstance(public, dict) else []
     allow_sources = allow.get("sources", []) if isinstance(allow, dict) else []
     return {
@@ -377,7 +377,7 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
             return {"ok": False, "error": (res.stderr or res.stdout).strip()}
         changed.append(f"created zone {allow_zone}")
 
-    public = _describe_zone("public")
+    public = _describe_zone("public", permanent=True)
     services = list(public.get("services", []))
     ports = list(public.get("ports", []))
     forward_ports = list(public.get("forward_ports", []))
@@ -390,13 +390,10 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
 
     for name in ipsets:
         source = f"ipset:{name}"
+        _remove_source_from_other_zones(source, allow_zone, changed, errors)
         _collect_firewall_change(
             ["firewall-cmd", "--permanent", "--zone", allow_zone, "--add-source", source],
             changed, errors,
-        )
-        _collect_firewall_change(
-            ["firewall-cmd", "--permanent", "--zone", "public", "--remove-source", source],
-            changed, errors, ignore_missing=True,
         )
 
     for service in services:
@@ -433,7 +430,8 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
                 changed, errors, ignore_missing=True,
             )
 
-    for rule in _build_drop_zone_guard_rules(ipsets=ipsets):
+    _remove_allowlist_drop_guards(ipsets, changed, errors)
+    for rule in _build_drop_zone_guard_rules():
         added, error = _ensure_direct_rule(rule)
         if error:
             errors.append(error)
@@ -444,6 +442,44 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
     if not reload_res.ok:
         errors.append("reload failed: " + reload_res.stderr.strip())
     return {"ok": not errors, "changed": changed, "errors": errors}
+
+
+def _remove_source_from_other_zones(source: str, keep_zone: str, changed: list[str], errors: list[str]) -> None:
+    """Move a source into one zone without leaving it unassigned on ZONE_CONFLICT."""
+    for zone in sorted(_zone_names()):
+        if zone == keep_zone:
+            continue
+        info = _describe_zone(zone, permanent=True)
+        if source not in info.get("sources", []):
+            continue
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", zone, "--remove-source", source],
+            changed, errors, ignore_missing=True,
+        )
+
+
+def _remove_allowlist_drop_guards(ipsets: list[str], changed: list[str], errors: list[str]) -> None:
+    """Remove stale guard rules that accidentally DROP selected allow-list ipsets."""
+    selected = set(ipsets)
+    for raw in sorted(_direct_rule_lines(permanent=True)):
+        if "synca-drop-zone-guard" not in raw:
+            continue
+        try:
+            parts = shlex.split(raw)
+        except ValueError:
+            continue
+        if "--match-set" not in parts:
+            continue
+        idx = parts.index("--match-set")
+        if idx + 1 >= len(parts) or parts[idx + 1] not in selected:
+            continue
+        res = sudo_run(["firewall-cmd", "--permanent", "--direct", "--remove-rule", *parts])
+        if res.ok:
+            changed.append("removed stale direct " + raw)
+        else:
+            output = (res.stderr or res.stdout).strip()
+            if "not in list" not in output:
+                errors.append(output or "failed to remove stale direct " + raw)
 
 
 def _collect_firewall_change(cmd: list[str], changed: list[str], errors: list[str], ignore_missing: bool = False) -> None:
@@ -634,8 +670,12 @@ def _parse_active(text: str) -> dict[str, list[str]]:
     return active
 
 
-def _describe_zone(zone: str) -> dict:
-    res = sudo_run(["firewall-cmd", "--zone", zone, "--list-all"])
+def _describe_zone(zone: str, permanent: bool = False) -> dict:
+    cmd = ["firewall-cmd"]
+    if permanent:
+        cmd.append("--permanent")
+    cmd.extend(["--zone", zone, "--list-all"])
+    res = sudo_run(cmd)
     if not res.ok:
         return {"error": (res.stderr or res.stdout).strip()}
 
@@ -669,11 +709,19 @@ def _describe_zone(zone: str) -> dict:
             info["masquerade"] = s.split(":", 1)[1].strip() == "yes"
 
     # forward-ports and rich-rules can be multi-line; use dedicated subcommands
-    fp = sudo_run(["firewall-cmd", "--zone", zone, "--list-forward-ports"])
+    fp_cmd = ["firewall-cmd"]
+    if permanent:
+        fp_cmd.append("--permanent")
+    fp_cmd.extend(["--zone", zone, "--list-forward-ports"])
+    fp = sudo_run(fp_cmd)
     if fp.ok:
         info["forward_ports"] = _parse_forward_ports(fp.stdout)
 
-    rr = sudo_run(["firewall-cmd", "--zone", zone, "--list-rich-rules"])
+    rr_cmd = ["firewall-cmd"]
+    if permanent:
+        rr_cmd.append("--permanent")
+    rr_cmd.extend(["--zone", zone, "--list-rich-rules"])
+    rr = sudo_run(rr_cmd)
     if rr.ok:
         info["rich_rules"] = [ln.rstrip() for ln in rr.stdout.splitlines() if ln.strip()]
 
