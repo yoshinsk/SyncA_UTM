@@ -236,7 +236,7 @@
                         public zoneの公開サービス/ポートを閉じる
                     </label>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="applyPublicAllowlist()">
+                <button id="allowlist-apply-btn" class="btn btn-primary btn-sm" onclick="applyPublicAllowlist()">
                     <i class="bi bi-shield-check"></i> 許可制を適用
                 </button>
             </div>
@@ -246,7 +246,7 @@
                     default routeのWAN interfaceに、spoofing、invalid、SYN flood、stealth scan、不要ICMP、broadcast/multicast対策を一括適用します。
                 </div>
                 <div id="wan-hardening-state" class="small mb-2 text-secondary">未取得</div>
-                <button class="btn btn-outline-primary btn-sm" onclick="applyWanHardening()">
+                <button id="wan-hardening-apply-btn" class="btn btn-outline-primary btn-sm" onclick="applyWanHardening()">
                     <i class="bi bi-hammer"></i> direct rulesを適用
                 </button>
             </div>
@@ -631,6 +631,20 @@ async function loadPublicAllowlistState() {
             </label>`).join('')
         : '<span class="text-secondary small">ipsetなし</span>';
     if (data.allow_zone) document.getElementById('allowlist-zone').value = data.allow_zone;
+    const btn = document.getElementById('allowlist-apply-btn');
+    if (btn) {
+        if (data.enabled) {
+            btn.disabled = true;
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-success');
+            btn.innerHTML = '<i class="bi bi-check-circle"></i> 適用済';
+        } else {
+            btn.disabled = false;
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-primary');
+            btn.innerHTML = '<i class="bi bi-shield-check"></i> 許可制を適用';
+        }
+    }
 }
 
 async function loadWanHardeningState() {
@@ -638,6 +652,20 @@ async function loadWanHardeningState() {
     if (!data) return;
     document.getElementById('wan-hardening-state').textContent =
         `WAN=${(data.wan_interfaces || []).join(', ') || '-'} / direct rules ${data.rules_present || 0}/${data.rules_expected || 0} / drop ipsets=${(data.drop_zone_sources || []).join(', ') || '-'}`;
+    const btn = document.getElementById('wan-hardening-apply-btn');
+    if (btn) {
+        if (data.applied) {
+            btn.disabled = true;
+            btn.classList.remove('btn-outline-primary');
+            btn.classList.add('btn-success');
+            btn.innerHTML = '<i class="bi bi-check-circle"></i> 適用済';
+        } else {
+            btn.disabled = false;
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-outline-primary');
+            btn.innerHTML = '<i class="bi bi-hammer"></i> direct rulesを適用';
+        }
+    }
 }
 
 async function applyPublicAllowlist() {

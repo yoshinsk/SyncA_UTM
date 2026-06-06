@@ -309,9 +309,12 @@ def wan_hardening():
     if request.method == "GET":
         expected = _build_wan_hardening_rules()
         existing = _direct_rule_lines(permanent=True)
+        rules_present = sum(1 for rule in expected if _direct_rule_raw(rule) in existing)
         return jsonify({
             "rules_expected": len(expected),
-            "rules_present": sum(1 for rule in expected if _direct_rule_raw(rule) in existing),
+            "rules_present": rules_present,
+            "rules_missing": max(len(expected) - rules_present, 0),
+            "applied": bool(expected) and rules_present == len(expected),
             "wan_interfaces": _wan_interfaces(),
             "drop_zone_sources": _drop_zone_ipsets(),
         })
