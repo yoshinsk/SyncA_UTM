@@ -699,11 +699,12 @@ configure_dnsmasq() {
     local lan_ip netmask
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
+    configure_dnsmasq_runtime
     install -d -m 0755 /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/synca-lan.conf <<CONF
 # Managed by SyncA UTM firstboot.
 interface=${LAN_IF}
-bind-interfaces
+bind-dynamic
 dhcp-range=${DHCP_START},${DHCP_END},${netmask},4h
 dhcp-option=option:router,${lan_ip}
 dhcp-option=option:dns-server,${lan_ip},1.1.1.1,1.0.0.1
@@ -713,6 +714,26 @@ domain-needed
 bogus-priv
 CONF
     systemctl enable dnsmasq
+}
+
+configure_dnsmasq_runtime() {
+    install -d -m 0755 /etc/systemd/system/dnsmasq.service.d
+    cat > /etc/systemd/system/dnsmasq.service.d/synca-utm.conf <<'CONF'
+# Managed by SyncA UTM firstboot.
+[Unit]
+Wants=network-online.target
+After=network-online.target NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+CONF
+    if [[ -f /etc/dnsmasq.conf ]] && grep -Eq '^[[:space:]]*bind-interfaces([[:space:]]|$)' /etc/dnsmasq.conf; then
+        cp -a /etc/dnsmasq.conf "/etc/dnsmasq.conf.synca-bind-dynamic.$(date +%Y%m%d%H%M%S).bak"
+        sed -i -E 's/^([[:space:]]*)bind-interfaces([[:space:]]*)$/# SyncA UTM: bind-dynamic is used so LAN bridges can appear after dnsmasq starts.\n#\1bind-interfaces\2/' /etc/dnsmasq.conf
+    fi
+    systemctl daemon-reload
 }
 
 configure_nginx() {

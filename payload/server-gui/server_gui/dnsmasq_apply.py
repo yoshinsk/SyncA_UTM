@@ -13,7 +13,24 @@ from .shell import sudo_run
 
 CONFIG_PATH = Path("/etc/dnsmasq.d/server-gui.conf")
 LEGACY_FIRSTBOOT_CONFIG_PATH = Path("/etc/dnsmasq.d/synca-lan.conf")
+DNSMASQ_MAIN_CONFIG_PATH = Path("/etc/dnsmasq.conf")
+DNSMASQ_SYSTEMD_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
+DNSMASQ_SYSTEMD_DROPIN_PATH = DNSMASQ_SYSTEMD_DROPIN_DIR / "synca-utm.conf"
 MODULE_NAME = "dnsmasq"
+DEFAULT_UPSTREAM = (
+    {"id": "cloudflare-1", "domain": "", "server": "1.1.1.1"},
+    {"id": "cloudflare-2", "domain": "", "server": "1.0.0.1"},
+)
+DNSMASQ_SYSTEMD_DROPIN_CONTENT = """# Managed by server-gui.
+[Unit]
+Wants=network-online.target
+After=network-online.target NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+"""
 
 
 def default() -> dict:
@@ -21,7 +38,7 @@ def default() -> dict:
         "dns": {
             "hosts": [],       # [{id, domain, ip}]
             "cnames": [],      # [{id, alias, target}]
-            "upstream": [],    # [{id, domain, server}] (domain optional)
+            "upstream": _default_upstream(),  # [{id, domain, server}] (domain optional)
         },
         "dhcp": {
             "ranges": [],      # [{id, interface, start, end, lease}]
@@ -42,33 +59,37 @@ def generate(data: dict) -> str:
 
     dns = data.get("dns", {})
     dhcp = data.get("dhcp", {})
-    listen_interfaces = sorted({
-        str(r.get("interface", "")).strip()
-        for r in dhcp.get("ranges", [])
-        if str(r.get("interface", "")).strip()
-    })
+    upstream = dns.get("upstream") or _default_upstream()
+    listen_interfaces = _listen_interfaces(data)
     if listen_interfaces:
         lines.append("# --- Listening interfaces ---")
         # AlmaLinux 9 dnsmasq defaults to interface=lo. Add the LAN DHCP
         # interfaces explicitly so clients can use this host as their DNS.
         for interface in listen_interfaces:
             lines.append(f"interface={interface}")
+        # LAN bridges can be created after dnsmasq starts. bind-dynamic keeps
+        # the service alive and begins listening when the bridge appears.
+        lines.append("bind-dynamic")
         lines.append("domain-needed")
         lines.append("bogus-priv")
         lines.append("dhcp-authoritative")
         lines.append("")
 
-    if dns.get("hosts") or dns.get("cnames") or dns.get("upstream"):
+    if dns.get("hosts") or dns.get("cnames") or upstream:
         lines.append("# --- DNS ---")
     for h in dns.get("hosts", []):
         lines.append(f"address=/{h['domain']}/{h['ip']}")
     for c in dns.get("cnames", []):
         lines.append(f"cname={c['alias']},{c['target']}")
-    for u in dns.get("upstream", []):
-        if u.get("domain"):
-            lines.append(f"server=/{u['domain']}/{u['server']}")
+    for u in upstream:
+        server = str(u.get("server", "")).strip()
+        if not server:
+            continue
+        domain = str(u.get("domain", "")).strip()
+        if domain:
+            lines.append(f"server=/{domain}/{server}")
         else:
-            lines.append(f"server={u['server']}")
+            lines.append(f"server={server}")
 
     if dhcp.get("ranges") or dhcp.get("static_hosts") or dhcp.get("options"):
         lines.append("")
@@ -109,6 +130,7 @@ def apply(config_dir: Any) -> None:
     store = ConfigStore(config_dir)
     data = store.load(MODULE_NAME, default())
     content = generate(data)
+    needs_dynamic_bind = bool(_listen_interfaces(data))
 
     backup: bytes | None = None
     if CONFIG_PATH.exists():
@@ -137,6 +159,12 @@ def apply(config_dir: Any) -> None:
             _restore(backup)
             raise RuntimeError(f"failed to disable {LEGACY_FIRSTBOOT_CONFIG_PATH}: {e}") from e
 
+    runtime = _ensure_dnsmasq_runtime(needs_dynamic_bind)
+    if not runtime.ok:
+        _restore(backup)
+        _restore_legacy(legacy_backup, legacy_removed)
+        raise RuntimeError(f"dnsmasq runtime preparation failed:\n{runtime.stderr.strip() or runtime.stdout.strip()}")
+
     # Validate with dnsmasq --test (covers the GENERATED file + main config)
     test = sudo_run(["dnsmasq", "--test"])
     if not test.ok:
@@ -162,6 +190,44 @@ def _format_option(name: str) -> str:
     if name.isdigit():
         return name
     return f"option:{name}"
+
+
+def _default_upstream() -> list[dict[str, str]]:
+    return [dict(item) for item in DEFAULT_UPSTREAM]
+
+
+def _listen_interfaces(data: dict) -> list[str]:
+    dhcp = data.get("dhcp", {})
+    return sorted({
+        str(r.get("interface", "")).strip()
+        for r in dhcp.get("ranges", [])
+        if str(r.get("interface", "")).strip()
+    })
+
+
+def _ensure_dnsmasq_runtime(needs_dynamic_bind: bool) -> Any:
+    """Install systemd retry behavior and avoid bind option conflicts."""
+    script = [
+        "set -e",
+        f"install -d -m 0755 {DNSMASQ_SYSTEMD_DROPIN_DIR}",
+        f"cat > {DNSMASQ_SYSTEMD_DROPIN_PATH} <<'EOF'",
+        DNSMASQ_SYSTEMD_DROPIN_CONTENT.rstrip("\n"),
+        "EOF",
+        f"chmod 0644 {DNSMASQ_SYSTEMD_DROPIN_PATH}",
+    ]
+    if needs_dynamic_bind:
+        script.extend([
+            f"if [ -f {DNSMASQ_MAIN_CONFIG_PATH} ] && "
+            f"grep -Eq '^[[:space:]]*bind-interfaces([[:space:]]|$)' {DNSMASQ_MAIN_CONFIG_PATH}; then",
+            f"  cp -a {DNSMASQ_MAIN_CONFIG_PATH} "
+            f"{DNSMASQ_MAIN_CONFIG_PATH}.synca-bind-dynamic.$(date +%Y%m%d%H%M%S).bak",
+            f"  sed -i -E "
+            f"'s/^([[:space:]]*)bind-interfaces([[:space:]]*)$/# SyncA UTM: bind-dynamic is used so LAN bridges can appear after dnsmasq starts.\\n#\\1bind-interfaces\\2/' "
+            f"{DNSMASQ_MAIN_CONFIG_PATH}",
+            "fi",
+        ])
+    script.append("systemctl daemon-reload")
+    return sudo_run(["/bin/bash", "-lc", "\n".join(script)], timeout=20)
 
 
 def _restore(backup: bytes | None) -> None:

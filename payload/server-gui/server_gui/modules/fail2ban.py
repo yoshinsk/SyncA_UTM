@@ -26,6 +26,7 @@ JAIL_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,63}$")
 
 JAIL_LOCAL = Path("/etc/fail2ban/jail.local")
 FAIL2BAN_LOCAL = Path("/etc/fail2ban/fail2ban.local")
+FAIL2BAN_LOG = Path("/var/log/fail2ban.log")
 JAIL_D = Path("/etc/fail2ban/jail.d")
 FILTER_D = Path("/etc/fail2ban/filter.d")
 AUTO_JAIL = JAIL_D / "server-gui-auto.local"
@@ -158,6 +159,9 @@ def install_defaults():
     logtarget_res = _write_managed_file(FAIL2BAN_LOCAL, FAIL2BAN_LOCAL_CONTENT)
     if logtarget_res:
         return jsonify({"error": logtarget_res}), 500
+    log_file_res = _ensure_fail2ban_log_file()
+    if log_file_res:
+        return jsonify({"error": log_file_res}), 500
 
     filter_res = _write_managed_file(SERVER_GUI_FILTER, SERVER_GUI_FILTER_CONTENT)
     if filter_res:
@@ -204,6 +208,9 @@ def install():
     res = sudo_run(["dnf", "install", "-y", "fail2ban-server", "fail2ban-firewalld"], timeout=120)
     if not res.ok:
         return jsonify({"ok": False, "error": (res.stderr or res.stdout).strip()}), 500
+    log_file_res = _ensure_fail2ban_log_file()
+    if log_file_res:
+        return jsonify({"ok": False, "error": log_file_res}), 500
     enable = sudo_run(["systemctl", "enable", "--now", "fail2ban"], timeout=30)
     return jsonify({
         "ok": enable.ok,
@@ -230,6 +237,9 @@ def sync_open_ports():
     write_res = _write_managed_file(AUTO_JAIL, jail_content)
     if write_res:
         return jsonify({"ok": False, "error": write_res}), 500
+    log_file_res = _ensure_fail2ban_log_file()
+    if log_file_res:
+        return jsonify({"ok": False, "error": log_file_res}), 500
 
     reload_res = _reload_fail2ban()
     return jsonify({
@@ -380,7 +390,27 @@ def _write_managed_file(path: Path, content: str) -> str | None:
         return f"write failed for {path}: {e}"
 
 
+def _ensure_fail2ban_log_file() -> str | None:
+    res = sudo_run([
+        "/bin/bash",
+        "-lc",
+        (
+            "set -e; "
+            f"install -d -o root -g root -m 0755 {FAIL2BAN_LOG.parent}; "
+            f"if [ ! -e {FAIL2BAN_LOG} ]; then "
+            f"install -o root -g root -m 0644 /dev/null {FAIL2BAN_LOG}; "
+            "fi; "
+            f"chown root:root {FAIL2BAN_LOG}; chmod 0644 {FAIL2BAN_LOG}; "
+            f"(restorecon {FAIL2BAN_LOG} 2>/dev/null || true)"
+        ),
+    ], timeout=15)
+    return None if res.ok else (res.stderr or res.stdout).strip()
+
+
 def _reload_fail2ban() -> dict:
+    log_file_error = _ensure_fail2ban_log_file()
+    if log_file_error:
+        return {"ok": False, "output": log_file_error}
     reload_res = sudo_run(["fail2ban-client", "reload"], timeout=30)
     if reload_res.ok:
         return {"ok": True, "output": (reload_res.stdout + reload_res.stderr).strip()}
