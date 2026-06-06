@@ -35,6 +35,8 @@ except ImportError:  # pragma: no cover
 CONFIG_PATH = os.environ.get("SYNCA_CENTRAL_CONFIG", "/etc/server-gui/central.json")
 AGENT_STATE_DIR = "/var/lib/synca-central-agent"
 AGENT_BACKUP_DIR = os.path.join(AGENT_STATE_DIR, "backups")
+SERVER_GUI_BACKUP_DIR = "/var/lib/server-gui/backups"
+UPLOAD_STATE_PATH = os.path.join(AGENT_STATE_DIR, "upload-state.json")
 LOG_PATH = "/var/log/synca-central-agent.log"
 DEFAULT_PUBLIC_IP_CHECK_URL = "https://update.ddnsft.com/checkip.php"
 
@@ -134,6 +136,25 @@ def read_json(path, default):
         with open(path, "r") as handle:
             return json.load(handle)
     except Exception:
+        return default
+
+
+def write_json_file(path, data, mode=0o600):
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(tmp_path, mode)
+    os.rename(tmp_path, path)
+
+
+def config_int(config, key, default):
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError):
         return default
 
 
@@ -300,7 +321,7 @@ def network_state():
 
 def backup_inventory():
     items = []
-    for pattern in ["/var/lib/server-gui/backups/*.tar.gz", os.path.join(AGENT_BACKUP_DIR, "*.tar.gz")]:
+    for pattern in [os.path.join(SERVER_GUI_BACKUP_DIR, "*.tar.gz"), os.path.join(AGENT_BACKUP_DIR, "*.tar.gz")]:
         for path in glob.glob(pattern):
             try:
                 stat = os.stat(path)
@@ -311,6 +332,7 @@ def backup_inventory():
                 "name": os.path.basename(path),
                 "size": stat.st_size,
                 "mtime": int(stat.st_mtime),
+                "backup_type": backup_type_for_path(path),
             })
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items[:10]
@@ -323,7 +345,7 @@ def collect_status(config):
     gui_url = config.get("gui_url") or None
     return {
         "schema_version": 1,
-        "agent_version": "0.1.0",
+        "agent_version": "0.1.1",
         "collected_at": now,
         "device_id": config.get("device_id"),
         "hostname": socket.gethostname(),
@@ -492,19 +514,78 @@ def create_backup():
     return path
 
 
+def backup_type_for_path(path):
+    name = os.path.basename(path)
+    if path.startswith(SERVER_GUI_BACKUP_DIR + os.sep) or name.startswith("server-gui-"):
+        return "server-gui"
+    if path.startswith(AGENT_BACKUP_DIR + os.sep) or name.startswith("synca-central-"):
+        return "synca-central"
+    return "unknown"
+
+
+def latest_server_gui_backup_paths(limit):
+    items = []
+    for path in glob.glob(os.path.join(SERVER_GUI_BACKUP_DIR, "*.tar.gz")):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        items.append({"path": path, "mtime": int(stat.st_mtime)})
+    items.sort(key=lambda item: item["mtime"], reverse=True)
+    return [item["path"] for item in items[:max(1, limit)]]
+
+
+def load_upload_state():
+    state = read_json(UPLOAD_STATE_PATH, {})
+    if not isinstance(state, dict):
+        state = {}
+    if not isinstance(state.get("uploaded"), dict):
+        state["uploaded"] = {}
+    return state
+
+
+def save_upload_state(state):
+    uploaded = state.get("uploaded", {})
+    if isinstance(uploaded, dict) and len(uploaded) > 200:
+        ordered = sorted(uploaded.items(), key=lambda item: item[1].get("uploaded_at", ""), reverse=True)
+        state["uploaded"] = dict(ordered[:200])
+    write_json_file(UPLOAD_STATE_PATH, state, 0o600)
+
+
+def backup_state_key(path, stat, sha256):
+    return "{0}:{1}:{2}:{3}".format(backup_type_for_path(path), os.path.basename(path), stat.st_size, sha256)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def latest_backup():
     items = backup_inventory()
     return items[0]["path"] if items else None
 
 
-def post_backup(config, path):
+def post_backup(config, path, backup_type):
     with open(path, "rb") as handle:
         body = handle.read()
+    stat = os.stat(path)
+    body_sha256 = hashlib.sha256(body).hexdigest()
     headers = body_headers(config, body)
     metadata = {
         "created_by": "synca-central-agent",
+        "backup_type": backup_type,
         "source_path": path,
-        "mtime": int(os.path.getmtime(path)),
+        "source_name": os.path.basename(path),
+        "size": stat.st_size,
+        "mtime": int(stat.st_mtime),
+        "sha256": body_sha256,
     }
     headers["X-SyncA-Backup-Name"] = os.path.basename(path)
     headers["X-SyncA-Backup-Metadata"] = base64.b64encode(
@@ -518,6 +599,45 @@ def post_backup(config, path):
         return exc.code, exc.read().decode("utf-8", "replace")
     except Exception as exc:
         return 0, str(exc)
+
+
+def upload_server_gui_backups(config, retention):
+    if not config.get("server_gui_backup_upload_enabled", True):
+        log("server-gui backup upload disabled")
+        return 0
+    state = load_upload_state()
+    uploaded = state["uploaded"]
+    failures = 0
+    changed = False
+    for path in latest_server_gui_backup_paths(retention):
+        try:
+            stat = os.stat(path)
+            sha256 = file_sha256(path)
+        except OSError as exc:
+            log("server-gui backup stat failed file={0} error={1}".format(path, exc))
+            failures += 1
+            continue
+        key = backup_state_key(path, stat, sha256)
+        if key in uploaded:
+            continue
+        code, data = post_backup(config, path, "server-gui")
+        log("server-gui backup status={0} file={1} response={2}".format(code, path, data[:500]))
+        if 200 <= code < 300:
+            uploaded[key] = {
+                "backup_type": "server-gui",
+                "name": os.path.basename(path),
+                "path": path,
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "sha256": sha256,
+                "uploaded_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            }
+            changed = True
+        else:
+            failures += 1
+    if changed:
+        save_upload_state(state)
+    return failures
 
 
 def cmd_report(config):
@@ -539,10 +659,19 @@ def cmd_backup_upload(config):
     if not config.get("backup_enabled", True):
         log("backup disabled")
         return 0
-    path = create_backup()
-    code, data = post_backup(config, path)
-    log("backup status={0} file={1} response={2}".format(code, path, data[:500]))
-    return 0 if 200 <= code < 300 else 1
+    failures = 0
+    try:
+        path = create_backup()
+        code, data = post_backup(config, path, "synca-central")
+        log("backup status={0} file={1} response={2}".format(code, path, data[:500]))
+        if code < 200 or code >= 300:
+            failures += 1
+    except Exception as exc:
+        log("backup ERROR {0}".format(exc))
+        failures += 1
+    retention = max(1, config_int(config, "backup_upload_retention", 5))
+    failures += upload_server_gui_backups(config, retention)
+    return 0 if failures == 0 else 1
 
 
 def main(argv):
