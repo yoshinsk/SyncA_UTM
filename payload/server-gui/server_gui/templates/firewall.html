@@ -205,6 +205,55 @@
     </div>
 </div>
 
+<!-- WAN policy helpers -->
+<div class="card border-0 shadow-sm mt-4">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-shield-lock text-secondary"></i>
+            <strong>WAN保護</strong>
+            <span class="badge bg-secondary-subtle text-secondary-emphasis">Public / direct rules</span>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadWanProtection()">
+            <i class="bi bi-arrow-clockwise"></i> 再読込
+        </button>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <h6 class="mb-2"><i class="bi bi-funnel"></i> PublicをIPセット許可制に切替</h6>
+                <div class="small text-secondary mb-2">
+                    選択したipsetの送信元だけを許可zoneへ移し、public zone側の公開サービス/ポートを閉じます。
+                </div>
+                <div id="allowlist-state" class="small mb-2 text-secondary">未取得</div>
+                <div id="allowlist-ipsets" class="d-flex flex-wrap gap-2 mb-2"></div>
+                <div class="input-group input-group-sm mb-2">
+                    <span class="input-group-text">allow zone</span>
+                    <input id="allowlist-zone" class="form-control font-monospace" value="japan">
+                </div>
+                <div class="form-check mb-2">
+                    <input id="allowlist-remove-public" class="form-check-input" type="checkbox" checked>
+                    <label class="form-check-label small" for="allowlist-remove-public">
+                        public zoneの公開サービス/ポートを閉じる
+                    </label>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="applyPublicAllowlist()">
+                    <i class="bi bi-shield-check"></i> 許可制を適用
+                </button>
+            </div>
+            <div class="col-lg-6">
+                <h6 class="mb-2"><i class="bi bi-lightning-charge"></i> WAN hardening direct rules</h6>
+                <div class="small text-secondary mb-2">
+                    default routeのWAN interfaceに、spoofing、invalid、SYN flood、stealth scan、不要ICMP、broadcast/multicast対策を一括適用します。
+                </div>
+                <div id="wan-hardening-state" class="small mb-2 text-secondary">未取得</div>
+                <button class="btn btn-outline-primary btn-sm" onclick="applyWanHardening()">
+                    <i class="bi bi-hammer"></i> direct rulesを適用
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Direct rules (global) -->
 <div class="card border-0 shadow-sm mt-4">
     <div class="card-header bg-white d-flex justify-content-between align-items-center">
@@ -314,6 +363,7 @@ async function init() {
     await loadIpsets();
     await refreshZones();
     await loadDirectRules();
+    await loadWanProtection();
 }
 
 async function loadServiceList() {
@@ -554,6 +604,71 @@ async function loadDirectRules() {
                     </button>
                 </td>
             </tr>`).join('');
+}
+
+async function loadWanProtection() {
+    await Promise.all([loadPublicAllowlistState(), loadWanHardeningState()]);
+}
+
+async function loadPublicAllowlistState() {
+    const data = await api.get('/firewall/api/public-ipset-allowlist');
+    if (!data) return;
+    const state = document.getElementById('allowlist-state');
+    const publicSources = (data.public_sources || []).join(' ') || '-';
+    const allowSources = (data.allow_zone_sources || []).join(' ') || '-';
+    state.textContent = `public target=${data.public_target || '-'} / public sources=${publicSources} / ${data.allow_zone || 'allow'} sources=${allowSources}`;
+    const names = data.available_ipsets || [];
+    const selected = new Set((data.allow_zone_sources || data.public_sources || [])
+        .filter(s => s.startsWith('ipset:')).map(s => s.replace(/^ipset:/, '')));
+    if (selected.size === 0 && names.includes('jp-ipv4')) selected.add('jp-ipv4');
+    const box = document.getElementById('allowlist-ipsets');
+    box.innerHTML = names.length
+        ? names.map(name => `
+            <label class="form-check form-check-inline small mb-1">
+                <input class="form-check-input allowlist-ipset-check" type="checkbox"
+                       value="${escapeHtml(name)}" ${selected.has(name) ? 'checked' : ''}>
+                <span class="font-monospace">${escapeHtml(name)}</span>
+            </label>`).join('')
+        : '<span class="text-secondary small">ipsetなし</span>';
+    if (data.allow_zone) document.getElementById('allowlist-zone').value = data.allow_zone;
+}
+
+async function loadWanHardeningState() {
+    const data = await api.get('/firewall/api/wan-hardening');
+    if (!data) return;
+    document.getElementById('wan-hardening-state').textContent =
+        `WAN=${(data.wan_interfaces || []).join(', ') || '-'} / direct rules ${data.rules_present || 0}/${data.rules_expected || 0} / drop ipsets=${(data.drop_zone_sources || []).join(', ') || '-'}`;
+}
+
+async function applyPublicAllowlist() {
+    const ipsets = Array.from(document.querySelectorAll('.allowlist-ipset-check:checked')).map(el => el.value);
+    if (ipsets.length === 0) return toast('許可するipsetを選択してください', true);
+    if (!confirm(`PublicをIPセット許可制に切り替えますか?\n\n許可: ${ipsets.join(', ')}`)) return;
+    const res = await api.send('/firewall/api/public-ipset-allowlist', 'POST', {
+        ipsets,
+        allow_zone: document.getElementById('allowlist-zone').value.trim() || 'japan',
+        remove_public_openings: document.getElementById('allowlist-remove-public').checked,
+    });
+    if (res && res.ok) {
+        toast('許可制を適用しました');
+        await loadWanProtection();
+        await refreshZones();
+        await loadDirectRules();
+    } else if (res) {
+        toast((res.error || (res.errors || []).join('\\n') || 'failed'), true);
+    }
+}
+
+async function applyWanHardening() {
+    if (!confirm('WAN hardening direct rulesを適用しますか?')) return;
+    const res = await api.send('/firewall/api/wan-hardening', 'POST', {});
+    if (res && res.ok) {
+        toast(`${res.applied_count || 0} 件のdirect ruleを追加しました`);
+        await loadWanProtection();
+        await loadDirectRules();
+    } else if (res) {
+        toast((res.errors || []).join('\\n') || 'failed', true);
+    }
 }
 
 async function addDirectRule() {

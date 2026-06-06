@@ -1,4 +1,4 @@
-"""firewalld management module.
+"""payload/server-gui/server_gui/modules/firewall.py - Manage firewalld policy.
 
 Endpoints:
   GET    /firewall/api/zones                       — list zones + active + default
@@ -21,6 +21,7 @@ Endpoints:
 from __future__ import annotations
 
 import re
+import shlex
 
 from flask import Blueprint, Flask, jsonify, render_template, request
 
@@ -230,7 +231,6 @@ def direct_rules():
         return jsonify({"rules": rules})
 
     # POST / DELETE
-    import shlex
     payload = request.get_json(force=True, silent=True) or {}
     ipv = str(payload.get("ipv", ""))
     table = str(payload.get("table", ""))
@@ -266,6 +266,77 @@ def direct_rules():
     return jsonify({"ok": True})
 
 
+@bp.route("/api/public-ipset-allowlist", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def public_ipset_allowlist():
+    """Switch WAN-facing public access to an ipset allowlist model.
+
+    firewalld accepts source-based zones before interface-based zones. The
+    implementation moves selected ipsets into an allow zone, mirrors the
+    currently open public services/ports there, then closes those openings on
+    public so non-allowlisted WAN sources hit the public DROP target.
+    """
+    if request.method == "GET":
+        return jsonify(_allowlist_state())
+
+    payload = request.get_json(force=True, silent=True) or {}
+    ipsets = _normalize_ipsets(payload.get("ipsets") or ["jp-ipv4"])
+    allow_zone = str(payload.get("allow_zone") or "japan").strip() or "japan"
+    remove_public_openings = bool(payload.get("remove_public_openings", True))
+    try:
+        allow_zone = validate_identifier(allow_zone)
+    except ValidationError:
+        return jsonify({"ok": False, "error": "invalid allow zone name"}), 400
+    if not ipsets:
+        return jsonify({"ok": False, "error": "at least one ipset is required"}), 400
+
+    available = _available_ipset_names()
+    missing = [name for name in ipsets if name not in available]
+    if missing:
+        return jsonify({"ok": False, "error": "missing ipsets: " + ", ".join(missing)}), 400
+
+    result = _apply_public_ipset_allowlist(allow_zone, ipsets, remove_public_openings)
+    status = 200 if result.get("ok") else 500
+    return jsonify(result), status
+
+
+@bp.route("/api/wan-hardening", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def wan_hardening():
+    """Report or apply SyncA-managed WAN hardening direct rules."""
+    if request.method == "GET":
+        expected = _build_wan_hardening_rules()
+        existing = _direct_rule_lines(permanent=True)
+        return jsonify({
+            "rules_expected": len(expected),
+            "rules_present": sum(1 for rule in expected if _direct_rule_raw(rule) in existing),
+            "wan_interfaces": _wan_interfaces(),
+            "drop_zone_sources": _drop_zone_ipsets(),
+        })
+
+    expected = _build_wan_hardening_rules()
+    applied: list[str] = []
+    errors: list[str] = []
+    for rule in expected:
+        added, error = _ensure_direct_rule(rule)
+        if error:
+            errors.append(error)
+        elif added:
+            applied.append(_direct_rule_raw(rule))
+    reload_res = sudo_run(["firewall-cmd", "--reload"])
+    if not reload_res.ok:
+        errors.append("reload failed: " + reload_res.stderr.strip())
+    return jsonify({
+        "ok": not errors,
+        "applied": applied,
+        "applied_count": len(applied),
+        "errors": errors,
+        "wan_interfaces": _wan_interfaces(),
+    }), (200 if not errors else 500)
+
+
 @bp.route("/api/reload", methods=["POST"])
 @login_required
 @csrf_protect
@@ -275,6 +346,265 @@ def reload_firewall():
 
 
 # ---- helpers -----------------------------------------------------------
+
+def _allowlist_state() -> dict:
+    public = _describe_zone("public")
+    allow_zone = "japan" if "japan" in _zone_names() else ""
+    allow = _describe_zone(allow_zone) if allow_zone else {}
+    public_sources = public.get("sources", []) if isinstance(public, dict) else []
+    allow_sources = allow.get("sources", []) if isinstance(allow, dict) else []
+    return {
+        "public_target": public.get("target") if isinstance(public, dict) else None,
+        "public_sources": public_sources,
+        "allow_zone": allow_zone,
+        "allow_zone_sources": allow_sources,
+        "available_ipsets": sorted(_available_ipset_names()),
+        "enabled": (
+            public.get("target") == "DROP"
+            and bool([s for s in allow_sources if s.startswith("ipset:")])
+            and not _zone_public_openings(public)
+        ) if isinstance(public, dict) else False,
+    }
+
+
+def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_public_openings: bool) -> dict:
+    errors: list[str] = []
+    changed: list[str] = []
+    zones = _zone_names()
+    if allow_zone not in zones:
+        res = sudo_run(["firewall-cmd", "--permanent", "--new-zone", allow_zone])
+        if not res.ok and "NAME_CONFLICT" not in (res.stderr + res.stdout):
+            return {"ok": False, "error": (res.stderr or res.stdout).strip()}
+        changed.append(f"created zone {allow_zone}")
+
+    public = _describe_zone("public")
+    services = list(public.get("services", []))
+    ports = list(public.get("ports", []))
+    forward_ports = list(public.get("forward_ports", []))
+
+    for cmd in (
+        ["firewall-cmd", "--permanent", "--zone", "public", "--set-target=DROP"],
+        ["firewall-cmd", "--permanent", "--zone", allow_zone, "--set-target=default"],
+    ):
+        _collect_firewall_change(cmd, changed, errors)
+
+    for name in ipsets:
+        source = f"ipset:{name}"
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", allow_zone, "--add-source", source],
+            changed, errors,
+        )
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", "public", "--remove-source", source],
+            changed, errors, ignore_missing=True,
+        )
+
+    for service in services:
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", allow_zone, "--add-service", service],
+            changed, errors,
+        )
+        if remove_public_openings:
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", "--zone", "public", "--remove-service", service],
+                changed, errors, ignore_missing=True,
+            )
+    for port in ports:
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", allow_zone, "--add-port", port],
+            changed, errors,
+        )
+        if remove_public_openings:
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", "--zone", "public", "--remove-port", port],
+                changed, errors, ignore_missing=True,
+            )
+    for fp in forward_ports:
+        spec = _forward_port_spec(fp)
+        if not spec:
+            continue
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", allow_zone, f"--add-forward-port={spec}"],
+            changed, errors,
+        )
+        if remove_public_openings:
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", "--zone", "public", f"--remove-forward-port={spec}"],
+                changed, errors, ignore_missing=True,
+            )
+
+    for rule in _build_drop_zone_guard_rules(ipsets=ipsets):
+        added, error = _ensure_direct_rule(rule)
+        if error:
+            errors.append(error)
+        elif added:
+            changed.append("direct " + _direct_rule_raw(rule))
+
+    reload_res = sudo_run(["firewall-cmd", "--reload"])
+    if not reload_res.ok:
+        errors.append("reload failed: " + reload_res.stderr.strip())
+    return {"ok": not errors, "changed": changed, "errors": errors}
+
+
+def _collect_firewall_change(cmd: list[str], changed: list[str], errors: list[str], ignore_missing: bool = False) -> None:
+    res = sudo_run(cmd)
+    output = (res.stderr or res.stdout).strip()
+    if res.ok:
+        changed.append(" ".join(shlex.quote(part) for part in cmd))
+        return
+    if ignore_missing and any(token in output for token in ("NOT_ENABLED", "INVALID_ENTRY", "ZONE_ALREADY_SET")):
+        return
+    if any(token in output for token in ("ALREADY_ENABLED", "ZONE_ALREADY_SET")):
+        return
+    errors.append(output or "failed: " + " ".join(cmd))
+
+
+def _zone_public_openings(zone_info: dict) -> bool:
+    return bool(zone_info.get("services") or zone_info.get("ports") or zone_info.get("forward_ports"))
+
+
+def _available_ipset_names() -> set[str]:
+    res = sudo_run(["firewall-cmd", "--permanent", "--get-ipsets"])
+    return set(res.stdout.split()) if res.ok else set()
+
+
+def _zone_names() -> set[str]:
+    res = sudo_run(["firewall-cmd", "--get-zones"])
+    return set(res.stdout.split()) if res.ok else set()
+
+
+def _normalize_ipsets(raw) -> list[str]:
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.replace(",", " ").split()]
+    else:
+        values = [str(part).strip() for part in raw]
+    out: list[str] = []
+    for value in values:
+        name = value[6:] if value.startswith("ipset:") else value
+        if re.match(r"^[A-Za-z0-9_-]{1,64}$", name) and name not in out:
+            out.append(name)
+    return out
+
+
+def _forward_port_spec(fp: dict) -> str:
+    port = fp.get("port", "")
+    proto = fp.get("proto", "")
+    if not port or not proto:
+        return ""
+    spec = f"port={port}:proto={proto}"
+    if fp.get("toport"):
+        spec += f":toport={fp['toport']}"
+    if fp.get("toaddr"):
+        spec += f":toaddr={fp['toaddr']}"
+    return spec
+
+
+def _wan_interfaces() -> list[str]:
+    res = sudo_run(["/bin/bash", "-lc", "ip -o -4 route show default | awk '{print $5}' | sort -u"])
+    interfaces = [line.strip() for line in res.stdout.splitlines() if line.strip()] if res.ok else []
+    out: list[str] = []
+    for iface in interfaces:
+        if iface not in out:
+            out.append(iface)
+        if iface.startswith("ppp") and "ppp+" not in out:
+            out.append("ppp+")
+    return out or ["ppp+", "wan0"]
+
+
+def _drop_zone_ipsets() -> list[str]:
+    res = sudo_run(["firewall-cmd", "--permanent", "--zone", "drop", "--list-sources"])
+    if not res.ok:
+        return []
+    return _normalize_ipsets([source for source in res.stdout.split() if source.startswith("ipset:")])
+
+
+def _build_drop_zone_guard_rules(ipsets: list[str] | None = None) -> list[dict]:
+    names = ipsets or _drop_zone_ipsets()
+    rules: list[dict] = []
+    for iface in _wan_interfaces():
+        for name in names:
+            rules.append(_direct_rule(
+                "ipv4", "filter", "INPUT", -30,
+                f"-i {iface} -m set --match-set {name} src -m comment --comment synca-drop-zone-guard -j DROP",
+            ))
+    return rules
+
+
+def _build_wan_hardening_rules() -> list[dict]:
+    rules = _build_drop_zone_guard_rules()
+    spoofed_sources = [
+        "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",
+        "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+    ]
+    stealth_flags = [
+        "ALL NONE", "ALL ALL", "ALL FIN,URG,PSH", "SYN,FIN SYN,FIN",
+        "SYN,RST SYN,RST", "FIN,RST FIN,RST",
+    ]
+    icmp_types = [
+        "timestamp-request", "timestamp-reply", "address-mask-request",
+        "address-mask-reply", "redirect", "router-advertisement", "router-solicitation",
+    ]
+    for iface in _wan_interfaces():
+        rules.append(_direct_rule("ipv4", "filter", "INPUT", -25, f"-i {iface} -m conntrack --ctstate INVALID -m comment --comment synca-wan-invalid -j DROP"))
+        rules.append(_direct_rule("ipv4", "filter", "INPUT", -25, f"-i {iface} -m addrtype --dst-type BROADCAST -m comment --comment synca-wan-broadcast -j DROP"))
+        rules.append(_direct_rule("ipv4", "filter", "INPUT", -25, f"-i {iface} -m addrtype --dst-type MULTICAST -m comment --comment synca-wan-multicast -j DROP"))
+        rules.append(_direct_rule("ipv4", "filter", "INPUT", -24, f"-i {iface} -p icmp --icmp-type echo-request -m length --length 1000:65535 -m comment --comment synca-wan-ping-of-death -j DROP"))
+        rules.append(_direct_rule("ipv4", "filter", "INPUT", -24, f"-i {iface} -p tcp --syn -m hashlimit --hashlimit-above 30/second --hashlimit-burst 60 --hashlimit-mode srcip --hashlimit-name synca_synflood -m comment --comment synca-wan-synflood -j DROP"))
+        for source in spoofed_sources:
+            rules.append(_direct_rule("ipv4", "filter", "INPUT", -24, f"-i {iface} -s {source} -m comment --comment synca-wan-spoof -j DROP"))
+        for flags in stealth_flags:
+            rules.append(_direct_rule("ipv4", "filter", "INPUT", -24, f"-i {iface} -p tcp --tcp-flags {flags} -m comment --comment synca-wan-stealth -j DROP"))
+        for icmp_type in icmp_types:
+            rules.append(_direct_rule("ipv4", "filter", "INPUT", -23, f"-i {iface} -p icmp --icmp-type {icmp_type} -m comment --comment synca-wan-icmp-type -j DROP"))
+    return _dedupe_direct_rules(rules)
+
+
+def _direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> dict:
+    return {"ipv": ipv, "table": table, "chain": chain, "priority": str(priority), "args": args}
+
+
+def _dedupe_direct_rules(rules: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for rule in rules:
+        raw = _direct_rule_raw(rule)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        out.append(rule)
+    return out
+
+
+def _direct_rule_raw(rule: dict) -> str:
+    return f"{rule['ipv']} {rule['table']} {rule['chain']} {rule['priority']} {rule['args']}"
+
+
+def _direct_rule_lines(permanent: bool) -> set[str]:
+    cmd = ["firewall-cmd"]
+    if permanent:
+        cmd.append("--permanent")
+    cmd.extend(["--direct", "--get-all-rules"])
+    res = sudo_run(cmd)
+    return {line.strip() for line in res.stdout.splitlines() if line.strip()} if res.ok else set()
+
+
+def _ensure_direct_rule(rule: dict) -> tuple[bool, str | None]:
+    raw = _direct_rule_raw(rule)
+    if raw in _direct_rule_lines(permanent=True):
+        return False, None
+    try:
+        args_list = shlex.split(rule["args"])
+    except ValueError as e:
+        return False, f"failed to parse managed direct rule: {e}"
+    cmd = [
+        "firewall-cmd", "--permanent", "--direct", "--add-rule",
+        rule["ipv"], rule["table"], rule["chain"], str(rule["priority"]), *args_list,
+    ]
+    res = sudo_run(cmd)
+    if not res.ok:
+        return False, (res.stderr or res.stdout).strip()
+    return True, None
+
 
 def _apply_change(zone: str, op_args: list[str]) -> dict:
     try:

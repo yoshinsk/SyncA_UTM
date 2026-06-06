@@ -154,6 +154,21 @@ def list_backups():
 @login_required
 @csrf_protect
 def create_backup():
+    try:
+        result = create_backup_archive()
+    except Exception as e:
+        logger.exception("backup creation failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify(result)
+
+
+def create_backup_archive() -> dict:
+    """Create one local backup archive and apply retention pruning.
+
+    This function is used by both the authenticated GUI endpoint and the
+    systemd timer helper. Keeping the implementation shared prevents the
+    scheduled path from silently drifting away from the manual backup path.
+    """
     BACKUP_STORE.mkdir(parents=True, exist_ok=True)
     timestamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     name = f"server-gui-{timestamp}.tar.gz"
@@ -174,15 +189,14 @@ def create_backup():
                 if src.exists() or src.is_symlink():
                     tar.add(src, arcname="files" + str(src), recursive=False)
         out_path.chmod(0o600)
-    except Exception as e:
+    except Exception:
         if out_path.exists():
             out_path.unlink(missing_ok=True)
-        logger.exception("backup creation failed")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        raise
 
     pruned = _prune_old_backups()
     st = out_path.stat()
-    return jsonify({
+    return {
         "ok": True,
         "name": name,
         "path": str(out_path),
@@ -190,7 +204,7 @@ def create_backup():
         "file_count": len(files),
         "sections": _section_counts(files),
         "pruned": pruned,
-    })
+    }
 
 
 @bp.route("/api/download/<name>", methods=["GET"])

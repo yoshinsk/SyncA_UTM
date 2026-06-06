@@ -25,6 +25,7 @@ IP_RE = re.compile(r"^[0-9a-fA-F:.]+(?:/\d{1,3})?$")
 JAIL_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,63}$")
 
 JAIL_LOCAL = Path("/etc/fail2ban/jail.local")
+FAIL2BAN_LOCAL = Path("/etc/fail2ban/fail2ban.local")
 JAIL_D = Path("/etc/fail2ban/jail.d")
 FILTER_D = Path("/etc/fail2ban/filter.d")
 AUTO_JAIL = JAIL_D / "server-gui-auto.local"
@@ -71,9 +72,15 @@ journalmatch = _SYSTEMD_UNIT=server-gui.service
 [recidive]
 enabled  = true
 logpath  = /var/log/fail2ban.log
+backend  = polling
 bantime  = 1w
 findtime = 1d
 maxretry = 3
+"""
+
+FAIL2BAN_LOCAL_CONTENT = """# Managed by server-gui (fail2ban logging target).
+[Definition]
+logtarget = /var/log/fail2ban.log
 """
 
 SERVER_GUI_FILTER_CONTENT = """# Managed by server-gui (fail2ban auto-open-ports).
@@ -148,6 +155,10 @@ def install_defaults():
     if write_res:
         return jsonify({"error": write_res}), 500
 
+    logtarget_res = _write_managed_file(FAIL2BAN_LOCAL, FAIL2BAN_LOCAL_CONTENT)
+    if logtarget_res:
+        return jsonify({"error": logtarget_res}), 500
+
     filter_res = _write_managed_file(SERVER_GUI_FILTER, SERVER_GUI_FILTER_CONTENT)
     if filter_res:
         return jsonify({"error": filter_res}), 500
@@ -168,7 +179,7 @@ def install_defaults():
 def get_jail_local():
     """Return current managed fail2ban config for read-only inspection."""
     files = []
-    for path in (JAIL_LOCAL, AUTO_JAIL, IGNOREIP_JAIL, SERVER_GUI_FILTER):
+    for path in (FAIL2BAN_LOCAL, JAIL_LOCAL, AUTO_JAIL, IGNOREIP_JAIL, SERVER_GUI_FILTER):
         item = {"path": str(path), "exists": path.exists(), "content": "", "managed": False}
         if path.exists():
             try:
@@ -179,8 +190,8 @@ def get_jail_local():
         files.append(item)
     return jsonify({
         "exists": JAIL_LOCAL.exists(),
-        "content": files[0]["content"],
-        "managed": files[0]["managed"],
+        "content": next((f["content"] for f in files if f["path"] == str(JAIL_LOCAL)), ""),
+        "managed": next((f["managed"] for f in files if f["path"] == str(JAIL_LOCAL)), False),
         "files": files,
     })
 
@@ -553,6 +564,7 @@ def _build_auto_jail_file(jails: list[str]) -> str:
             "[recidive]",
             "enabled = true",
             "logpath = /var/log/fail2ban.log",
+            "backend = polling",
             "bantime = 1w",
             "findtime = 1d",
             "maxretry = 3",
