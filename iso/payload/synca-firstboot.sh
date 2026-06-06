@@ -873,8 +873,8 @@ start_services() {
     systemctl reload-or-restart nginx || true
     systemctl restart server-gui || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
-        systemctl enable server-gui-ddns.timer server-gui-geoip.timer
-        systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer || true
+        systemctl enable server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer
+        systemctl start --no-block server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer || true
         local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
         local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
         if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then

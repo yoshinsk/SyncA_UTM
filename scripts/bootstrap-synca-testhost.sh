@@ -415,6 +415,66 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+    cat > /etc/systemd/system/server-gui-backup.service <<'UNIT'
+[Unit]
+Description=server-gui local configuration backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/backup-create
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-backup.timer <<'UNIT'
+[Unit]
+Description=Run server-gui local backup daily
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 03:10:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    cat > /etc/systemd/system/server-gui-update-check.service <<'UNIT'
+[Unit]
+Description=server-gui GitHub update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/update-check
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-update-check.timer <<'UNIT'
+[Unit]
+Description=Run server-gui GitHub update check daily
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
     cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
 [Unit]
 Description=SyncA UTM 集中管理 状態送信
@@ -494,7 +554,7 @@ start_services() {
     # Do not start dnsmasq DHCP until LAN IP migration is intentionally run.
     systemctl daemon-reload
     systemctl enable --now server-gui nginx wgui-worker
-    systemctl enable server-gui-ddns.timer server-gui-geoip.timer
+    systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer
     local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
     local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
     if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then

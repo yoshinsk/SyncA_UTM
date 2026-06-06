@@ -1,4 +1,4 @@
-"""Certificate discovery + metadata.
+"""payload/server-gui/server_gui/modules/certs.py - Manage TLS certificates.
 
 Read-only in Phase 1:
   - Scans /etc/letsencrypt/live/*/ for Let's Encrypt certs
@@ -55,6 +55,7 @@ def page():
 
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+CERT_NAME_RE = re.compile(r"^[A-Za-z0-9._\-]{1,253}$")
 
 
 @bp.route("/api/issue", methods=["POST"])
@@ -181,6 +182,96 @@ def renew_certificate():
     })
 
 
+@bp.route("/api/reissue-production", methods=["POST"])
+@login_required
+@csrf_protect
+def reissue_production_certificate():
+    """Replace an existing staging certificate with a production certificate."""
+    payload = request.get_json(force=True, silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    if not CERT_NAME_RE.match(name):
+        return jsonify({"error": "invalid certificate name"}), 400
+    email = (payload.get("email") or "").strip()
+    if not EMAIL_RE.match(email):
+        return jsonify({"error": "valid email required"}), 400
+
+    fqdns = _certificate_domains(name)
+    if not fqdns:
+        return jsonify({"error": "certificate domains could not be determined"}), 400
+
+    method = payload.get("method", "webroot")
+    if method not in ("standalone", "webroot"):
+        return jsonify({"error": "method must be 'standalone' or 'webroot'"}), 400
+    requested_method = method
+    method_warning = None
+    if method == "standalone":
+        method = "webroot"
+        method_warning = (
+            "standalone は nginx を一時停止するため GUI 通信が切断されます。"
+            "GUI からの本番再取得では webroot を使用しました。"
+        )
+
+    cmd = [
+        "certbot", "certonly",
+        "--non-interactive", "--agree-tos",
+        "--force-renewal", "--cert-name", name,
+        "--email", email,
+    ]
+    if method == "webroot":
+        acme_result = _ensure_acme_http_vhost()
+        if not acme_result.get("ok"):
+            return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
+        hook_result = _ensure_letsencrypt_hooks()
+        if not hook_result.get("ok"):
+            return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
+        webroot = payload.get("webroot") or str(ACME_WEBROOT)
+        cmd.extend(["--webroot", "--webroot-path", webroot])
+    else:
+        hook_result = _ensure_letsencrypt_hooks()
+        if not hook_result.get("ok"):
+            return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
+        cmd.extend(["--standalone", "--pre-hook", str(LE_HOOK_PRE), "--post-hook", str(LE_HOOK_POST)])
+    for fqdn in fqdns:
+        cmd.extend(["-d", fqdn])
+
+    firewall_state = _open_http_for_acme()
+    try:
+        res = sudo_run(cmd, timeout=180)
+    finally:
+        _close_http_for_acme(firewall_state)
+    applied = None
+    if res.ok and bool(payload.get("apply_to_gui", False)):
+        applied = _apply_gui_certificate(name)
+    return jsonify({
+        "ok": res.ok,
+        "requested_method": requested_method,
+        "effective_method": method,
+        "warning": method_warning,
+        "command": " ".join(cmd),
+        "stdout": res.stdout,
+        "stderr": res.stderr,
+        "applied_to_gui": applied,
+    })
+
+
+@bp.route("/api/delete", methods=["POST"])
+@login_required
+@csrf_protect
+def delete_certificate():
+    """Delete an existing certbot certificate by name."""
+    payload = request.get_json(force=True, silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    if not CERT_NAME_RE.match(name):
+        return jsonify({"error": "invalid certificate name"}), 400
+    res = sudo_run(["certbot", "delete", "--cert-name", name, "--non-interactive"], timeout=60)
+    return jsonify({
+        "ok": res.ok,
+        "command": f"certbot delete --cert-name {name} --non-interactive",
+        "stdout": res.stdout,
+        "stderr": res.stderr,
+    })
+
+
 @bp.route("/api/certificates", methods=["GET"])
 @login_required
 def list_certificates():
@@ -212,6 +303,7 @@ def list_certificates():
             }
             if info:
                 entry.update(info)
+            entry["is_staging"] = _is_staging_issuer(entry.get("issuer") or "")
             entry["used_by_gui"] = (
                 bool(gui_cert)
                 and gui_cert.get("cert_path") == entry["cert_path"]
@@ -354,6 +446,34 @@ def apply_gui_certificate():
 
 
 # ---- parsing -----------------------------------------------------------
+
+def _certificate_domains(name: str) -> list[str]:
+    """Return validated DNS names currently present on an existing cert."""
+    live_dir = LETSENCRYPT_LIVE / name
+    fullchain = live_dir / "fullchain.pem"
+    if not fullchain.exists():
+        return []
+    info = _parse_cert(fullchain) or {}
+    domains = info.get("sans") or []
+    if not domains:
+        subject = info.get("subject") or name
+        domains = [subject]
+    out: list[str] = []
+    for domain in domains:
+        try:
+            validated = validate_hostname(str(domain).strip())
+        except ValidationError:
+            continue
+        if validated not in out:
+            out.append(validated)
+    return out
+
+
+def _is_staging_issuer(issuer: str) -> bool:
+    """Detect Let's Encrypt staging issuers exposed by openssl subject text."""
+    lowered = issuer.lower()
+    return any(marker in lowered for marker in ("staging", "fake le", "pretend pear"))
+
 
 def _parse_cert(path: Path) -> Optional[dict]:
     """Run openssl to extract human-readable cert info."""

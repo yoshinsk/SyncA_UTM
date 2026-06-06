@@ -325,6 +325,66 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+    cat > /etc/systemd/system/server-gui-backup.service <<'UNIT'
+[Unit]
+Description=server-gui local configuration backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/backup-create
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-backup.timer <<'UNIT'
+[Unit]
+Description=Run server-gui local backup daily
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 03:10:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    cat > /etc/systemd/system/server-gui-update-check.service <<'UNIT'
+[Unit]
+Description=server-gui GitHub update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/update-check
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-update-check.timer <<'UNIT'
+[Unit]
+Description=Run server-gui GitHub update check daily
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
     cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
 [Unit]
 Description=SyncA UTM 集中管理 状態送信

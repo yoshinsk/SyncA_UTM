@@ -1,0 +1,33 @@
+#!/opt/server-gui/venv/bin/python
+"""payload/server-gui/bin/backup-create - Create a scheduled SyncA UTM backup.
+
+This command is invoked by server-gui-backup.timer. It imports the same
+backup implementation used by the authenticated WEB GUI, writes a JSON result
+to stdout for journald, and exits non-zero only when archive creation fails.
+"""
+from __future__ import annotations
+
+import json
+import sys
+
+
+def main() -> int:
+    sys.path.insert(0, "/opt/server-gui")
+    try:
+        from server_gui.modules.backup import create_backup_archive
+    except ImportError as e:
+        print(json.dumps({"ok": False, "error": f"import failed: {e}"}), file=sys.stderr)
+        return 1
+
+    try:
+        result = create_backup_archive()
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

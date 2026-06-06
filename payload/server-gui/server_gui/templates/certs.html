@@ -253,11 +253,21 @@ async function refresh() {
         const action = c.used_by_gui
             ? '<span class="text-secondary small">使用中</span>'
             : `<button class="btn btn-outline-primary btn-sm" onclick="applyGuiCert('${escapeJs(c.name)}')">WEB GUIで使用</button>`;
+        const stagingBadge = c.is_staging
+            ? '<span class="badge bg-warning-subtle text-warning-emphasis ms-1">STAGING</span>'
+            : '';
+        const stagingActions = c.is_staging
+            ? `<div class="d-flex gap-1 flex-wrap mt-1">
+                   <button class="btn btn-sm btn-warning" onclick="reissueProductionCert('${escapeJs(c.name)}')">本番再取得</button>
+                   <button class="btn btn-sm btn-outline-danger" onclick="deleteCert('${escapeJs(c.name)}')">削除</button>
+               </div>`
+            : '';
         return `
             <tr>
                 <td class="fw-semibold">${escapeHtml(c.name)}
                     <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${escapeHtml(c.source)}</span>
                     ${guiBadge}
+                    ${stagingBadge}
                 </td>
                 <td class="font-monospace small">${escapeHtml(c.subject || '-')}</td>
                 <td class="font-monospace small">${(c.sans || []).map(escapeHtml).join('<br>') || '-'}</td>
@@ -265,7 +275,7 @@ async function refresh() {
                 <td class="font-monospace small">${escapeHtml(c.not_after || '-')}</td>
                 <td>${daysBadge(c.days_remaining)}</td>
                 <td class="font-monospace small text-secondary text-break">${escapeHtml(c.cert_path)}</td>
-                <td>${action}</td>
+                <td>${action}${stagingActions}</td>
             </tr>`;
     }).join('');
 }
@@ -279,6 +289,38 @@ async function applyGuiCert(name) {
         refresh();
     } else {
         toast(res.error || '証明書の適用に失敗しました', true);
+    }
+}
+
+async function reissueProductionCert(name) {
+    const email = prompt(`${name} をLet's Encrypt本番証明書として再取得します。\n更新通知用メールアドレスを入力してください。`);
+    if (!email) return;
+    if (!confirm(`${name} を本番証明書で強制再取得しますか?`)) return;
+    const res = await api.send('/certs/api/reissue-production', 'POST', {
+        name,
+        email,
+        method: 'webroot',
+        webroot: '/var/www/letsencrypt',
+        apply_to_gui: false,
+    });
+    if (!res) return;
+    if (res.ok) {
+        toast('本番証明書を取得しました');
+        refresh();
+    } else {
+        toast('本番再取得に失敗しました', true);
+    }
+}
+
+async function deleteCert(name) {
+    if (!confirm(`${name} をcertbotから削除しますか?`)) return;
+    const res = await api.send('/certs/api/delete', 'POST', { name });
+    if (!res) return;
+    if (res.ok) {
+        toast('証明書を削除しました');
+        refresh();
+    } else {
+        toast('証明書の削除に失敗しました', true);
     }
 }
 
