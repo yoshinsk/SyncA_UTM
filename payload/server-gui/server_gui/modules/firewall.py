@@ -260,9 +260,9 @@ def direct_rules():
     res = sudo_run(cmd)
     if not res.ok:
         return jsonify({"ok": False, "error": (res.stderr or res.stdout).strip()}), 500
-    reload_res = sudo_run(["firewall-cmd", "--reload"])
-    if not reload_res.ok:
-        return jsonify({"ok": False, "error": "reload failed: " + reload_res.stderr.strip()}), 500
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        return jsonify({"ok": False, "error": reload_output}), 500
     return jsonify({"ok": True})
 
 
@@ -325,9 +325,9 @@ def wan_hardening():
             errors.append(error)
         elif added:
             applied.append(_direct_rule_raw(rule))
-    reload_res = sudo_run(["firewall-cmd", "--reload"])
-    if not reload_res.ok:
-        errors.append("reload failed: " + reload_res.stderr.strip())
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        errors.append(reload_output)
     return jsonify({
         "ok": not errors,
         "applied": applied,
@@ -341,8 +341,8 @@ def wan_hardening():
 @login_required
 @csrf_protect
 def reload_firewall():
-    res = sudo_run(["firewall-cmd", "--reload"])
-    return jsonify({"ok": res.ok, "output": res.stdout or res.stderr})
+    ok, output = _reload_firewall_and_refresh_fail2ban()
+    return jsonify({"ok": ok, "output": output})
 
 
 # ---- helpers -----------------------------------------------------------
@@ -438,9 +438,9 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
         elif added:
             changed.append("direct " + _direct_rule_raw(rule))
 
-    reload_res = sudo_run(["firewall-cmd", "--reload"])
-    if not reload_res.ok:
-        errors.append("reload failed: " + reload_res.stderr.strip())
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        errors.append(reload_output)
     return {"ok": not errors, "changed": changed, "errors": errors}
 
 
@@ -480,6 +480,23 @@ def _remove_allowlist_drop_guards(ipsets: list[str], changed: list[str], errors:
             output = (res.stderr or res.stdout).strip()
             if "not in list" not in output:
                 errors.append(output or "failed to remove stale direct " + raw)
+
+
+def _reload_firewall_and_refresh_fail2ban() -> tuple[bool, str]:
+    """Reload firewalld and rebuild fail2ban firewallcmd-ipset runtime rules."""
+    reload_res = sudo_run(["firewall-cmd", "--reload"])
+    reload_output = (reload_res.stderr or reload_res.stdout).strip()
+    if not reload_res.ok:
+        return False, "reload failed: " + reload_output
+
+    f2b_res = sudo_run([
+        "/bin/bash", "-lc",
+        "if systemctl is-enabled --quiet fail2ban 2>/dev/null; then systemctl restart fail2ban; fi",
+    ])
+    f2b_output = (f2b_res.stderr or f2b_res.stdout).strip()
+    if not f2b_res.ok:
+        return False, "fail2ban refresh failed after firewalld reload: " + f2b_output
+    return True, reload_output or f2b_output
 
 
 def _collect_firewall_change(cmd: list[str], changed: list[str], errors: list[str], ignore_missing: bool = False) -> None:
@@ -650,9 +667,9 @@ def _apply_change(zone: str, op_args: list[str]) -> dict:
     res = sudo_run(["firewall-cmd", "--zone", zone, *op_args, "--permanent"])
     if not res.ok:
         return {"ok": False, "error": (res.stderr or res.stdout).strip()}
-    reload_res = sudo_run(["firewall-cmd", "--reload"])
-    if not reload_res.ok:
-        return {"ok": False, "error": "reload failed: " + reload_res.stderr.strip()}
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        return {"ok": False, "error": reload_output}
     return {"ok": True}
 
 
