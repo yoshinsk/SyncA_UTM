@@ -44,6 +44,7 @@ SYNCA_PRIVATE_FIRSTBOOT_ENV="${SYNCA_PRIVATE_FIRSTBOOT_ENV:-}"
 SYNCA_INITIAL_ADMIN_USER="${SYNCA_INITIAL_ADMIN_USER:-}"
 SYNCA_INITIAL_ADMIN_PASSWORD="${SYNCA_INITIAL_ADMIN_PASSWORD:-}"
 SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"
+SYNCA_DEFAULT_INSTALLED_SHA="${SYNCA_DEFAULT_INSTALLED_SHA:-$(git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null || true)}"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -78,6 +79,10 @@ prepare_workspace() {
     fi
     if [[ ! "$SYNCA_DEFAULT_UPDATE_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
         echo "invalid SYNCA_DEFAULT_UPDATE_BRANCH: $SYNCA_DEFAULT_UPDATE_BRANCH" >&2
+        exit 1
+    fi
+    if [[ -n "$SYNCA_DEFAULT_INSTALLED_SHA" && ! "$SYNCA_DEFAULT_INSTALLED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "invalid SYNCA_DEFAULT_INSTALLED_SHA: $SYNCA_DEFAULT_INSTALLED_SHA" >&2
         exit 1
     fi
     mkdir -p "$BUILD_DIR" "$(dirname "$OUTPUT_ISO")"
@@ -161,18 +166,24 @@ PY
         "${BUILD_DIR}/payload/synca/synca-install.sh"
     install -m 0755 "${ROOT_DIR}/iso/payload/synca-firstboot.sh" \
         "${BUILD_DIR}/payload/synca/synca-firstboot.sh"
-    python3 - "${BUILD_DIR}/payload/synca/synca-firstboot.sh" "$SYNCA_DEFAULT_UPDATE_BRANCH" <<'PY'
+    python3 - "${BUILD_DIR}/payload/synca/synca-firstboot.sh" "$SYNCA_DEFAULT_UPDATE_BRANCH" "$SYNCA_DEFAULT_INSTALLED_SHA" <<'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 branch = sys.argv[2]
+installed_sha = sys.argv[3]
 old = 'SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"'
 new = f'SYNCA_DEFAULT_UPDATE_BRANCH="${{SYNCA_DEFAULT_UPDATE_BRANCH:-{branch}}}"'
 text = path.read_text(encoding="utf-8")
 if old not in text:
     raise SystemExit("default update branch marker not found")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
+text = text.replace(old, new, 1)
+old_sha = 'SYNCA_DEFAULT_INSTALLED_SHA="${SYNCA_DEFAULT_INSTALLED_SHA:-}"'
+new_sha = f'SYNCA_DEFAULT_INSTALLED_SHA="${{SYNCA_DEFAULT_INSTALLED_SHA:-{installed_sha}}}"'
+if old_sha not in text:
+    raise SystemExit("default installed sha marker not found")
+path.write_text(text.replace(old_sha, new_sha, 1), encoding="utf-8")
 PY
     mkdir -p "${BUILD_DIR}/payload/synca/firewalld-profiles"
     install -m 0644 "${ROOT_DIR}/payload/firewalld-profiles/synca-utm-default.json" \

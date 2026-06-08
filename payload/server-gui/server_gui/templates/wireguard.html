@@ -715,6 +715,12 @@ function formatBytes(n) {
 }
 
 function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function peerKeyToken(pubkey) {
+    return btoa(String(pubkey)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+function peerKeyUrl(pubkey, suffix = '') {
+    return `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/key/${peerKeyToken(pubkey)}${suffix}`;
+}
 
 /* ---- peer modal ---- */
 function openPeerModal(peer) {
@@ -785,7 +791,7 @@ async function submitPeerForm() {
         payload.preshared_key_regen = document.getElementById('pf-psk-regen').checked;
         payload.preshared_key_drop = document.getElementById('pf-psk-drop').checked;
         res = await api.send(
-            `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(editingPubkey)}`,
+            peerKeyUrl(editingPubkey),
             'PUT', payload);
     } else {
         payload.preshared_key = document.getElementById('pf-psk').checked;
@@ -808,8 +814,7 @@ async function submitPeerForm() {
 
 /* ---- show config / QR (anytime) ---- */
 async function showClientConfig(pubkey, name) {
-    const res = await api.get(
-        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}/client-config`);
+    const res = await api.get(peerKeyUrl(pubkey, '/client-config'));
     if (!res) return;
     showConfigPanel(`クライアント設定: ${name || pubkey.slice(0,16) + '…'}`,
         res.client_config, res.qr_svg, '');
@@ -862,7 +867,7 @@ async function submitAdoptKey() {
     const privkey = document.getElementById('adopt-privkey').value.trim();
     if (!privkey) return toast('秘密鍵を入力してください', true);
     const res = await api.send(
-        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(adoptingPubkey)}/adopt-key`,
+        peerKeyUrl(adoptingPubkey, '/adopt-key'),
         'POST', { private_key: privkey });
     if (!res) return;
     toast('取り込みました');
@@ -883,7 +888,7 @@ async function regenerateKeys(pubkey) {
         `・新しい .conf がモーダルに表示されます (再表示可)\n` +
         `・GUI 管理下に取り込まれます (これまで limited だった場合)`)) return;
     const res = await api.send(
-        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}/regenerate-keys`,
+        peerKeyUrl(pubkey, '/regenerate-keys'),
         'POST', { regenerate_psk: true });
     if (!res) return;
     toast('鍵を再生成しました');
@@ -897,9 +902,7 @@ async function regenerateKeys(pubkey) {
 
 async function deletePeer(pubkey) {
     if (!confirm('このピアを削除しますか?\n' + pubkey)) return;
-    const res = await api.send(
-        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/${encodeURIComponent(pubkey)}`,
-        'DELETE');
+    const res = await api.send(peerKeyUrl(pubkey), 'DELETE');
     if (res && res.ok) { toast('削除しました'); refresh(); }
 }
 

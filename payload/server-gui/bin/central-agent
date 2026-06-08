@@ -39,6 +39,7 @@ SERVER_GUI_BACKUP_DIR = "/var/lib/server-gui/backups"
 UPLOAD_STATE_PATH = os.path.join(AGENT_STATE_DIR, "upload-state.json")
 LOG_PATH = "/var/log/synca-central-agent.log"
 DEFAULT_PUBLIC_IP_CHECK_URL = "https://update.ddnsft.com/checkip.php"
+AGENT_USER_AGENT = "SyncA-UTM-Central-Agent/0.1.1"
 
 SERVICES = [
     "server-gui",
@@ -248,7 +249,8 @@ def detect_public_ip(check_url):
     candidates.append(DEFAULT_PUBLIC_IP_CHECK_URL)
     for url in candidates:
         try:
-            response = urlrequest.urlopen(url, timeout=10)
+            req = urlrequest.Request(url, headers={"User-Agent": AGENT_USER_AGENT})
+            response = urlrequest.urlopen(req, timeout=10)
             body = response.read(256).decode("utf-8", "replace")
         except Exception:
             continue
@@ -414,6 +416,7 @@ def post_enrollment(config):
         raise RuntimeError("missing enrollment_token for automatic enrollment")
     body = json.dumps(enrollment_payload(config), sort_keys=True, separators=(",", ":")).encode("utf-8")
     headers = {
+        "User-Agent": AGENT_USER_AGENT,
         "Content-Type": "application/json",
         "X-SyncA-Enrollment-Token": token,
     }
@@ -476,6 +479,7 @@ def body_headers(config, body):
 def post_json(config, path, payload):
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     headers = body_headers(config, body)
+    headers["User-Agent"] = AGENT_USER_AGENT
     headers["Content-Type"] = "application/json"
     req = urlrequest.Request(config["central_url"] + path, data=body, headers=headers)
     try:
@@ -578,6 +582,7 @@ def post_backup(config, path, backup_type):
     stat = os.stat(path)
     body_sha256 = hashlib.sha256(body).hexdigest()
     headers = body_headers(config, body)
+    headers["User-Agent"] = AGENT_USER_AGENT
     metadata = {
         "created_by": "synca-central-agent",
         "backup_type": backup_type,

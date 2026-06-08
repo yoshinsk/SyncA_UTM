@@ -180,16 +180,63 @@ def delete_ipset(name: str):
 
 def _zones_referencing_ipset(name: str) -> list[str]:
     """Return zones whose `source` list contains `ipset:<name>`."""
-    target = f"ipset:{name}"
+    return _source_zones(f"ipset:{name}")
+
+
+def _zone_names() -> list[str]:
+    zones_res = sudo_run(["firewall-cmd", "--permanent", "--get-zones"])
+    if not zones_res.ok:
+        return []
+    return zones_res.stdout.split()
+
+
+def _source_zones(source: str) -> list[str]:
+    """Return permanent firewalld zones that currently contain a source."""
     zones_res = sudo_run(["firewall-cmd", "--permanent", "--get-zones"])
     if not zones_res.ok:
         return []
     matching: list[str] = []
     for zone in zones_res.stdout.split():
         sr = sudo_run(["firewall-cmd", "--permanent", "--zone", zone, "--list-sources"])
-        if sr.ok and target in sr.stdout.split():
+        if sr.ok and source in sr.stdout.split():
             matching.append(zone)
     return matching
+
+
+def _move_source_to_zone(source: str, target_zone: str) -> tuple[bool, list[str], list[str]]:
+    """Move a source between zones before adding it to avoid ZONE_CONFLICT."""
+    changed: list[str] = []
+    errors: list[str] = []
+    zones = _zone_names()
+    if target_zone not in zones:
+        return False, changed, [f"zone {target_zone!r} not found"]
+
+    for zone in zones:
+        if zone == target_zone:
+            continue
+        sr = sudo_run(["firewall-cmd", "--permanent", "--zone", zone, "--list-sources"])
+        if not sr.ok or source not in sr.stdout.split():
+            continue
+        res = sudo_run(["firewall-cmd", "--permanent", "--zone", zone, "--remove-source", source])
+        output = (res.stderr or res.stdout).strip()
+        if res.ok or "NOT_ENABLED" in output:
+            changed.append(f"removed {source} from {zone}")
+        else:
+            errors.append(output or f"failed to remove {source} from {zone}")
+
+    res = sudo_run(["firewall-cmd", "--permanent", "--zone", target_zone, "--add-source", source])
+    output = (res.stderr or res.stdout).strip()
+    if res.ok or "ALREADY_ENABLED" in output:
+        changed.append(f"added {source} to {target_zone}")
+    else:
+        errors.append(output or f"failed to add {source} to {target_zone}")
+
+    if errors:
+        return False, changed, errors
+    reload_res = sudo_run(["firewall-cmd", "--reload"])
+    if not reload_res.ok:
+        return False, changed, ["reload failed: " + (reload_res.stderr or reload_res.stdout).strip()]
+    return True, changed, []
 
 
 @bp.route("/api/ipsets/discover", methods=["GET"])
@@ -360,11 +407,10 @@ def attach_dynamic_to_zone(set_id: str):
     if not entry:
         return jsonify({"error": "dynamic ipset not managed"}), 404
     source = f"ipset:{entry['ipset']}"
-    res = sudo_run(["firewall-cmd", "--zone", zone, "--add-source", source, "--permanent"])
-    if not res.ok:
-        return jsonify({"ok": False, "error": res.stderr.strip()}), 500
-    sudo_run(["firewall-cmd", "--reload"])
-    return jsonify({"ok": True, "zone": zone, "source": source})
+    ok, changed, errors = _move_source_to_zone(source, zone)
+    if not ok:
+        return jsonify({"ok": False, "error": "; ".join(errors), "changed": changed}), 500
+    return jsonify({"ok": True, "zone": zone, "source": source, "changed": changed})
 
 
 @bp.route("/api/dynamic-ipsets/<set_id>/detach", methods=["POST"])
@@ -403,11 +449,10 @@ def attach_to_zone(code: str):
     if not entry:
         return jsonify({"error": "country not managed"}), 404
     source = f"ipset:{entry['ipset']}"
-    res = sudo_run(["firewall-cmd", "--zone", zone, "--add-source", source, "--permanent"])
-    if not res.ok:
-        return jsonify({"ok": False, "error": res.stderr.strip()}), 500
-    sudo_run(["firewall-cmd", "--reload"])
-    return jsonify({"ok": True, "zone": zone, "source": source})
+    ok, changed, errors = _move_source_to_zone(source, zone)
+    if not ok:
+        return jsonify({"ok": False, "error": "; ".join(errors), "changed": changed}), 500
+    return jsonify({"ok": True, "zone": zone, "source": source, "changed": changed})
 
 
 @bp.route("/api/countries/<code>/detach", methods=["POST"])

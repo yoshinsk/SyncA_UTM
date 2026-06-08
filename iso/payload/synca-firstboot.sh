@@ -10,6 +10,7 @@ BACKTITLE="SyncA UTM initial setup"
 FIRSTBOOT_LOG="/var/log/synca-firstboot-apply.log"
 TTY_PATH="${SYNCA_FIRSTBOOT_TTY:-/dev/tty1}"
 SYNCA_DEFAULT_UPDATE_BRANCH="${SYNCA_DEFAULT_UPDATE_BRANCH:-main}"
+SYNCA_DEFAULT_INSTALLED_SHA="${SYNCA_DEFAULT_INSTALLED_SHA:-}"
 export TERM="${TERM:-linux}"
 
 quiet_firstboot_console() {
@@ -628,11 +629,19 @@ JSON
 {"backends": [], "vhosts": []}
 JSON
 
+    local installed_sha_value installed_sha_json
+    installed_sha_value="${SYNCA_INSTALLED_SHA:-$SYNCA_DEFAULT_INSTALLED_SHA}"
+    if [[ "$installed_sha_value" =~ ^[0-9a-f]{40}$ ]]; then
+        installed_sha_json="\"$installed_sha_value\""
+    else
+        installed_sha_json="null"
+    fi
+
     cat > "${CONFIG_DIR}/admin.json" <<JSON
 {
   "github_url": "https://github.com/yoshinsk/SyncA_UTM",
   "branch": "${update_branch_value}",
-  "installed_sha": null,
+  "installed_sha": ${installed_sha_json},
   "last_check_at": null,
   "last_check_ok": null,
   "last_check_log": "",
@@ -773,6 +782,9 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_connect_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
     }
 }
 NGINX

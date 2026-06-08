@@ -32,6 +32,8 @@ Workflow:
 from __future__ import annotations
 
 import datetime as _dt
+import base64
+import binascii
 import io
 import ipaddress
 import json
@@ -119,6 +121,22 @@ def _rename_pubkey_meta(old_pubkey: str, new_pubkey: str, new_meta: dict) -> Non
         data.setdefault("peers", {})
         data["peers"].pop(old_pubkey, None)
         data["peers"][new_pubkey] = new_meta
+
+
+def _pubkey_from_route(pubkey: str | None, pubkey_token: str | None) -> str | None:
+    """Decode route parameters without letting leading slashes corrupt URLs."""
+    if pubkey is not None:
+        return pubkey
+    if not pubkey_token or not re.match(r"^[A-Za-z0-9_-]{1,128}$", pubkey_token):
+        return None
+    try:
+        padded = pubkey_token + ("=" * (-len(pubkey_token) % 4))
+        value = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if not re.match(r"^[A-Za-z0-9+/]{43}=$", value):
+        return None
+    return value
 
 
 # ---- views --------------------------------------------------------------
@@ -373,10 +391,14 @@ def add_peer(iface: str):
     }), 201
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>", methods=["PUT"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>", methods=["PUT"])
 @login_required
 @csrf_protect
-def update_peer(iface: str, pubkey: str):
+def update_peer(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -446,10 +468,14 @@ def update_peer(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>", methods=["DELETE"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>", methods=["DELETE"])
 @login_required
 @csrf_protect
-def delete_peer(iface: str, pubkey: str):
+def delete_peer(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -472,10 +498,14 @@ def delete_peer(iface: str, pubkey: str):
     return jsonify({"ok": True})
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/client-config", methods=["GET"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/client-config", methods=["GET"])
 @login_required
-def get_client_config(iface: str, pubkey: str):
+def get_client_config(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Re-generate the client .conf + QR at any time. Requires stored metadata."""
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     meta = _load_meta(pubkey)
@@ -497,10 +527,11 @@ def get_client_config(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/adopt-key", methods=["POST"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/adopt-key", methods=["POST"])
 @login_required
 @csrf_protect
-def adopt_with_existing_key(iface: str, pubkey: str):
+def adopt_with_existing_key(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Bring a limited peer under GUI management by uploading its existing
     private key. The submitted private key MUST derive to the peer's public
     key, otherwise the request is rejected.
@@ -510,6 +541,9 @@ def adopt_with_existing_key(iface: str, pubkey: str):
       - You still have the original client's private key
       - You don't want to regenerate keys (which would force client re-install)
     """
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -566,16 +600,20 @@ def adopt_with_existing_key(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/regenerate-keys", methods=["POST"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/regenerate-keys", methods=["POST"])
 @login_required
 @csrf_protect
-def regenerate_peer_keys(iface: str, pubkey: str):
+def regenerate_peer_keys(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Generate a fresh keypair (and optionally PSK) for an existing peer.
 
     The peer's public key changes (it's derived from the new private key), so the
     old peer entry is removed from the conf and replaced with the new one. The
     metadata moves to the new pubkey too. Returns the fresh client config.
     """
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -1474,7 +1512,8 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
     listen_port = parsed.get("interface", {}).get("listen_port")
     endpoint_zone = _preferred_wireguard_endpoint_zone()
     if endpoint_zone and listen_port:
-        changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "wireguard"])
+        if _firewalld_service_available("wireguard"):
+            changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "wireguard"])
         changed |= _firewalld_add(["--zone", endpoint_zone, "--add-port", f"{listen_port}/udp"])
 
     changed |= _firewalld_add(["--zone", "trusted", "--add-interface", iface])
@@ -1565,6 +1604,11 @@ def _firewalld_add(args: list[str]) -> bool:
     if "ALREADY_ENABLED" in text or "ZONE_ALREADY_SET" in text or "already" in text.lower():
         return False
     raise RuntimeError(text)
+
+
+def _firewalld_service_available(service: str) -> bool:
+    res = sudo_run(["firewall-cmd", "--get-services"], timeout=15)
+    return res.ok and service in set(res.stdout.split())
 
 
 def _add_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> bool:

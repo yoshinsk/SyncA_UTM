@@ -19,6 +19,7 @@ WG_ADDR="${WG_ADDR:-10.252.1.1/24}"
 WG_PORT="${WG_PORT:-51820}"
 APP_ARCHIVE="${APP_ARCHIVE:-/tmp/server-gui-payload-testhost.tar.gz}"
 WGUI_BINARY="${WGUI_BINARY:-/tmp/wireguard-ui}"
+SYNCA_INSTALLED_SHA="${SYNCA_INSTALLED_SHA:-}"
 
 require_root() {
     # Root is required because the script writes /opt, /etc, systemd, firewalld,
@@ -164,11 +165,18 @@ JSON
 }
 JSON
 
-    cat > /etc/server-gui/admin.json <<'JSON'
+    local installed_sha_json
+    if [[ "$SYNCA_INSTALLED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        installed_sha_json="\"$SYNCA_INSTALLED_SHA\""
+    else
+        installed_sha_json="null"
+    fi
+
+    cat > /etc/server-gui/admin.json <<JSON
 {
   "github_url": "https://github.com/yoshinsk/SyncA_UTM",
   "branch": "main",
-  "installed_sha": null,
+  "installed_sha": ${installed_sha_json},
   "last_check_at": null,
   "last_check_ok": null,
   "last_check_log": "",
@@ -286,6 +294,9 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_connect_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
     }
 }
 NGINX
@@ -335,7 +346,7 @@ Group=root
 WorkingDirectory=/opt/server-gui
 Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/server-gui/venv/bin/gunicorn --bind 127.0.0.1:5010 --workers 2 --timeout 60 --access-logfile - --error-logfile - 'server_gui.app:create_app()'
+ExecStart=/opt/server-gui/venv/bin/gunicorn --bind 127.0.0.1:5010 --workers 2 --timeout 180 --access-logfile - --error-logfile - 'server_gui.app:create_app()'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
