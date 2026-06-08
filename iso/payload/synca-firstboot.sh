@@ -773,6 +773,9 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_connect_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
     }
 }
 NGINX

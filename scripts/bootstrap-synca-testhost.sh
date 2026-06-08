@@ -286,6 +286,9 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_connect_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
     }
 }
 NGINX
@@ -335,7 +338,7 @@ Group=root
 WorkingDirectory=/opt/server-gui
 Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/server-gui/venv/bin/gunicorn --bind 127.0.0.1:5010 --workers 2 --timeout 60 --access-logfile - --error-logfile - 'server_gui.app:create_app()'
+ExecStart=/opt/server-gui/venv/bin/gunicorn --bind 127.0.0.1:5010 --workers 2 --timeout 180 --access-logfile - --error-logfile - 'server_gui.app:create_app()'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

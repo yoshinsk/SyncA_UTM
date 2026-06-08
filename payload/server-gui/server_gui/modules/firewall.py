@@ -320,10 +320,11 @@ def wan_hardening():
         })
 
     expected = _build_wan_hardening_rules()
+    existing_direct = _direct_rule_lines(permanent=True)
     applied: list[str] = []
     errors: list[str] = []
     for rule in expected:
-        added, error = _ensure_direct_rule(rule)
+        added, error = _ensure_direct_rule(rule, existing_direct)
         if error:
             errors.append(error)
         elif added:
@@ -434,8 +435,9 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
             )
 
     _remove_allowlist_drop_guards(ipsets, changed, errors)
+    existing_direct = _direct_rule_lines(permanent=True)
     for rule in _build_drop_zone_guard_rules():
-        added, error = _ensure_direct_rule(rule)
+        added, error = _ensure_direct_rule(rule, existing_direct)
         if error:
             errors.append(error)
         elif added:
@@ -644,9 +646,11 @@ def _direct_rule_lines(permanent: bool) -> set[str]:
     return {line.strip() for line in res.stdout.splitlines() if line.strip()} if res.ok else set()
 
 
-def _ensure_direct_rule(rule: dict) -> tuple[bool, str | None]:
+def _ensure_direct_rule(rule: dict, existing: set[str] | None = None) -> tuple[bool, str | None]:
     raw = _direct_rule_raw(rule)
-    if raw in _direct_rule_lines(permanent=True):
+    if existing is None:
+        existing = _direct_rule_lines(permanent=True)
+    if raw in existing:
         return False, None
     try:
         args_list = shlex.split(rule["args"])
@@ -659,6 +663,7 @@ def _ensure_direct_rule(rule: dict) -> tuple[bool, str | None]:
     res = sudo_run(cmd)
     if not res.ok:
         return False, (res.stderr or res.stdout).strip()
+    existing.add(raw)
     return True, None
 
 
