@@ -14,6 +14,9 @@ Endpoints:
   DELETE /firewall/api/zones/<z>/rich-rules        — remove rich rule
   POST   /firewall/api/zones/<z>/forward-ports     — add forward port
   DELETE /firewall/api/zones/<z>/forward-ports     — remove forward port
+  GET    /firewall/api/zones/<z>/protocol-forwards — list GRE/ESP/AH forwards
+  POST   /firewall/api/zones/<z>/protocol-forwards — add GRE/ESP/AH forward
+  DELETE /firewall/api/zones/<z>/protocol-forwards — remove GRE/ESP/AH forward
   GET    /firewall/api/services-available          — all installed service defs
   GET    /firewall/api/direct-rules                — global direct rules (read-only)
   POST   /firewall/api/reload                      — firewall-cmd --reload
@@ -33,6 +36,10 @@ bp = Blueprint("firewall", __name__, url_prefix="/firewall")
 
 PORT_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?/(tcp|udp|sctp|dccp)$")
 PORT_RANGE_RE = re.compile(r"^\d{1,5}(?:-\d{1,5})?$")
+FORWARD_PROTO_RE = re.compile(r"^(gre|esp|ah)$")
+PROTOCOL_FORWARD_COMMENT_RE = re.compile(
+    r"synca-protocol-forward:([A-Za-z0-9_-]{1,63}):(gre|esp|ah):(\d{1,3}(?:\.\d{1,3}){3})"
+)
 SERVICE_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,63}$")
 SOURCE_RE = re.compile(
     r"^(ipset:[a-zA-Z0-9_\-]+|"
@@ -172,8 +179,40 @@ def manage_forward_port(zone: str):
     if toaddr:
         spec += f":toaddr={toaddr}"
 
-    op = "--add-forward-port" if request.method == "POST" else "--remove-forward-port"
-    return jsonify(_apply_change(zone, [f"{op}={spec}"]))
+    result = _apply_forward_port_change(zone, spec, port, proto, request.method == "POST")
+    return jsonify(result), (200 if result.get("ok") else 500)
+
+
+@bp.route("/api/zones/<zone>/protocol-forwards", methods=["GET", "POST", "DELETE"])
+@login_required
+@csrf_protect
+def manage_protocol_forward(zone: str):
+    """List, add, or remove protocol forwards for GRE/ESP/AH.
+
+    firewalld's forward-port supports TCP/UDP-like protocols only. PPTP and
+    IPsec passthrough also need protocol forwarding such as GRE or ESP, so
+    SyncA manages those as direct DNAT/FORWARD rules with a stable comment.
+    """
+    try:
+        zone = validate_identifier(zone)
+    except ValidationError:
+        return jsonify({"ok": False, "error": "invalid zone name"}), 400
+
+    if request.method == "GET":
+        return jsonify({"items": _protocol_forward_rows(zone)})
+
+    payload = request.get_json(force=True, silent=True) or {}
+    proto = str(payload.get("proto", "")).strip().lower()
+    toaddr = str(payload.get("toaddr", "")).strip()
+    if not FORWARD_PROTO_RE.match(proto):
+        return jsonify({"ok": False, "error": "proto must be one of: gre, esp, ah"}), 400
+    try:
+        validate_ipv4(toaddr)
+    except ValidationError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    result = _apply_protocol_forward_change(zone, proto, toaddr, request.method == "POST")
+    return jsonify(result), (200 if result.get("ok") else 500)
 
 
 @bp.route("/api/services-available", methods=["GET"])
@@ -281,7 +320,7 @@ def public_ipset_allowlist():
         return jsonify(_allowlist_state())
 
     payload = request.get_json(force=True, silent=True) or {}
-    ipsets = _normalize_ipsets(payload.get("ipsets") or ["jp-ipv4"])
+    ipsets = _normalize_ipsets(payload.get("ipsets") or [])
     allow_zone = str(payload.get("allow_zone") or "japan").strip() or "japan"
     remove_public_openings = bool(payload.get("remove_public_openings", True))
     try:
@@ -350,6 +389,158 @@ def reload_firewall():
 
 
 # ---- helpers -----------------------------------------------------------
+
+def _apply_forward_port_change(zone: str, spec: str, port: str, proto: str, add: bool) -> dict:
+    """Apply a DNAT forward-port and keep the zone input opening in sync."""
+    try:
+        zone = validate_identifier(zone)
+    except ValidationError:
+        return {"ok": False, "error": "invalid zone name"}
+
+    errors: list[str] = []
+    changed: list[str] = []
+    op = "--add-forward-port" if add else "--remove-forward-port"
+    _collect_firewall_change(
+        ["firewall-cmd", "--permanent", "--zone", zone, f"{op}={spec}"],
+        changed, errors, ignore_missing=not add,
+    )
+    port_token = f"{port}/{proto}"
+    if add:
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", zone, "--add-port", port_token],
+            changed, errors,
+        )
+    elif not _zone_has_forward_port(zone, port, proto):
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", zone, "--remove-port", port_token],
+            changed, errors, ignore_missing=True,
+        )
+
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        errors.append(reload_output)
+    return {"ok": not errors, "changed": changed, "errors": errors}
+
+
+def _zone_has_forward_port(zone: str, port: str, proto: str) -> bool:
+    info = _describe_zone(zone, permanent=True)
+    for item in info.get("forward_ports", []):
+        if item.get("port") == port and item.get("proto") == proto:
+            return True
+    return False
+
+
+def _apply_protocol_forward_change(zone: str, proto: str, toaddr: str, add: bool) -> dict:
+    """Add or remove a GRE/ESP/AH forward using permanent direct rules."""
+    errors: list[str] = []
+    changed: list[str] = []
+    direct_rules = _protocol_forward_rules(zone, proto, toaddr)
+    existing_direct = _direct_rule_lines(permanent=True)
+
+    if add:
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", "--zone", zone, "--add-protocol", proto],
+            changed, errors,
+        )
+        for rule in direct_rules:
+            added, error = _ensure_direct_rule(rule, existing_direct)
+            if error:
+                errors.append(error)
+            elif added:
+                changed.append("direct " + _direct_rule_raw(rule))
+    else:
+        for rule in direct_rules:
+            removed, error = _remove_direct_rule(rule, existing_direct)
+            if error:
+                errors.append(error)
+            elif removed:
+                changed.append("removed direct " + _direct_rule_raw(rule))
+        if not _protocol_forward_rows(zone, proto=proto):
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", "--zone", zone, "--remove-protocol", proto],
+                changed, errors, ignore_missing=True,
+            )
+
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        errors.append(reload_output)
+    return {"ok": not errors, "changed": changed, "errors": errors}
+
+
+def _protocol_forward_rules(zone: str, proto: str, toaddr: str) -> list[dict]:
+    comment = f"synca-protocol-forward:{zone}:{proto}:{toaddr}"
+    rules: list[dict] = []
+    interfaces = _zone_forward_interfaces(zone)
+    for iface in interfaces or [""]:
+        prefix = f"-i {iface} " if iface else ""
+        rules.append(_direct_rule(
+            "ipv4", "nat", "PREROUTING", 0,
+            f"{prefix}-p {proto} -m comment --comment {comment} -j DNAT --to-destination {toaddr}",
+        ))
+        rules.append(_direct_rule(
+            "ipv4", "filter", "FORWARD", 0,
+            f"{prefix}-p {proto} -d {toaddr} -m comment --comment {comment} -j ACCEPT",
+        ))
+    return _dedupe_direct_rules(rules)
+
+
+def _zone_forward_interfaces(zone: str) -> list[str]:
+    info = _describe_zone(zone, permanent=True)
+    interfaces: list[str] = []
+    for iface in info.get("interfaces", []):
+        if not iface or iface in interfaces:
+            continue
+        interfaces.append(iface)
+        if iface.startswith("ppp") and "ppp+" not in interfaces:
+            interfaces.append("ppp+")
+    if interfaces:
+        return interfaces
+    if zone == "public":
+        return _wan_interfaces()
+    return []
+
+
+def _protocol_forward_rows(zone: str | None = None, proto: str | None = None) -> list[dict]:
+    rows: dict[tuple[str, str, str], dict] = {}
+    for raw in _direct_rule_lines(permanent=True):
+        if "synca-protocol-forward:" not in raw:
+            continue
+        m = PROTOCOL_FORWARD_COMMENT_RE.search(raw)
+        if not m:
+            continue
+        row_zone, row_proto, toaddr = m.groups()
+        if zone and row_zone != zone:
+            continue
+        if proto and row_proto != proto:
+            continue
+        key = (row_zone, row_proto, toaddr)
+        row = rows.setdefault(key, {"zone": row_zone, "proto": row_proto, "toaddr": toaddr, "rules": []})
+        row["rules"].append(raw)
+    return sorted(rows.values(), key=lambda item: (item["zone"], item["proto"], item["toaddr"]))
+
+
+def _remove_direct_rule(rule: dict, existing: set[str] | None = None) -> tuple[bool, str | None]:
+    raw = _direct_rule_raw(rule)
+    if existing is None:
+        existing = _direct_rule_lines(permanent=True)
+    if raw not in existing:
+        return False, None
+    try:
+        args_list = shlex.split(rule["args"])
+    except ValueError as e:
+        return False, f"failed to parse managed direct rule: {e}"
+    cmd = [
+        "firewall-cmd", "--permanent", "--direct", "--remove-rule",
+        rule["ipv"], rule["table"], rule["chain"], str(rule["priority"]), *args_list,
+    ]
+    res = sudo_run(cmd)
+    if not res.ok:
+        output = (res.stderr or res.stdout).strip()
+        if "not in list" not in output:
+            return False, output
+    existing.discard(raw)
+    return True, None
+
 
 def _allowlist_state() -> dict:
     public = _describe_zone("public", permanent=True)

@@ -575,9 +575,7 @@ PY
 
     cat > "${CONFIG_DIR}/geoip.json" <<'JSON'
 {
-  "countries": [
-    {"code": "jp", "name": "Japan", "ipset": "jp-ipv4", "zone": "japan", "adopted": false, "last_updated": null, "entry_count": 0}
-  ],
+  "countries": [],
   "dynamic_ipsets": [
     {
       "id": "acrobits-sipis",
@@ -845,8 +843,6 @@ CONF
     systemctl enable --now firewalld
     firewall-cmd --reload || true
     firewall-cmd --set-default-zone=public
-    firewall-cmd --permanent --zone=public --add-service=ssh || true
-    firewall-cmd --permanent --zone=public --add-service=sip-custom || true
     if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=public --add-interface="$WAN_IF" || true
     fi
@@ -865,11 +861,8 @@ CONF
         local nat_out_if="$WAN_IF"
         if [[ "$WAN_MODE" == "pppoe" ]]; then
             nat_out_if="ppp+"
-            firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 22 -j ACCEPT || true
             firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 4444 -j ACCEPT || true
-            firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p udp --dport "${WG_PORT}" -j ACCEPT || true
         fi
-        firewall-cmd --permanent --zone=public --add-port="${WG_PORT}/udp"
         firewall-cmd --permanent --zone=public --remove-masquerade || true
         if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
             firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$LAN_IF" -o "$nat_out_if" -j ACCEPT || true

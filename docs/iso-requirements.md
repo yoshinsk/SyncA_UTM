@@ -120,19 +120,21 @@ AlmaLinux 9.x の最小構成から、SyncA UTM として起動できる完全�
 6. WireGuard、strongSwan、Nginx、server-gui、fail2banを起動する。
 7. WAN疎通確認後、登録済みDDNSプロバイダがあればDDNSを更新する。初期状態ではDDNS登録は空にする。
 8. DDNS解決確認後、Let's Encrypt証明書を取得する。DDNS未登録の場合は自己署名証明書のままGUIを継続稼働する。
-9. 初回インターネット接続完了時に日本IPセットを取得し、管理対象国として自動登録する。
-10. certbot、DDNS、GeoIP、backup、更新確認のtimerを有効化する。
+9. certbot、DDNS、GeoIP、backup、更新確認のtimerを有効化する。
 
 ## Firewalldプロファイル
 
 - ISOではFirewalld設定をprofileとしてテンプレート化する。
 - 既存環境で検証したカスタムルールは、実機固有値を変数化したFirewalld profileとして同梱対象にする。
 - WAN zoneは原則DROP/REJECT寄りにし、必要ポートだけを開ける。
+- インストール直後のWAN公開は管理GUIの `4444/tcp` のみとする。
 - LAN zoneはDHCP、DNS、管理GUI、LANからWANへのforwardを許可する。
 - WireGuard zoneは `wg0` とWireGuard CIDRを許可する。
 - IPsec remote subnetはトンネル追加時に自動許可する。
 - Nginxリバースプロキシのvhost追加時、listen portをFirewalldへ追加する。既存接続を壊さないようadd-onlyで適用する。
-- 日本IPセットが存在する前提のルールがあるため、初回オンライン時のJP ipset取得とzone反映を必須処理にする。
+- ポート転送追加時は、同じzoneに転送元 `port/proto` の許可を自動追加する。
+- PPTP / IPsec passthroughでは、TCP/UDP転送に加えてGRE/ESP/AHのprotocol forwardをdirect ruleで管理する。
+- country IPSetは初期作成せず、必要時にGeoIP画面で作成・zone紐付けを行う。
 
 ## Nginxリバースプロキシ
 
