@@ -216,6 +216,11 @@
                         <input id="br-address" class="form-control font-monospace" placeholder="例: 192.168.1.1/24 / 空欄なら IP 無し (L2 のみ)">
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">Secondary IP addresses (CIDR)</label>
+                        <textarea id="br-secondary-addresses" class="form-control font-monospace" rows="2"
+                                  placeholder="例: 192.168.2.1/24&#10;192.168.3.1/24"></textarea>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">DNS (任意、カンマ区切り)</label>
                         <input id="br-dns" class="form-control font-monospace" placeholder="例: 8.8.8.8, 1.1.1.1">
                     </div>
@@ -665,6 +670,7 @@ function openBridgeModal() {
     document.getElementById('br-ifname').value = '';
     document.getElementById('br-ifname').disabled = false;
     document.getElementById('br-address').value = '';
+    document.getElementById('br-secondary-addresses').value = '';
     document.getElementById('br-dns').value = '';
     document.getElementById('br-stp').checked = true;
     document.getElementById('br-stp-priority').value = '32768';
@@ -708,6 +714,7 @@ async function openBridgeEdit(name) {
     document.getElementById('br-ifname').value = detail.interface || name;
     document.getElementById('br-ifname').disabled = true;
     document.getElementById('br-address').value = addresses[0] || '';
+    document.getElementById('br-secondary-addresses').value = addresses.slice(1).join('\n');
     document.getElementById('br-dns').value = ipv4.dns || '';
     document.getElementById('br-stp').checked = bridge.stp !== false;
     document.getElementById('br-stp-priority').value = bridge.priority || '32768';
@@ -774,6 +781,10 @@ async function submitBridge() {
         ifname: document.getElementById('br-ifname').value.trim() || undefined,
         members,
         address: document.getElementById('br-address').value.trim(),
+        secondary_addresses: document.getElementById('br-secondary-addresses').value
+            .split(/\r?\n/)
+            .map(s => s.trim())
+            .filter(Boolean),
         dns: document.getElementById('br-dns').value.split(',').map(s => s.trim()).filter(Boolean),
         stp: document.getElementById('br-stp').checked,
         stp_priority: parseInt(document.getElementById('br-stp-priority').value, 10) || 32768,

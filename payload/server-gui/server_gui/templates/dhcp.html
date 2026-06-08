@@ -33,7 +33,8 @@
             <div class="row g-2 align-items-end">
                 <div class="col-sm-2">
                     <label class="form-label small mb-0">interface (任意)</label>
-                    <input id="r-if" class="form-control form-control-sm font-monospace" placeholder="ens4">
+                    <input id="r-if" class="form-control form-control-sm font-monospace" list="dhcp-interface-datalist" placeholder="ens4">
+                    <datalist id="dhcp-interface-datalist"></datalist>
                 </div>
                 <div class="col-sm-2">
                     <label class="form-label small mb-0">開始 IP</label>
@@ -235,16 +236,28 @@
 {% block scripts %}
 <script>
 let dhcp = { ranges: [], static_hosts: [], options: [] };
+let dhcpInterfaces = [];
 
 async function refresh() {
     const data = await api.get('/dhcp/api/config');
     if (!data) return;
     dhcp = data.dhcp || { ranges: [], static_hosts: [], options: [] };
+    await loadDhcpInterfaces();
     renderRanges();
     renderStatic();
     renderOptions();
     loadLeases();
     loadExisting();
+}
+
+async function loadDhcpInterfaces() {
+    const data = await api.get('/dhcp/api/interfaces');
+    dhcpInterfaces = (data && data.interfaces) ? data.interfaces : [];
+    const list = document.getElementById('dhcp-interface-datalist');
+    list.innerHTML = dhcpInterfaces.map(item => {
+        const ips = (item.ipv4 || []).join(', ') || 'no IP';
+        return `<option value="${escapeHtml(item.name)}">${escapeHtml(item.type)} / ${escapeHtml(ips)}</option>`;
+    }).join('');
 }
 
 async function loadExisting() {

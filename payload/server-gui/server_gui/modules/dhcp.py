@@ -1,6 +1,7 @@
 """DHCP section of dnsmasq (ranges, static reservations, options) + live leases."""
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from pathlib import Path
@@ -10,6 +11,7 @@ from flask import Blueprint, Flask, current_app, jsonify, render_template, reque
 from ..auth import csrf_protect, login_required
 from ..config_store import ConfigStore
 from ..dnsmasq_apply import MODULE_NAME, apply as apply_dnsmasq, default as default_data
+from ..shell import run
 from ..validators import ValidationError, validate_interface, validate_ipv4, validate_mac
 
 bp = Blueprint("dhcp", __name__, url_prefix="/dhcp")
@@ -43,6 +45,13 @@ def page():
 def list_config():
     data = _store().load(MODULE_NAME, default_data())
     return jsonify({"dhcp": data.get("dhcp", {})})
+
+
+@bp.route("/api/interfaces", methods=["GET"])
+@login_required
+def list_dhcp_interfaces():
+    """List non-WAN interfaces that can be bound to a DHCP range."""
+    return jsonify({"interfaces": _dhcp_interface_candidates()})
 
 
 _RANGE_LEASE_RE = re.compile(r"^\d+[smhd]?$|^infinite$", re.IGNORECASE)
@@ -291,6 +300,10 @@ def add_range():
             interface = validate_interface(interface)
         except ValidationError as e:
             return jsonify({"error": str(e)}), 400
+        candidates = _dhcp_interface_candidates()
+        candidate_names = {item["name"] for item in candidates}
+        if candidate_names and interface not in candidate_names:
+            return jsonify({"error": f"interface is not eligible for DHCP range: {interface}"}), 400
     netmask = (payload.get("netmask") or "").strip() or None
     if netmask:
         try:
@@ -325,6 +338,84 @@ def delete_range(rid: str):
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
     return jsonify({"ok": True})
+
+
+def _dhcp_interface_candidates() -> list[dict]:
+    """Return DHCP-bindable device names, excluding WAN and PPPoE parent NICs."""
+    allowed_types = {"ethernet", "bridge", "vlan", "bond", "team"}
+    blocked = _wan_like_interfaces()
+    rows = _nmcli_terse(["-f", "DEVICE,TYPE,STATE,CONNECTION", "device"])
+    ip_map = _device_ip_map()
+    candidates: list[dict] = []
+    for row in rows:
+        if len(row) < 4:
+            continue
+        name, dev_type, state, connection = row[:4]
+        if not name or name == "lo" or name in blocked or dev_type not in allowed_types:
+            continue
+        candidates.append({
+            "name": name,
+            "type": dev_type,
+            "state": state,
+            "connection": connection or "",
+            "ipv4": ip_map.get(name, []),
+        })
+    return candidates
+
+
+def _wan_like_interfaces() -> set[str]:
+    """Identify default-route devices and PPPoE parent NICs that DHCP must not bind."""
+    blocked: set[str] = set()
+    routes = run(["ip", "-j", "route", "show", "default"])
+    if routes.ok:
+        try:
+            for route in json.loads(routes.stdout):
+                dev = route.get("dev")
+                if dev:
+                    blocked.add(dev)
+        except json.JSONDecodeError:
+            pass
+
+    for row in _nmcli_terse(["-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"]):
+        if len(row) < 3 or row[1] != "pppoe":
+            continue
+        name = row[0]
+        detail = run(["nmcli", "-t", "-e", "no", "-f", "connection.interface-name", "connection", "show", name])
+        if detail.ok:
+            _, _, parent = detail.stdout.strip().partition(":")
+            if parent:
+                blocked.add(parent)
+    return blocked
+
+
+def _device_ip_map() -> dict[str, list[str]]:
+    """Return current IPv4 CIDR addresses by interface name."""
+    res = run(["ip", "-j", "addr", "show"])
+    if not res.ok:
+        return {}
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for entry in data:
+        name = entry.get("ifname")
+        if not name:
+            continue
+        addresses: list[str] = []
+        for item in entry.get("addr_info", []):
+            if item.get("family") == "inet" and item.get("local") and item.get("prefixlen") is not None:
+                addresses.append(f"{item['local']}/{item['prefixlen']}")
+        out[name] = addresses
+    return out
+
+
+def _nmcli_terse(args: list[str]) -> list[list[str]]:
+    """Run nmcli terse output and split each non-empty row by colon."""
+    res = run(["nmcli", "-t", "-e", "no", *args])
+    if not res.ok:
+        return []
+    return [line.split(":") for line in res.stdout.splitlines() if line]
 
 
 # ---- static hosts ------------------------------------------------------
