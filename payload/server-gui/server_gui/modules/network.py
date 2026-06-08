@@ -157,7 +157,8 @@ def create_bridge():
         "name":          "br-lan",       # nmcli connection profile name
         "ifname":        "br-lan",       # bridge interface name (defaults to name)
         "members":       ["ens4","ens5"],# enslaved ethernet interfaces
-        "address":       "192.168.1.1/24",  # optional LAN IP (manual)
+        "address":       "192.168.1.1/24",  # optional primary LAN IP (manual)
+        "secondary_addresses": ["192.168.2.1/24"], # optional extra LAN IPs
         "gateway":       "",                 # optional, usually empty for LAN
         "dns":           ["8.8.8.8"],        # optional, list of IPs
         "stp":           true,
@@ -175,6 +176,8 @@ def create_bridge():
     ifname = (payload.get("ifname") or name).strip()
     members_raw = payload.get("members") or []
     address = (payload.get("address") or "").strip()
+    secondary_addresses_raw = payload.get("secondary_addresses")
+    addresses_raw = payload.get("addresses")
     gateway = (payload.get("gateway") or "").strip()
     dns_raw = payload.get("dns") or []
     stp = bool(payload.get("stp", True))
@@ -201,11 +204,10 @@ def create_bridge():
             members.append(validate_interface(m.strip()))
         except ValidationError as e:
             return jsonify({"error": str(e)}), 400
-    if address:
-        try:
-            validate_ipv4_cidr(address)
-        except ValidationError as e:
-            return jsonify({"error": f"invalid address: {e}"}), 400
+    try:
+        addresses = _normalize_ipv4_addresses(address, secondary_addresses_raw, addresses_raw)
+    except ValidationError as e:
+        return jsonify({"error": f"invalid address: {e}"}), 400
     if gateway:
         try:
             validate_ipv4(gateway)
@@ -278,11 +280,11 @@ def create_bridge():
         return jsonify({"ok": False, "error": "STP config failed: " + stp_res.stderr.strip()}), 500
 
     # IPv4
-    if address:
+    if addresses:
         ipv4_cmd = [
             "nmcli", "connection", "modify", name,
             "ipv4.method", "manual",
-            "ipv4.addresses", address,
+            "ipv4.addresses", ",".join(addresses),
         ]
         if gateway:
             ipv4_cmd.extend(["ipv4.gateway", gateway])
@@ -339,7 +341,8 @@ def create_bridge():
 
     return jsonify({
         "ok": True, "name": name, "ifname": ifname,
-        "members": members, "stp": stp, "address": address,
+        "members": members, "stp": stp, "address": addresses[0] if addresses else "",
+        "addresses": addresses,
         "output": output,
     }), 201
 
@@ -375,6 +378,8 @@ def update_bridge(name: str):
     payload = request.get_json(force=True, silent=True) or {}
     members_raw = payload.get("members") or []
     address = (payload.get("address") or "").strip()
+    secondary_addresses_raw = payload.get("secondary_addresses")
+    addresses_raw = payload.get("addresses")
     gateway = (payload.get("gateway") or "").strip()
     dns_raw = payload.get("dns") or []
     stp = bool(payload.get("stp", True))
@@ -386,7 +391,8 @@ def update_bridge(name: str):
 
     try:
         members = _validate_bridge_members(members_raw)
-        dns_list = _validate_bridge_ipv4(address, gateway, dns_raw)
+        addresses = _normalize_ipv4_addresses(address, secondary_addresses_raw, addresses_raw)
+        dns_list = _validate_bridge_ipv4(addresses, gateway, dns_raw)
         _validate_bridge_timers(stp_priority, forward_delay, hello_time)
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
@@ -402,7 +408,7 @@ def update_bridge(name: str):
     if not stp_result["ok"]:
         return jsonify({"ok": False, "error": "STP config failed: " + stp_result["error"]}), 500
 
-    ipv4_result = _apply_bridge_ipv4(name, address, gateway, dns_list)
+    ipv4_result = _apply_bridge_ipv4(name, addresses, gateway, dns_list)
     if not ipv4_result["ok"]:
         return jsonify({"ok": False, "error": "IPv4 config failed: " + ipv4_result["error"]}), 500
 
@@ -435,7 +441,8 @@ def update_bridge(name: str):
         "ok": True,
         "name": name,
         "members": members,
-        "address": address,
+        "address": addresses[0] if addresses else "",
+        "addresses": addresses,
         "output": "\n".join(output),
     })
 
@@ -973,9 +980,34 @@ def _validate_bridge_members(members_raw) -> list[str]:
     return members
 
 
-def _validate_bridge_ipv4(address: str, gateway: str, dns_raw) -> list[str]:
+def _normalize_ipv4_addresses(primary: str = "", secondary_raw=None, addresses_raw=None) -> list[str]:
+    """Normalize primary + secondary IPv4 CIDRs into an nmcli address list."""
+    values: list[str] = []
+    if isinstance(addresses_raw, list):
+        values.extend(str(item).strip() for item in addresses_raw)
+    elif isinstance(addresses_raw, str) and addresses_raw.strip():
+        values.extend(part.strip() for part in re.split(r"[\s,;]+", addresses_raw))
+    else:
+        if primary:
+            values.append(primary)
+        if isinstance(secondary_raw, list):
+            values.extend(str(item).strip() for item in secondary_raw)
+        elif isinstance(secondary_raw, str):
+            values.extend(part.strip() for part in re.split(r"[\r\n,;]+", secondary_raw))
+
+    addresses: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        address = validate_ipv4_cidr(value)
+        if address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def _validate_bridge_ipv4(addresses: list[str], gateway: str, dns_raw) -> list[str]:
     """Validate optional bridge IPv4 fields and return normalized DNS IPs."""
-    if address:
+    for address in addresses:
         validate_ipv4_cidr(address)
     if gateway:
         validate_ipv4(gateway)
@@ -1088,13 +1120,13 @@ def _apply_bridge_stp(
     return {"ok": res.ok, "error": (res.stderr or res.stdout).strip()}
 
 
-def _apply_bridge_ipv4(name: str, address: str, gateway: str, dns_list: list[str]) -> dict:
+def _apply_bridge_ipv4(name: str, addresses: list[str], gateway: str, dns_list: list[str]) -> dict:
     """Apply optional IPv4 settings to a bridge connection."""
-    if address:
+    if addresses:
         cmd = [
             "nmcli", "connection", "modify", name,
             "ipv4.method", "manual",
-            "ipv4.addresses", address,
+            "ipv4.addresses", ",".join(addresses),
             "ipv4.gateway", gateway or "",
             "ipv4.dns", ",".join(dns_list),
             "ipv4.never-default", "no" if gateway else "yes",
@@ -1501,18 +1533,11 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
 
     if mode == "manual":
         addresses_raw = payload.get("addresses")
-        if isinstance(addresses_raw, list):
-            addresses = [str(a).strip() for a in addresses_raw if str(a).strip()]
-        else:
-            primary = (payload.get("address") or "").strip()
-            secondary_raw = payload.get("secondary_addresses") or []
-            addresses = [primary] if primary else []
-            if isinstance(secondary_raw, list):
-                addresses.extend(str(a).strip() for a in secondary_raw if str(a).strip())
+        primary = (payload.get("address") or "").strip()
+        secondary_raw = payload.get("secondary_addresses") or []
+        addresses = _normalize_ipv4_addresses(primary, secondary_raw, addresses_raw)
         if not addresses:
             raise ValidationError("address required for manual mode (e.g. 192.168.1.1/24)")
-        for address in addresses:
-            validate_ipv4_cidr(address)
         gateway: Optional[str] = payload.get("gateway") or None
         if gateway:
             validate_ipv4(gateway)
