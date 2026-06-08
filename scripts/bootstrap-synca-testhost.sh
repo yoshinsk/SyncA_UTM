@@ -87,17 +87,7 @@ JSON
 
     cat > /etc/server-gui/geoip.json <<JSON
 {
-  "countries": [
-    {
-      "code": "jp",
-      "name": "Japan",
-      "ipset": "jp-ipv4",
-      "zone": "japan",
-      "adopted": false,
-      "last_updated": null,
-      "entry_count": 0
-    }
-  ],
+  "countries": [],
   "dynamic_ipsets": [
     {
       "id": "acrobits-sipis",
@@ -547,8 +537,6 @@ configure_firewall_for_bootstrap() {
     # the temporary management network, so only add management ports.
     systemctl enable --now firewalld
     firewall-cmd --permanent --add-port=4444/tcp
-    firewall-cmd --permanent --add-port=5011/tcp
-    firewall-cmd --permanent --add-port="${WG_PORT}/udp"
     firewall-cmd --reload
 }
 

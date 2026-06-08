@@ -17,31 +17,6 @@
   },
   "managed_ipsets": [
     {
-      "name": "jp-ipv4",
-      "family": "inet",
-      "type": "hash:net",
-      "source": "first-online-geoip-refresh",
-      "default_managed_country": true
-    },
-    {
-      "name": "cn-ipv4",
-      "family": "inet",
-      "type": "hash:net",
-      "source": "first-online-geoip-refresh"
-    },
-    {
-      "name": "kr-ipv4",
-      "family": "inet",
-      "type": "hash:net",
-      "source": "first-online-geoip-refresh"
-    },
-    {
-      "name": "kp-ipv4",
-      "family": "inet",
-      "type": "hash:net",
-      "source": "first-online-geoip-refresh"
-    },
-    {
       "name": "acrobits-sipis-ipv4",
       "family": "inet",
       "type": "hash:net",
@@ -83,38 +58,16 @@
   "zones": {
     "drop": {
       "target": "DROP",
-      "sources": [
-        "ipset:cn-ipv4",
-        "ipset:kr-ipv4"
-      ],
+      "sources": [],
       "forward": true
-    },
-    "japan": {
-      "target": "default",
-      "sources": [
-        "${management_public_source}",
-        "ipset:jp-ipv4"
-      ],
-      "services": [
-        "dns",
-        "http",
-        "https",
-        "ipsec",
-        "sip-custom",
-        "ssh",
-        "wireguard"
-      ],
-      "ports": [
-        "4444/tcp",
-        "5011/tcp"
-      ],
-      "masquerade": false,
-      "forward_ports": []
     },
     "public": {
       "target": "DROP",
       "interfaces": [
         "${wan_interface}"
+      ],
+      "ports": [
+        "4444/tcp"
       ],
       "forward": true,
       "masquerade": false
@@ -225,9 +178,5 @@
       "args": "-i ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
     }
   ],
-  "first_online_actions": [
-    "create-empty-managed-ipsets-before-firewalld-reload",
-    "refresh-geoip-ipsets",
-    "set-default-managed-country-to-jp-ipv4"
-  ]
+  "first_online_actions": []
 }

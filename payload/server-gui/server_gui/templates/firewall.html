@@ -77,7 +77,7 @@
                         <h6><i class="bi bi-geo-alt"></i> sources <small class="text-secondary">(CIDR / ipset)</small></h6>
                         <div id="z-sources" class="d-flex flex-wrap gap-1 mb-2"></div>
                         <div class="input-group input-group-sm">
-                            <input id="src-input" type="text" class="form-control" list="src-datalist" placeholder="10.0.0.0/8 または ipset:jp-ipv4">
+                            <input id="src-input" type="text" class="form-control" list="src-datalist" placeholder="10.0.0.0/8 または ipset:<name>">
                             <button class="btn btn-primary" onclick="addSource()"><i class="bi bi-plus"></i></button>
                         </div>
                         <datalist id="src-datalist"></datalist>
@@ -110,6 +110,9 @@
 
                 <!-- forward ports -->
                 <h6><i class="bi bi-arrow-right-square"></i> forward ports <small class="text-secondary">(ポート転送 / DNAT)</small></h6>
+                <div class="small text-secondary mb-2">
+                    追加時は、転送元の <code>port/proto</code> も同じzoneへ自動許可します。
+                </div>
                 <div id="z-forward-ports" class="list-group mb-2"></div>
                 <div class="row g-2 align-items-end small">
                     <div class="col-sm-2">
@@ -137,6 +140,45 @@
                         <button class="btn btn-primary btn-sm w-100" onclick="addForwardPort()">
                             <i class="bi bi-plus"></i> 追加
                         </button>
+                    </div>
+                </div>
+                <div class="border rounded bg-light p-2 mt-3 small">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <h6 class="mb-0"><i class="bi bi-hdd-network"></i> VPNプロトコル転送 <small class="text-secondary">(GRE / ESP / AH)</small></h6>
+                        <span class="text-secondary">PPTPやIPsec passthrough用</span>
+                    </div>
+                    <div id="z-protocol-forwards" class="list-group mb-2"></div>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-sm-2">
+                            <label class="form-label mb-0">proto</label>
+                            <select id="pf-proto" class="form-select form-select-sm">
+                                <option value="gre">gre (PPTP)</option>
+                                <option value="esp">esp (IPsec)</option>
+                                <option value="ah">ah (IPsec)</option>
+                            </select>
+                        </div>
+                        <div class="col-sm-5">
+                            <label class="form-label mb-0">→ toaddr</label>
+                            <input id="pf-toaddr" type="text" class="form-control form-control-sm font-monospace" placeholder="192.168.1.10">
+                        </div>
+                        <div class="col-sm-2">
+                            <button class="btn btn-outline-primary btn-sm w-100" onclick="addProtocolForward()">
+                                <i class="bi bi-plus"></i> 追加
+                            </button>
+                        </div>
+                        <div class="col-sm-3">
+                            <div class="btn-group w-100">
+                                <button class="btn btn-outline-secondary btn-sm" onclick="applyVpnPreset('pptp')" title="TCP 1723 + GRE">
+                                    PPTP
+                                </button>
+                                <button class="btn btn-outline-secondary btn-sm" onclick="applyVpnPreset('ipsec')" title="UDP 500/4500 + ESP">
+                                    IPsec
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-text mt-1">
+                        PPTPは <code>1723/tcp</code> と <code>gre</code>、IPsec NAT-Tは <code>500/udp</code> / <code>4500/udp</code> と <code>esp</code> を追加します。
                     </div>
                 </div>
                 <hr>
@@ -336,11 +378,12 @@ let allIpsets = [];
 // Per-zone state captured from latest fetch (used by remove-by-index handlers)
 let currentForwardPorts = [];
 let currentRichRules = [];
+let currentProtocolForwards = [];
 let fpEditModal = null;
 let editingFpOld = null;
 const commonServices = ['ssh', 'http', 'https', 'dns', 'dhcp', 'ipsec', 'wireguard', 'sip-custom'];
-const commonPorts = ['4444/tcp', '5011/tcp', '51820/udp', '500/udp', '4500/udp', '48060/tcp', '48060/udp', '10000-20000/udp'];
-const commonSources = ['ipset:jp-ipv4', 'ipset:cn-ipv4', 'ipset:kr-ipv4', '10.0.0.0/8', '192.168.151.0/24'];
+const commonPorts = ['4444/tcp', '1723/tcp', '500/udp', '4500/udp', '51820/udp', '48060/tcp', '48060/udp', '10000-20000/udp'];
+const commonSources = ['10.0.0.0/8', '192.168.151.0/24'];
 
 document.addEventListener('DOMContentLoaded', () => {
     fpEditModal = new bootstrap.Modal(document.getElementById('fp-edit-modal'));
@@ -568,6 +611,8 @@ function renderZoneDetail(info) {
                         </button>
                     </div>
                 </div>`).join('');
+
+    loadProtocolForwards(info.zone);
 
     currentRichRules = info.rich_rules || [];
     document.getElementById('z-rich').innerHTML =
@@ -817,6 +862,78 @@ async function removeForwardPortByIndex(i) {
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`, 'DELETE',
         { port: fp.port, proto: fp.proto, toport: fp.toport || '', toaddr: fp.toaddr || '' });
     if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
+}
+
+async function loadProtocolForwards(zone) {
+    const data = await api.get(`/firewall/api/zones/${encodeURIComponent(zone)}/protocol-forwards`);
+    if (!data) return;
+    currentProtocolForwards = data.items || [];
+    const box = document.getElementById('z-protocol-forwards');
+    box.innerHTML = currentProtocolForwards.length === 0
+        ? '<div class="list-group-item text-secondary small">なし</div>'
+        : currentProtocolForwards.map((item, i) => `
+            <div class="list-group-item d-flex justify-content-between align-items-center">
+                <code class="small">${escapeHtml(item.proto)} → ${escapeHtml(item.toaddr)}</code>
+                <button class="btn btn-sm btn-outline-danger" onclick="removeProtocolForwardByIndex(${i})" title="削除">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>`).join('');
+}
+
+async function addProtocolForward() {
+    const proto = document.getElementById('pf-proto').value;
+    const toaddr = document.getElementById('pf-toaddr').value.trim();
+    if (!toaddr) return toast('toaddr は必須', true);
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/protocol-forwards`, 'POST', { proto, toaddr });
+    if (res && res.ok) {
+        toast('追加しました');
+        await loadProtocolForwards(activeZone);
+        await loadDirectRules();
+    } else if (res) {
+        toast(res.error || (res.errors || []).join('\\n') || 'failed', true);
+    }
+}
+
+async function removeProtocolForwardByIndex(i) {
+    const item = currentProtocolForwards[i];
+    if (!item) return;
+    if (!confirm(`このプロトコル転送を削除しますか?\n${item.proto} → ${item.toaddr}`)) return;
+    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/protocol-forwards`, 'DELETE',
+        { proto: item.proto, toaddr: item.toaddr });
+    if (res && res.ok) {
+        toast('削除しました');
+        await loadProtocolForwards(activeZone);
+        await loadDirectRules();
+    } else if (res) {
+        toast(res.error || (res.errors || []).join('\\n') || 'failed', true);
+    }
+}
+
+async function applyVpnPreset(kind) {
+    const toaddr = document.getElementById('pf-toaddr').value.trim();
+    if (!toaddr) return toast('toaddr に転送先IPを入力してください', true);
+    const label = kind === 'pptp' ? 'PPTP (1723/tcp + GRE)' : 'IPsec (500/udp + 4500/udp + ESP)';
+    if (!confirm(`${label} を ${activeZone} に追加しますか?\n転送先: ${toaddr}`)) return;
+    const steps = kind === 'pptp'
+        ? [
+            ['forward', { port: '1723', proto: 'tcp', toport: '1723', toaddr }],
+            ['protocol', { proto: 'gre', toaddr }],
+        ]
+        : [
+            ['forward', { port: '500', proto: 'udp', toport: '500', toaddr }],
+            ['forward', { port: '4500', proto: 'udp', toport: '4500', toaddr }],
+            ['protocol', { proto: 'esp', toaddr }],
+        ];
+    for (const [type, payload] of steps) {
+        const endpoint = type === 'forward' ? 'forward-ports' : 'protocol-forwards';
+        const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/${endpoint}`, 'POST', payload);
+        if (!res || !res.ok) {
+            return toast((res && (res.error || (res.errors || []).join('\\n'))) || 'プリセット追加に失敗しました', true);
+        }
+    }
+    toast('プリセットを追加しました');
+    await reloadActiveZone();
+    await loadDirectRules();
 }
 
 function editForwardPortByIndex(i) {
