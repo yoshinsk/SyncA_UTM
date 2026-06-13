@@ -214,7 +214,7 @@
         <div class="d-flex align-items-center gap-2">
             <i class="bi bi-receipt text-secondary"></i>
             <strong>現在のリース</strong>
-            <span class="text-secondary small">/var/lib/misc/dnsmasq.leases</span>
+            <span id="lease-source-label" class="text-secondary small">lease file auto-detected</span>
         </div>
         <button class="btn btn-outline-secondary btn-sm" onclick="loadLeases()">
             <i class="bi bi-arrow-clockwise"></i> 更新
@@ -331,6 +331,11 @@ async function loadLeases() {
     const data = await api.get('/dhcp/api/leases');
     if (!data) return;
     const leases = data.leases || [];
+    const sourceLabel = document.getElementById('lease-source-label');
+    if (sourceLabel) {
+        const sources = data.sources || [];
+        sourceLabel.textContent = sources.length > 0 ? sources.join(', ') : 'lease file auto-detected';
+    }
     const tbody = document.getElementById('lease-tbody');
     tbody.innerHTML = leases.length === 0
         ? `<tr><td colspan="5" class="text-center text-secondary py-3">${escapeHtml(data.note || data.error || 'リースなし')}</td></tr>`
