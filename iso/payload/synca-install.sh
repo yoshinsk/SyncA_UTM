@@ -224,6 +224,30 @@ DISPATCHER
     chmod 0755 /etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip
 }
 
+install_upnp_support() {
+    # UPnP is installed as an opt-in component. The unit is disabled by
+    # default; the GUI writes /etc/server-gui/upnp.json and starts
+    # synca-upnp.service only after an operator explicitly enables the feature.
+    cat > /etc/systemd/system/synca-upnp.service <<'UNIT'
+[Unit]
+Description=SyncA UTM UPnP/NAT-PMP gateway
+After=network-online.target firewalld.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-gui/upnp.json
+
+[Service]
+Type=simple
+ExecStart=/opt/server-gui/bin/synca-upnpd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    chmod 0644 /etc/systemd/system/synca-upnp.service
+    systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
+}
+
 install_private_overrides() {
     # 内部向けISOビルドではビルドホスト上のprivate systemd drop-inを同梱できる。
     # The public repository never stores these files.
@@ -501,6 +525,7 @@ main() {
     install_letsencrypt_hooks
     install_firewalld_profile
     install_pppoe_parent_ip_dispatcher
+    install_upnp_support
     install_private_overrides
     normalize_lf_text_tree /etc/systemd/system/server-gui.service.d
     normalize_lf_text_tree /etc/systemd/system/server-gui-ddns.service.d

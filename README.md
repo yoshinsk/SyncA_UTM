@@ -31,6 +31,7 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 - 初期WAN公開は管理GUIの `4444/tcp` のみ
 - ポート転送追加時の該当zoneポート許可の自動追加
 - PPTP / IPsec passthrough 向けの GRE / ESP / AH 転送補助
+- UPnP / NAT-PMP の明示的な ON/OFF 管理 (既定は OFF)
 - ISO インストール用 firewalld プロファイル
 - GUI からのルール管理と手動ルール維持
 - VPN トンネル作成時の必要許可追加
