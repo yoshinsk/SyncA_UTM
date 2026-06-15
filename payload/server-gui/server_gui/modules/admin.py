@@ -344,16 +344,16 @@ def _run_update_check(config_dir: Optional[Path] = None) -> dict:
     msg = (commit.get("commit") or {}).get("message", "").splitlines()[0] if commit.get("commit") else ""
 
     with store.transaction(MODULE_NAME, _default()) as data2:
-        # First time: pretend the running build is current so we don't show
-        # a phantom update. Real updates land via apply_update which writes
-        # the new SHA into installed_sha.
-        if not data2.get("installed_sha"):
-            data2["installed_sha"] = latest_sha
+        # Unknown local builds must stay unknown. Fresh ISO installs can carry
+        # stale bundled files, so treating an empty installed_sha as "latest"
+        # hides the only safe remediation path: applying the GitHub update.
+        installed_sha = data2.get("installed_sha") or ""
+        data2["installed_sha"] = installed_sha
         data2["latest_sha"] = latest_sha
         data2["latest_message"] = msg
         data2["last_check_at"] = _now_iso()
         data2["update_available"] = (
-            bool(latest_sha) and latest_sha != data2.get("installed_sha", "")
+            bool(latest_sha) and latest_sha != installed_sha
         )
 
     return {
