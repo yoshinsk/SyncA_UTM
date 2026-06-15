@@ -248,6 +248,15 @@ UNIT
     systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
 }
 
+install_ipv6_support() {
+    # IPv6 is installed as an opt-in component. The GUI writes the runtime
+    # profile and starts radvd, FRR, or the transition unit only when enabled.
+    systemctl disable --now radvd.service >/dev/null 2>&1 || true
+    systemctl disable --now frr.service >/dev/null 2>&1 || true
+    systemctl disable --now synca-ipv6-transition.service >/dev/null 2>&1 || true
+    rm -f /etc/dnsmasq.d/synca-ipv6.conf
+}
+
 install_private_overrides() {
     # 内部向けISOビルドではビルドホスト上のprivate systemd drop-inを同梱できる。
     # The public repository never stores these files.
@@ -526,6 +535,7 @@ main() {
     install_firewalld_profile
     install_pppoe_parent_ip_dispatcher
     install_upnp_support
+    install_ipv6_support
     install_private_overrides
     normalize_lf_text_tree /etc/systemd/system/server-gui.service.d
     normalize_lf_text_tree /etc/systemd/system/server-gui-ddns.service.d
