@@ -32,12 +32,16 @@ Workflow:
 from __future__ import annotations
 
 import datetime as _dt
+import base64
+import binascii
+import csv
 import io
 import ipaddress
 import json
 import logging
 import re
 import shlex
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -107,6 +111,13 @@ def _save_meta(pubkey: str, meta: dict) -> None:
         data["peers"][pubkey] = meta
 
 
+def _save_many_meta(items: list[tuple[str, dict]]) -> None:
+    with _store().transaction(MODULE_NAME, _default_data()) as data:
+        data.setdefault("peers", {})
+        for pubkey, meta in items:
+            data["peers"][pubkey] = meta
+
+
 def _delete_meta(pubkey: str) -> None:
     with _store().transaction(MODULE_NAME, _default_data()) as data:
         data.setdefault("peers", {})
@@ -119,6 +130,22 @@ def _rename_pubkey_meta(old_pubkey: str, new_pubkey: str, new_meta: dict) -> Non
         data.setdefault("peers", {})
         data["peers"].pop(old_pubkey, None)
         data["peers"][new_pubkey] = new_meta
+
+
+def _pubkey_from_route(pubkey: str | None, pubkey_token: str | None) -> str | None:
+    """Decode route parameters without letting leading slashes corrupt URLs."""
+    if pubkey is not None:
+        return pubkey
+    if not pubkey_token or not re.match(r"^[A-Za-z0-9_-]{1,128}$", pubkey_token):
+        return None
+    try:
+        padded = pubkey_token + ("=" * (-len(pubkey_token) % 4))
+        value = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if not re.match(r"^[A-Za-z0-9+/]{43}=$", value):
+        return None
+    return value
 
 
 # ---- views --------------------------------------------------------------
@@ -176,6 +203,8 @@ def get_interface(iface: str):
         merged_peers.append({
             "public_key": pubkey,
             "comment": meta.get("comment") or p.get("comment") or "",
+            "account_name": meta.get("account_name") or meta.get("comment") or p.get("comment") or "",
+            "display_name": meta.get("display_name", ""),
             "peer_address": meta.get("peer_address") or (p.get("allowed_ips", [None])[0] if p.get("allowed_ips") else None),
             "allowed_ips_in_conf": p.get("allowed_ips", []),
             "extra_allowed_ips": meta.get("extra_allowed_ips", []),
@@ -207,21 +236,23 @@ def get_interface(iface: str):
             "live": live["interface"],
         },
         "peers": merged_peers,
-        "suggestions": _compute_suggestions(parsed, merged_peers),
+        "suggestions": _compute_suggestions(iface, parsed, peers_meta, live),
     })
 
 
-def _compute_suggestions(parsed: dict, peers: list[dict]) -> dict:
+def _compute_suggestions(iface: str, parsed: dict, peers_meta: dict, live: dict | None = None) -> dict:
     """Compute smart defaults for the 'add peer' form."""
     intf_addrs = parsed["interface"].get("address", [])
-    # Next free IP within the WG subnet
-    next_addr = _next_free_address(intf_addrs, [p.get("peer_address") for p in peers])
+    free_addrs = _free_peer_addresses(iface, parsed, peers_meta, live, limit=1)
+    next_addr = free_addrs[0] if free_addrs else ""
     # WG subnet + local LAN subnets (private only, exclude WAN)
     wg_subnet = _network_str(intf_addrs[0]) if intf_addrs else ""
     lan_subnets = _detect_lan_subnets(exclude=intf_addrs)
     aips = [s for s in [wg_subnet, *lan_subnets] if s]
     return {
         "next_peer_address": next_addr,
+        "available_peer_count": _free_peer_address_count(iface, parsed, peers_meta, live),
+        "next_account_name": _generate_account_names("User", 1, _existing_account_names(peers_meta))[0],
         "client_allowed_ips": aips,
         "client_mtu": parsed["interface"].get("mtu") or 1450,
         "endpoint": _detect_wan_endpoint(parsed["interface"].get("listen_port")),
@@ -266,6 +297,207 @@ def _next_free_address(intf_addrs: list[str], used_addrs: list[Optional[str]]) -
         if host not in used:
             return f"{host}/32"
     return ""
+
+
+def _free_peer_addresses(
+    iface: str,
+    parsed: dict,
+    peers_meta: dict | None = None,
+    live: dict | None = None,
+    *,
+    limit: int | None = None,
+) -> list[str]:
+    """Return free /32 client addresses inside the interface IPv4 subnet."""
+    network = _first_interface_network(parsed)
+    if not network:
+        return []
+    reserved_ips, reserved_nets = _reserved_peer_targets(iface, parsed, peers_meta or {}, live or {}, network)
+    out: list[str] = []
+    for host in _iter_host_candidates(network):
+        if host in reserved_ips:
+            continue
+        if any(host in net for net in reserved_nets):
+            continue
+        out.append(f"{host}/32")
+        if limit is not None and len(out) >= limit:
+            break
+    return out
+
+
+def _free_peer_address_count(iface: str, parsed: dict, peers_meta: dict | None = None, live: dict | None = None) -> int:
+    """Count allocatable peer addresses while excluding local and used IPs."""
+    network = _first_interface_network(parsed)
+    if not network:
+        return 0
+    reserved_ips, reserved_nets = _reserved_peer_targets(iface, parsed, peers_meta or {}, live or {}, network)
+    count = 0
+    for host in _iter_host_candidates(network):
+        if host in reserved_ips:
+            continue
+        if any(host in net for net in reserved_nets):
+            continue
+        count += 1
+    return count
+
+
+def _peer_address_available(
+    iface: str,
+    parsed: dict,
+    peers_meta: dict,
+    live: dict,
+    peer_address: str,
+) -> bool:
+    network = _first_interface_network(parsed)
+    if not network:
+        return False
+    try:
+        ip = ipaddress.IPv4Network(peer_address, strict=False).network_address
+    except ValueError:
+        return False
+    if ip not in network:
+        return False
+    reserved_ips, reserved_nets = _reserved_peer_targets(iface, parsed, peers_meta, live, network)
+    if ip in reserved_ips:
+        return False
+    return not any(ip in net for net in reserved_nets)
+
+
+def _first_interface_network(parsed: dict) -> ipaddress.IPv4Network | None:
+    for addr in parsed.get("interface", {}).get("address", []):
+        if ":" in str(addr):
+            continue
+        try:
+            return ipaddress.IPv4Interface(str(addr)).network
+        except ValueError:
+            continue
+    return None
+
+
+def _iter_host_candidates(network: ipaddress.IPv4Network):
+    if network.prefixlen >= 31:
+        yield from network
+    else:
+        yield from network.hosts()
+
+
+def _reserved_peer_targets(
+    iface: str,
+    parsed: dict,
+    peers_meta: dict,
+    live: dict,
+    network: ipaddress.IPv4Network,
+) -> tuple[set[ipaddress.IPv4Address], list[ipaddress.IPv4Network]]:
+    reserved_ips = _local_ipv4_addresses()
+    reserved_nets: list[ipaddress.IPv4Network] = []
+
+    for addr in parsed.get("interface", {}).get("address", []):
+        try:
+            reserved_ips.add(ipaddress.IPv4Interface(str(addr)).ip)
+        except ValueError:
+            continue
+    for peer in parsed.get("peers", []):
+        for allowed in peer.get("allowed_ips") or []:
+            _reserve_allowed_ip(allowed, network, reserved_ips, reserved_nets)
+    for meta in peers_meta.values():
+        if meta.get("interface") and meta.get("interface") != iface:
+            continue
+        _reserve_allowed_ip(meta.get("peer_address"), network, reserved_ips, reserved_nets)
+        for allowed in meta.get("extra_allowed_ips") or []:
+            _reserve_allowed_ip(allowed, network, reserved_ips, reserved_nets)
+    for status in (live.get("peers_status") or {}).values():
+        for allowed in status.get("allowed_ips") or []:
+            _reserve_allowed_ip(allowed, network, reserved_ips, reserved_nets)
+
+    return reserved_ips, reserved_nets
+
+
+def _reserve_allowed_ip(
+    value: object,
+    target_network: ipaddress.IPv4Network,
+    reserved_ips: set[ipaddress.IPv4Address],
+    reserved_nets: list[ipaddress.IPv4Network],
+) -> None:
+    if not value:
+        return
+    try:
+        net = ipaddress.IPv4Network(str(value), strict=False)
+    except ValueError:
+        return
+    if not net.overlaps(target_network):
+        return
+    if net.prefixlen == 32:
+        reserved_ips.add(net.network_address)
+    elif net not in reserved_nets:
+        reserved_nets.append(net)
+
+
+def _local_ipv4_addresses() -> set[ipaddress.IPv4Address]:
+    """Collect all IPv4 addresses owned by this UTM, not only wg addresses."""
+    res = run(["ip", "-j", "addr", "show"], timeout=10)
+    if not res.ok:
+        return set()
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return set()
+    out: set[ipaddress.IPv4Address] = set()
+    for entry in data:
+        for addr in entry.get("addr_info", []):
+            if addr.get("family") != "inet":
+                continue
+            try:
+                out.add(ipaddress.IPv4Address(addr.get("local", "")))
+            except ValueError:
+                continue
+    return out
+
+
+def _existing_account_names(peers_meta: dict) -> set[str]:
+    names: set[str] = set()
+    for meta in peers_meta.values():
+        for key in ("account_name", "comment"):
+            name = str(meta.get(key) or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _generate_account_names(
+    prefix: str,
+    count: int,
+    existing: set[str],
+    *,
+    start: int | None = None,
+    width: int = 3,
+) -> list[str]:
+    prefix = _safe_account_prefix(prefix)
+    width = min(max(int(width or 3), 1), 6)
+    if start is None:
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+        highest = 0
+        for name in existing:
+            m = pattern.match(name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        start = highest + 1
+    n = max(int(start or 1), 1)
+    names: list[str] = []
+    used = set(existing)
+    while len(names) < count:
+        candidate = f"{prefix}{n:0{width}d}"
+        n += 1
+        if candidate in used:
+            continue
+        used.add(candidate)
+        names.append(candidate)
+    return names
+
+
+def _safe_account_prefix(value: object) -> str:
+    prefix = re.sub(r"[^A-Za-z0-9_-]", "", str(value or "User").strip()) or "User"
+    if not re.match(r"^[A-Za-z]", prefix):
+        prefix = f"User{prefix}"
+    return prefix[:24]
 
 
 def _detect_lan_subnets(exclude: list[str] | None = None) -> list[str]:
@@ -352,6 +584,10 @@ def add_peer(iface: str):
     })
 
     parsed = _parse_wg_conf(path)
+    data = _load_data()
+    live = _wg_show_dump(iface)
+    if not _peer_address_available(iface, parsed, data["peers"], live, meta["peer_address"]):
+        return jsonify({"error": "Peer Address はWGサブネット外、または既に利用/予約されています"}), 400
     if any(p.get("public_key") == peer_pub for p in parsed["peers"]):
         return jsonify({"error": "pubkey collision (rare)"}), 500
     parsed["peers"].append(_meta_to_conf_peer(peer_pub, meta))
@@ -373,10 +609,116 @@ def add_peer(iface: str):
     }), 201
 
 
+@bp.route("/api/interfaces/<iface>/peers/bulk", methods=["POST"])
+@login_required
+@csrf_protect
+def bulk_add_peers(iface: str):
+    if not INTERFACE_RE.match(iface):
+        return jsonify({"error": "invalid interface name"}), 400
+    path = WG_DIR / f"{iface}.conf"
+    if not path.exists():
+        return jsonify({"error": "interface not found"}), 404
+
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        count = int(payload.get("count", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "count must be a number"}), 400
+    if not (1 <= count <= 512):
+        return jsonify({"error": "count must be 1..512"}), 400
+
+    parsed = _parse_wg_conf(path)
+    data = _load_data()
+    live = _wg_show_dump(iface)
+    free_addrs = _free_peer_addresses(iface, parsed, data["peers"], live, limit=count)
+    available_count = _free_peer_address_count(iface, parsed, data["peers"], live)
+    if len(free_addrs) < count:
+        return jsonify({
+            "error": f"作成数が空きIP数を超えています (空き {available_count} / 要求 {count})",
+            "available_peer_count": available_count,
+        }), 400
+
+    try:
+        width = int(payload.get("number_width", 3) or 3)
+    except (TypeError, ValueError):
+        width = 3
+    start_number = payload.get("start_number")
+    try:
+        start_number = int(start_number) if start_number not in ("", None) else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "start_number must be a number"}), 400
+
+    prefix = _safe_account_prefix(payload.get("name_prefix") or "User")
+    account_names = _generate_account_names(
+        prefix,
+        count,
+        _existing_account_names(data["peers"]),
+        start=start_number,
+        width=width,
+    )
+    display_names = _parse_display_names(payload.get("display_names") or payload.get("aliases") or "")
+    server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
+
+    created: list[tuple[str, dict, str, str]] = []
+    new_meta: list[tuple[str, dict]] = []
+    for idx, address in enumerate(free_addrs):
+        item_payload = dict(payload)
+        account_name = account_names[idx]
+        item_payload["peer_address"] = address
+        item_payload["comment"] = account_name
+        item_payload["account_name"] = account_name
+        item_payload["display_name"] = display_names[idx] if idx < len(display_names) else ""
+        try:
+            meta = _parse_peer_payload(item_payload)
+            peer_priv, peer_pub = _gen_unique_peer_keys(parsed)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 400
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
+
+        psk = _gen_preshared() if payload.get("preshared_key", True) else None
+        now = _now()
+        meta.update({
+            "interface": iface,
+            "private_key": peer_priv,
+            "preshared_key": psk,
+            "enabled": bool(payload.get("enabled", True)),
+            "created_at": now,
+            "updated_at": now,
+        })
+        parsed["peers"].append(_meta_to_conf_peer(peer_pub, meta))
+        client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
+        filename = _client_filename(meta)
+        created.append((peer_pub, meta, client_conf, filename))
+        new_meta.append((peer_pub, meta))
+
+    try:
+        _write_conf(iface, parsed)
+        _ensure_interface_running(iface)
+        _sync_interface(iface)
+        _sync_firewalld_for_interface(iface, parsed)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    _save_many_meta(new_meta)
+    bundle = _build_bulk_peer_zip(iface, created)
+    return jsonify({
+        "ok": True,
+        "created": [_peer_summary(pubkey, meta) for pubkey, meta, _conf, _filename in created],
+        "bundle_filename": f"{iface}-wireguard-accounts.zip",
+        "bundle_base64": base64.b64encode(bundle).decode("ascii"),
+        "available_peer_count": max(available_count - count, 0),
+    }), 201
+
+
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>", methods=["PUT"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>", methods=["PUT"])
 @login_required
 @csrf_protect
-def update_peer(iface: str, pubkey: str):
+def update_peer(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -446,10 +788,14 @@ def update_peer(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>", methods=["DELETE"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>", methods=["DELETE"])
 @login_required
 @csrf_protect
-def delete_peer(iface: str, pubkey: str):
+def delete_peer(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -472,10 +818,14 @@ def delete_peer(iface: str, pubkey: str):
     return jsonify({"ok": True})
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/client-config", methods=["GET"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/client-config", methods=["GET"])
 @login_required
-def get_client_config(iface: str, pubkey: str):
+def get_client_config(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Re-generate the client .conf + QR at any time. Requires stored metadata."""
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     meta = _load_meta(pubkey)
@@ -497,10 +847,11 @@ def get_client_config(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/adopt-key", methods=["POST"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/adopt-key", methods=["POST"])
 @login_required
 @csrf_protect
-def adopt_with_existing_key(iface: str, pubkey: str):
+def adopt_with_existing_key(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Bring a limited peer under GUI management by uploading its existing
     private key. The submitted private key MUST derive to the peer's public
     key, otherwise the request is rejected.
@@ -510,6 +861,9 @@ def adopt_with_existing_key(iface: str, pubkey: str):
       - You still have the original client's private key
       - You don't want to regenerate keys (which would force client re-install)
     """
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -566,16 +920,20 @@ def adopt_with_existing_key(iface: str, pubkey: str):
     })
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/regenerate-keys", methods=["POST"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/regenerate-keys", methods=["POST"])
 @login_required
 @csrf_protect
-def regenerate_peer_keys(iface: str, pubkey: str):
+def regenerate_peer_keys(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
     """Generate a fresh keypair (and optionally PSK) for an existing peer.
 
     The peer's public key changes (it's derived from the new private key), so the
     old peer entry is removed from the conf and replaced with the new one. The
     metadata moves to the new pubkey too. Returns the fresh client config.
     """
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
     if not INTERFACE_RE.match(iface):
         return jsonify({"error": "invalid interface name"}), 400
     path = WG_DIR / f"{iface}.conf"
@@ -966,7 +1324,9 @@ def _validate_interface_address(addr_cidr: str) -> str:
 
 def _parse_peer_payload(payload: dict) -> dict:
     """Validate add/edit payload and return a metadata dict with parsed fields."""
-    comment = (payload.get("comment") or "").strip()[:128]
+    account_name = (payload.get("account_name") or payload.get("comment") or "").strip()[:64]
+    display_name = (payload.get("display_name") or "").strip()[:128]
+    comment = (payload.get("comment") or account_name or display_name).strip()[:128]
     peer_address = (payload.get("peer_address") or "").strip()
     if not peer_address:
         raise ValidationError("peer_address required (例: 10.252.1.42/32)")
@@ -1022,6 +1382,8 @@ def _parse_peer_payload(payload: dict) -> dict:
 
     return {
         "comment": comment,
+        "account_name": account_name or comment,
+        "display_name": display_name,
         "peer_address": peer_address,
         "extra_allowed_ips": extra_allowed,
         "client_dns": client_dns,
@@ -1037,6 +1399,8 @@ def _peer_summary(pubkey: str, meta: dict) -> dict:
     return {
         "public_key": pubkey,
         "comment": meta.get("comment"),
+        "account_name": meta.get("account_name") or meta.get("comment"),
+        "display_name": meta.get("display_name", ""),
         "peer_address": meta.get("peer_address"),
         "extra_allowed_ips": meta.get("extra_allowed_ips", []),
         "client_dns": meta.get("client_dns", []),
@@ -1070,8 +1434,34 @@ def _meta_to_conf_peer(pubkey: str, meta: dict) -> dict:
 
 
 def _client_filename(meta: dict) -> str:
-    name = (meta.get("comment") or "wg-client").strip() or "wg-client"
+    name = (meta.get("account_name") or meta.get("comment") or "wg-client").strip() or "wg-client"
     return re.sub(r"[^A-Za-z0-9._\-]", "_", name) + ".conf"
+
+
+def _parse_display_names(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip()[:128] for v in value]
+    text = str(value or "")
+    return [line.strip()[:128] for line in text.splitlines()]
+
+
+def _build_bulk_peer_zip(iface: str, created: list[tuple[str, dict, str, str]]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest_buf = io.StringIO()
+        writer = csv.writer(manifest_buf)
+        writer.writerow(["account_name", "display_name", "peer_address", "filename", "public_key"])
+        for pubkey, meta, client_conf, filename in created:
+            zf.writestr(filename, client_conf)
+            writer.writerow([
+                meta.get("account_name") or meta.get("comment") or "",
+                meta.get("display_name") or "",
+                meta.get("peer_address") or "",
+                filename,
+                pubkey,
+            ])
+        zf.writestr(f"{iface}-accounts.csv", manifest_buf.getvalue())
+    return buf.getvalue()
 
 
 # ---- conf file helpers --------------------------------------------------
@@ -1626,6 +2016,15 @@ def _gen_keys() -> tuple[str, str]:
     if not pub.ok:
         raise RuntimeError(f"wg pubkey failed: {pub.stderr}")
     return privkey, pub.stdout.strip()
+
+
+def _gen_unique_peer_keys(parsed: dict) -> tuple[str, str]:
+    existing = {p.get("public_key") for p in parsed.get("peers", []) if p.get("public_key")}
+    for _ in range(5):
+        priv, pub = _gen_keys()
+        if pub not in existing:
+            return priv, pub
+    raise RuntimeError("pubkey collision (rare)")
 
 
 def _gen_preshared() -> str:
