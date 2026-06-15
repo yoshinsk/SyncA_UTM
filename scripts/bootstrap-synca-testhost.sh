@@ -155,6 +155,23 @@ JSON
 }
 JSON
 
+    cat > /etc/server-gui/upnp.json <<JSON
+{
+  "enabled": false,
+  "wan_interface": "${WAN_IF}",
+  "lan_interfaces": ["${LAN_IF}"],
+  "allowed_cidrs": ["$(python3 - <<PY
+import ipaddress
+print(ipaddress.ip_network("${LAN_CIDR}", strict=False))
+PY
+)"],
+  "control_port": 5000,
+  "enable_upnp": true,
+  "enable_natpmp": true,
+  "secure_mode": true
+}
+JSON
+
     local installed_sha_json
     if [[ "$SYNCA_INSTALLED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
         installed_sha_json="\"$SYNCA_INSTALLED_SHA\""
@@ -476,6 +493,23 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+    cat > /etc/systemd/system/synca-upnp.service <<'UNIT'
+[Unit]
+Description=SyncA UTM UPnP/NAT-PMP gateway
+After=network-online.target firewalld.service
+Wants=network-online.target
+ConditionPathExists=/etc/server-gui/upnp.json
+
+[Service]
+Type=simple
+ExecStart=/opt/server-gui/bin/synca-upnpd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
     cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
 [Unit]
 Description=SyncA UTM 集中管理 状態送信
@@ -554,6 +588,7 @@ start_services() {
     systemctl daemon-reload
     systemctl enable --now server-gui nginx wgui-worker
     systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer
+    systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
     local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
     local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
     if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then

@@ -427,11 +427,22 @@ collect_auto_safe_config() {
 
 update_branch() {
     local branch="${SYNCA_UPDATE_BRANCH:-$SYNCA_DEFAULT_UPDATE_BRANCH}"
+    if [[ "$(os_major_version)" != "8" && "$branch" =~ ^codex/almalinux8(-iso)?$ ]]; then
+        branch="main"
+    fi
     if [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
         printf '%s' "$branch"
     else
         printf '%s' "main"
     fi
+}
+
+os_major_version() {
+    local version_id=""
+    if [[ -r /etc/os-release ]]; then
+        version_id="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
+    fi
+    printf '%s' "${version_id%%.*}"
 }
 
 write_install_env() {
@@ -625,6 +636,19 @@ JSON
 
     cat > "${CONFIG_DIR}/nginx.json" <<'JSON'
 {"backends": [], "vhosts": []}
+JSON
+
+    cat > "${CONFIG_DIR}/upnp.json" <<JSON
+{
+  "enabled": false,
+  "wan_interface": "${WAN_IF}",
+  "lan_interfaces": ["${LAN_IF}"],
+  "allowed_cidrs": ["$(cidr_network "$LAN_CIDR")"],
+  "control_port": 5000,
+  "enable_upnp": true,
+  "enable_natpmp": true,
+  "secure_mode": true
+}
 JSON
 
     local installed_sha_value installed_sha_json
@@ -888,6 +912,12 @@ CONF
     firewall-cmd --reload
 }
 
+configure_upnp() {
+    # UPnP is intentionally disabled on fresh installs. The GUI enables it only
+    # after writing LAN-scoped firewalld rules and starting synca-upnp.service.
+    systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
+}
+
 start_services() {
     systemctl daemon-reload
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
@@ -950,6 +980,7 @@ main() {
     configure_dnsmasq
     configure_nginx
     configure_firewall
+    configure_upnp
     start_services
     touch "${SYNC_DIR}/firstboot.done"
     systemctl disable synca-firstboot.service || true

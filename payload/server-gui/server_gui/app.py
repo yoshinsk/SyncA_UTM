@@ -27,6 +27,7 @@ from .modules import network as network_module
 from .modules import nginx_proxy as nginx_module
 from .modules import sophos_import as sophos_import_module
 from .modules import system as system_module
+from .modules import upnp as upnp_module
 from .modules import wireguard as wireguard_module
 
 
@@ -61,6 +62,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     geoip_module.register(app)
     dns_module.register(app)
     dhcp_module.register(app)
+    upnp_module.register(app)
     ipsec_module.register(app)
     wireguard_module.register(app)
     nginx_module.register(app)

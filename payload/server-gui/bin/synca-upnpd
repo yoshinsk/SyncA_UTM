@@ -1,0 +1,778 @@
+#!/usr/bin/env python3
+"""payload/server-gui/bin/synca-upnpd - SyncA UTM UPnP IGD/NAT-PMP daemon.
+
+The daemon reads `/etc/server-gui/upnp.json`, answers UPnP IGD and NAT-PMP
+requests from allowed LAN CIDRs, and applies temporary firewalld direct rules
+for WAN port mappings. It intentionally avoids external Python dependencies so
+the 8.10 and 9.8 offline installers can ship the same implementation.
+"""
+
+import email.utils
+import html
+import ipaddress
+import json
+import os
+import shlex
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from socketserver import ThreadingMixIn
+from xml.etree import ElementTree
+
+CONFIG_PATH = Path(os.environ.get("SYNCA_UPNPD_CONFIG", "/etc/server-gui/upnp.json"))
+RUN_DIR = Path("/run/synca-upnpd")
+MAPPINGS_PATH = RUN_DIR / "mappings.json"
+SSDP_GROUP = "239.255.255.250"
+SSDP_PORT = 1900
+NATPMP_PORT = 5351
+SERVER_NAME = "Linux/5.0 UPnP/1.0 SyncA-UTM/1.0"
+WAN_SERVICE = "urn:schemas-upnp-org:service:WANIPConnection:1"
+IGD_DEVICE = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
+WAN_DEVICE = "urn:schemas-upnp-org:device:WANDevice:1"
+WAN_CONN_DEVICE = "urn:schemas-upnp-org:device:WANConnectionDevice:1"
+
+
+class UpnpError(Exception):
+    def __init__(self, code, description):
+        super().__init__(description)
+        self.code = int(code)
+        self.description = str(description)
+
+
+def log(message):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S%z"), message, flush=True)
+
+
+def run(argv, timeout=20):
+    try:
+        return subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        proc = subprocess.CompletedProcess(argv, 127, "", str(exc))
+        return proc
+
+
+def load_config():
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    hostname = socket.gethostname() or "synca-utm"
+    default_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, hostname + ".synca-upnp"))
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "wan_interface": str(data.get("wan_interface", "")).strip(),
+        "lan_interfaces": [str(v).strip() for v in data.get("lan_interfaces", []) if str(v).strip()],
+        "allowed_cidrs": [str(v).strip() for v in data.get("allowed_cidrs", []) if str(v).strip()],
+        "control_port": int(data.get("control_port", 5000)),
+        "enable_upnp": data.get("enable_upnp", True) is not False,
+        "enable_natpmp": data.get("enable_natpmp", True) is not False,
+        "secure_mode": data.get("secure_mode", True) is not False,
+        "uuid": str(data.get("uuid") or default_uuid),
+    }
+
+
+def ip_json(argv):
+    proc = run(argv, timeout=10)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+def interface_addresses():
+    rows = ip_json(["ip", "-j", "-4", "addr", "show"]) or []
+    result = {}
+    for row in rows:
+        name = row.get("ifname")
+        if not name:
+            continue
+        addrs = []
+        for info in row.get("addr_info", []):
+            if info.get("family") != "inet":
+                continue
+            local = info.get("local")
+            prefix = info.get("prefixlen")
+            if local and prefix is not None:
+                try:
+                    addrs.append(ipaddress.ip_interface("%s/%s" % (local, prefix)))
+                except ValueError:
+                    pass
+        result[name] = addrs
+    return result
+
+
+def interface_ipv4(ifname):
+    addrs = interface_addresses().get(ifname, [])
+    return str(addrs[0].ip) if addrs else "0.0.0.0"
+
+
+def direct_rules_with_comment(comment):
+    proc = run(["firewall-cmd", "--direct", "--get-all-rules"], timeout=20)
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if comment in line]
+
+
+def remove_direct_rule(raw):
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return
+    run(["firewall-cmd", "--direct", "--remove-rule"] + parts, timeout=20)
+
+
+def firewall_active():
+    proc = run(["firewall-cmd", "--state"], timeout=10)
+    return proc.returncode == 0 and proc.stdout.strip() == "running"
+
+
+def now_http():
+    return email.utils.formatdate(usegmt=True)
+
+
+def tag_name(element):
+    if "}" in element.tag:
+        return element.tag.rsplit("}", 1)[1]
+    return element.tag
+
+
+def soap_value(args, name, default=""):
+    return str(args.get(name, default)).strip()
+
+
+def parse_port(value, name, minimum=1):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise UpnpError(402, "Invalid Args")
+    if port < minimum or port > 65535:
+        raise UpnpError(402, "Invalid %s" % name)
+    return port
+
+
+class SyncAUpnpDaemon:
+    def __init__(self, config):
+        self.config = config
+        self.started_at = int(time.time())
+        self.uuid = config["uuid"]
+        self.allowed_networks = [ipaddress.ip_network(c, strict=False) for c in config["allowed_cidrs"]]
+        self.lan_addresses = self._lan_addresses()
+        self.mappings = {}
+        self.lock = threading.RLock()
+
+    def _lan_addresses(self):
+        rows = interface_addresses()
+        out = []
+        for ifname in self.config["lan_interfaces"]:
+            for addr in rows.get(ifname, []):
+                out.append((ifname, addr))
+        return out
+
+    def external_ip(self):
+        return interface_ipv4(self.config["wan_interface"])
+
+    def lan_ip_for_client(self, client_ip):
+        try:
+            ip = ipaddress.ip_address(client_ip)
+        except ValueError:
+            ip = None
+        if ip:
+            for _, addr in self.lan_addresses:
+                if ip in addr.network:
+                    return str(addr.ip)
+        if self.lan_addresses:
+            return str(self.lan_addresses[0][1].ip)
+        return "127.0.0.1"
+
+    def client_allowed(self, client_ip):
+        try:
+            ip = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return False
+        return any(ip in network for network in self.allowed_networks)
+
+    def assert_client_allowed(self, client_ip, internal_ip=None):
+        if not self.client_allowed(client_ip):
+            raise UpnpError(606, "Action not authorized from this source")
+        if internal_ip and self.config["secure_mode"] and internal_ip != client_ip:
+            raise UpnpError(606, "Secure mode requires the internal client to match the requester")
+        if internal_ip:
+            try:
+                ip = ipaddress.ip_address(internal_ip)
+            except ValueError:
+                raise UpnpError(402, "Invalid internal client")
+            if not any(ip in network for network in self.allowed_networks):
+                raise UpnpError(606, "Internal client is outside allowed LAN CIDRs")
+
+    def mapping_key(self, proto, external_port, remote_host=""):
+        return "%s:%s:%s" % (proto.upper(), int(external_port), remote_host or "")
+
+    def rule_comment(self, mapping):
+        return "synca-upnp:%s:%s:%s:%s" % (
+            mapping["proto"],
+            mapping["external_port"],
+            mapping["internal_ip"].replace(".", "_"),
+            mapping["internal_port"],
+        )
+
+    def mapping_rules(self, mapping):
+        proto = mapping["proto"].lower()
+        comment = self.rule_comment(mapping)
+        wan = self.config["wan_interface"]
+        return [
+            [
+                "ipv4", "nat", "PREROUTING", "0",
+                "-i", wan, "-p", proto, "--dport", str(mapping["external_port"]),
+                "-m", "comment", "--comment", comment,
+                "-j", "DNAT", "--to-destination",
+                "%s:%s" % (mapping["internal_ip"], mapping["internal_port"]),
+            ],
+            [
+                "ipv4", "filter", "FORWARD", "0",
+                "-i", wan, "-p", proto, "-d", mapping["internal_ip"],
+                "--dport", str(mapping["internal_port"]),
+                "-m", "comment", "--comment", comment,
+                "-j", "ACCEPT",
+            ],
+        ]
+
+    def add_firewall_rules(self, mapping):
+        if not firewall_active():
+            raise UpnpError(501, "firewalld is not running")
+        for rule in self.mapping_rules(mapping):
+            proc = run(["firewall-cmd", "--direct", "--add-rule"] + rule, timeout=20)
+            output = (proc.stderr or proc.stdout or "").strip()
+            if proc.returncode != 0 and "ALREADY_ENABLED" not in output:
+                raise UpnpError(501, output or "failed to add firewalld rule")
+
+    def remove_firewall_rules(self, mapping):
+        for rule in self.mapping_rules(mapping):
+            proc = run(["firewall-cmd", "--direct", "--remove-rule"] + rule, timeout=20)
+            output = (proc.stderr or proc.stdout or "").strip()
+            if proc.returncode != 0 and "not in list" not in output:
+                log("failed to remove firewalld rule: %s" % (output or rule))
+
+    def clear_stale_rules(self):
+        for raw in direct_rules_with_comment("synca-upnp:"):
+            remove_direct_rule(raw)
+
+    def reapply_mappings(self):
+        with self.lock:
+            self.expire_mappings()
+            for mapping in list(self.mappings.values()):
+                self.add_firewall_rules(mapping)
+
+    def save_mappings(self):
+        RUN_DIR.mkdir(mode=0o755, exist_ok=True)
+        payload = list(self.mappings.values())
+        tmp = MAPPINGS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(MAPPINGS_PATH)
+
+    def add_mapping(self, proto, external_port, internal_ip, internal_port, description, duration, client_ip):
+        proto = proto.upper()
+        if proto not in ("TCP", "UDP"):
+            raise UpnpError(402, "Invalid protocol")
+        external_port = parse_port(external_port, "external port", minimum=1024)
+        internal_port = parse_port(internal_port, "internal port", minimum=1)
+        internal_ip = str(ipaddress.ip_address(internal_ip))
+        duration = max(0, int(duration or 0))
+        self.assert_client_allowed(client_ip, internal_ip)
+
+        key = self.mapping_key(proto, external_port)
+        expires_at = 0 if duration == 0 else int(time.time()) + duration
+        mapping = {
+            "key": key,
+            "proto": proto,
+            "external_port": external_port,
+            "internal_ip": internal_ip,
+            "internal_port": internal_port,
+            "description": str(description or "SyncA UPnP"),
+            "duration": duration,
+            "expires_at": expires_at,
+            "client_ip": client_ip,
+            "created_at": int(time.time()),
+        }
+        with self.lock:
+            existing = self.mappings.get(key)
+            if existing:
+                if existing["internal_ip"] != internal_ip or existing["internal_port"] != internal_port:
+                    raise UpnpError(718, "ConflictInMappingEntry")
+                self.remove_firewall_rules(existing)
+            self.add_firewall_rules(mapping)
+            self.mappings[key] = mapping
+            self.save_mappings()
+        log("mapped %s/%s -> %s:%s" % (external_port, proto, internal_ip, internal_port))
+        return mapping
+
+    def delete_mapping(self, proto, external_port, client_ip):
+        proto = proto.upper()
+        key = self.mapping_key(proto, int(external_port))
+        self.assert_client_allowed(client_ip)
+        with self.lock:
+            mapping = self.mappings.pop(key, None)
+            if not mapping:
+                raise UpnpError(714, "NoSuchEntryInArray")
+            self.remove_firewall_rules(mapping)
+            self.save_mappings()
+        log("removed mapping %s/%s" % (external_port, proto))
+
+    def expire_mappings(self):
+        now = int(time.time())
+        expired = []
+        with self.lock:
+            for key, mapping in list(self.mappings.items()):
+                if mapping["expires_at"] and mapping["expires_at"] <= now:
+                    expired.append((key, mapping))
+            for key, mapping in expired:
+                self.remove_firewall_rules(mapping)
+                self.mappings.pop(key, None)
+            if expired:
+                self.save_mappings()
+
+    def mapping_rows(self):
+        self.expire_mappings()
+        with self.lock:
+            return sorted(self.mappings.values(), key=lambda item: (item["proto"], item["external_port"]))
+
+    def handle_soap(self, action, args, client_ip):
+        if action == "GetExternalIPAddress":
+            return {"NewExternalIPAddress": self.external_ip()}
+        if action == "GetStatusInfo":
+            return {
+                "NewConnectionStatus": "Connected",
+                "NewLastConnectionError": "ERROR_NONE",
+                "NewUptime": str(max(0, int(time.time()) - self.started_at)),
+            }
+        if action == "GetConnectionTypeInfo":
+            return {"NewConnectionType": "IP_Routed", "NewPossibleConnectionTypes": "IP_Routed"}
+        if action == "GetNATRSIPStatus":
+            return {"NewRSIPAvailable": "0", "NewNATEnabled": "1"}
+        if action == "AddPortMapping":
+            self.add_mapping(
+                soap_value(args, "NewProtocol"),
+                soap_value(args, "NewExternalPort"),
+                soap_value(args, "NewInternalClient"),
+                soap_value(args, "NewInternalPort"),
+                soap_value(args, "NewPortMappingDescription", "SyncA UPnP"),
+                int(soap_value(args, "NewLeaseDuration", "0") or "0"),
+                client_ip,
+            )
+            return {}
+        if action == "DeletePortMapping":
+            self.delete_mapping(
+                soap_value(args, "NewProtocol"),
+                parse_port(soap_value(args, "NewExternalPort"), "external port", minimum=1),
+                client_ip,
+            )
+            return {}
+        if action == "GetSpecificPortMappingEntry":
+            proto = soap_value(args, "NewProtocol").upper()
+            port = parse_port(soap_value(args, "NewExternalPort"), "external port", minimum=1)
+            mapping = self.mappings.get(self.mapping_key(proto, port))
+            if not mapping:
+                raise UpnpError(714, "NoSuchEntryInArray")
+            return self.soap_mapping_response(mapping)
+        if action == "GetGenericPortMappingEntry":
+            index = int(soap_value(args, "NewPortMappingIndex", "0") or "0")
+            rows = self.mapping_rows()
+            if index < 0 or index >= len(rows):
+                raise UpnpError(713, "SpecifiedArrayIndexInvalid")
+            return self.soap_mapping_response(rows[index], include_external=True)
+        raise UpnpError(401, "Invalid Action")
+
+    def soap_mapping_response(self, mapping, include_external=False):
+        out = {
+            "NewInternalPort": str(mapping["internal_port"]),
+            "NewInternalClient": mapping["internal_ip"],
+            "NewEnabled": "1",
+            "NewPortMappingDescription": mapping["description"],
+            "NewLeaseDuration": str(mapping["duration"]),
+        }
+        if include_external:
+            out.update({
+                "NewRemoteHost": "",
+                "NewExternalPort": str(mapping["external_port"]),
+                "NewProtocol": mapping["proto"],
+            })
+        return out
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+class UpnpHTTPHandler(BaseHTTPRequestHandler):
+    daemon = None
+
+    def log_message(self, fmt, *args):
+        log("http %s - %s" % (self.client_address[0], fmt % args))
+
+    def do_GET(self):
+        if self.path in ("/", "/rootDesc.xml"):
+            self.send_xml(200, root_description(self.daemon, self.client_address[0]))
+        elif self.path == "/WANIPConn1.xml":
+            self.send_xml(200, wanip_scpd())
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        if self.path != "/upnp/control/WANIPConn1":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length)
+        try:
+            root = ElementTree.fromstring(body)
+            action_node = None
+            for node in root.iter():
+                if tag_name(node) in ("Body", "Envelope", "Fault"):
+                    continue
+                action_node = node
+                break
+            if action_node is None:
+                raise UpnpError(402, "Invalid Args")
+            action = tag_name(action_node)
+            args = {tag_name(child): child.text or "" for child in list(action_node)}
+            result = self.daemon.handle_soap(action, args, self.client_address[0])
+            self.send_xml(200, soap_response(action, result), soap=True)
+        except UpnpError as exc:
+            self.send_xml(500, soap_fault(exc.code, exc.description), soap=True)
+        except Exception:
+            traceback.print_exc()
+            self.send_xml(500, soap_fault(501, "Action Failed"), soap=True)
+
+    def send_xml(self, status, payload, soap=False):
+        data = payload.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", 'text/xml; charset="utf-8"')
+        if soap:
+            self.send_header("EXT", "")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def soap_response(action, values):
+    fields = "".join("<{0}>{1}</{0}>".format(k, html.escape(str(v))) for k, v in values.items())
+    return """<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:{action}Response xmlns:u="{service}">{fields}</u:{action}Response>
+  </s:Body>
+</s:Envelope>
+""".format(action=action, service=WAN_SERVICE, fields=fields)
+
+
+def soap_fault(code, description):
+    return """<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <s:Fault>
+      <faultcode>s:Client</faultcode>
+      <faultstring>UPnPError</faultstring>
+      <detail>
+        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+          <errorCode>{code}</errorCode>
+          <errorDescription>{desc}</errorDescription>
+        </UPnPError>
+      </detail>
+    </s:Fault>
+  </s:Body>
+</s:Envelope>
+""".format(code=code, desc=html.escape(description))
+
+
+def root_description(daemon, client_ip):
+    lan_ip = daemon.lan_ip_for_client(client_ip)
+    port = daemon.config["control_port"]
+    return """<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <URLBase>http://{lan_ip}:{port}/</URLBase>
+  <device>
+    <deviceType>{igd}</deviceType>
+    <friendlyName>SyncA UTM UPnP Gateway</friendlyName>
+    <manufacturer>NSK,inc</manufacturer>
+    <modelName>SyncA UTM</modelName>
+    <UDN>uuid:{uuid}</UDN>
+    <deviceList>
+      <device>
+        <deviceType>{wan_device}</deviceType>
+        <friendlyName>WAN Device</friendlyName>
+        <UDN>uuid:{uuid}:wan</UDN>
+        <deviceList>
+          <device>
+            <deviceType>{wan_conn_device}</deviceType>
+            <friendlyName>WAN Connection Device</friendlyName>
+            <UDN>uuid:{uuid}:wanconn</UDN>
+            <serviceList>
+              <service>
+                <serviceType>{service}</serviceType>
+                <serviceId>urn:upnp-org:serviceId:WANIPConn1</serviceId>
+                <SCPDURL>/WANIPConn1.xml</SCPDURL>
+                <controlURL>/upnp/control/WANIPConn1</controlURL>
+                <eventSubURL>/upnp/event/WANIPConn1</eventSubURL>
+              </service>
+            </serviceList>
+          </device>
+        </deviceList>
+      </device>
+    </deviceList>
+  </device>
+</root>
+""".format(
+        lan_ip=lan_ip,
+        port=port,
+        uuid=daemon.uuid,
+        igd=IGD_DEVICE,
+        wan_device=WAN_DEVICE,
+        wan_conn_device=WAN_CONN_DEVICE,
+        service=WAN_SERVICE,
+    )
+
+
+def wanip_scpd():
+    actions = [
+        "GetConnectionTypeInfo", "GetStatusInfo", "GetNATRSIPStatus",
+        "GetExternalIPAddress", "AddPortMapping", "DeletePortMapping",
+        "GetSpecificPortMappingEntry", "GetGenericPortMappingEntry",
+    ]
+    action_xml = "".join("<action><name>%s</name></action>" % name for name in actions)
+    return """<?xml version="1.0"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <actionList>{actions}</actionList>
+  <serviceStateTable></serviceStateTable>
+</scpd>
+""".format(actions=action_xml)
+
+
+def ssdp_response(daemon, st, client_ip):
+    location = "http://%s:%s/rootDesc.xml" % (daemon.lan_ip_for_client(client_ip), daemon.config["control_port"])
+    usn = "uuid:%s" % daemon.uuid
+    if st != "upnp:rootdevice":
+        usn += "::" + st
+    else:
+        usn += "::upnp:rootdevice"
+    return "\r\n".join([
+        "HTTP/1.1 200 OK",
+        "CACHE-CONTROL: max-age=120",
+        "DATE: " + now_http(),
+        "EXT:",
+        "LOCATION: " + location,
+        "SERVER: " + SERVER_NAME,
+        "ST: " + st,
+        "USN: " + usn,
+        "",
+        "",
+    ]).encode("utf-8")
+
+
+def ssdp_notify(daemon, nts):
+    location = "http://%s:%s/rootDesc.xml" % (daemon.lan_ip_for_client("0.0.0.0"), daemon.config["control_port"])
+    nts_value = "ssdp:%s" % nts
+    packets = []
+    for nt in ("upnp:rootdevice", "uuid:%s" % daemon.uuid, IGD_DEVICE, WAN_SERVICE):
+        usn = "uuid:%s" % daemon.uuid
+        if not nt.startswith("uuid:"):
+            usn += "::" + nt
+        else:
+            usn = nt
+        packets.append("\r\n".join([
+            "NOTIFY * HTTP/1.1",
+            "HOST: %s:%s" % (SSDP_GROUP, SSDP_PORT),
+            "CACHE-CONTROL: max-age=120",
+            "LOCATION: " + location,
+            "NT: " + nt,
+            "NTS: " + nts_value,
+            "SERVER: " + SERVER_NAME,
+            "USN: " + usn,
+            "",
+            "",
+        ]).encode("utf-8"))
+    return packets
+
+
+def supported_st_values():
+    return ["upnp:rootdevice", IGD_DEVICE, WAN_DEVICE, WAN_CONN_DEVICE, WAN_SERVICE]
+
+
+def ssdp_loop(daemon):
+    if not daemon.config["enable_upnp"]:
+        return
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("", SSDP_PORT))
+    except OSError as exc:
+        log("SSDP bind failed: %s" % exc)
+        return
+    for _, addr in daemon.lan_addresses:
+        try:
+            membership = socket.inet_aton(SSDP_GROUP) + socket.inet_aton(str(addr.ip))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        except OSError as exc:
+            log("SSDP join failed on %s: %s" % (addr.ip, exc))
+    while True:
+        try:
+            data, peer = sock.recvfrom(4096)
+            text = data.decode("utf-8", errors="ignore")
+            if "M-SEARCH" not in text.upper() or not daemon.client_allowed(peer[0]):
+                continue
+            headers = {}
+            for line in text.splitlines()[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().upper()] = v.strip()
+            st = headers.get("ST", "ssdp:all")
+            targets = supported_st_values() if st == "ssdp:all" else [st]
+            for target in targets:
+                if target in supported_st_values():
+                    sock.sendto(ssdp_response(daemon, target, peer[0]), peer)
+        except Exception as exc:
+            log("SSDP error: %s" % exc)
+
+
+def notify_loop(daemon):
+    if not daemon.config["enable_upnp"]:
+        return
+    while True:
+        for _, addr in daemon.lan_addresses:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(str(addr.ip)))
+                for packet in ssdp_notify(daemon, "alive"):
+                    sock.sendto(packet, (SSDP_GROUP, SSDP_PORT))
+                sock.close()
+            except Exception as exc:
+                log("SSDP notify failed on %s: %s" % (addr.ip, exc))
+        time.sleep(60)
+
+
+def natpmp_loop(daemon):
+    if not daemon.config["enable_natpmp"]:
+        return
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("", NATPMP_PORT))
+    except OSError as exc:
+        log("NAT-PMP bind failed: %s" % exc)
+        return
+    while True:
+        data, peer = sock.recvfrom(1024)
+        try:
+            response = handle_natpmp(daemon, data, peer[0])
+        except Exception as exc:
+            log("NAT-PMP error: %s" % exc)
+            response = None
+        if response:
+            sock.sendto(response, peer)
+
+
+def natpmp_header(op, result):
+    return struct.pack("!BBHI", 0, op | 128, result, int(time.time()))
+
+
+def handle_natpmp(daemon, data, client_ip):
+    if len(data) < 2 or data[0] != 0:
+        return None
+    op = data[1]
+    if not daemon.client_allowed(client_ip):
+        return natpmp_header(op, 2)
+    if op == 0:
+        try:
+            ip_bytes = socket.inet_aton(daemon.external_ip())
+        except OSError:
+            ip_bytes = socket.inet_aton("0.0.0.0")
+        return natpmp_header(op, 0) + ip_bytes
+    if op not in (1, 2) or len(data) < 12:
+        return natpmp_header(op, 5)
+    _, _, _, internal_port, requested_external, lifetime = struct.unpack("!BBHHHI", data[:12])
+    proto = "UDP" if op == 1 else "TCP"
+    external_port = requested_external or internal_port
+    try:
+        if lifetime == 0:
+            try:
+                daemon.delete_mapping(proto, external_port, client_ip)
+            except UpnpError:
+                pass
+        else:
+            daemon.add_mapping(proto, external_port, client_ip, internal_port, "NAT-PMP", lifetime, client_ip)
+        return natpmp_header(op, 0) + struct.pack("!HHI", internal_port, external_port, lifetime)
+    except UpnpError as exc:
+        result = 2 if exc.code == 606 else 4
+        return natpmp_header(op, result) + struct.pack("!HHI", internal_port, external_port, 0)
+
+
+def expiry_loop(daemon):
+    while True:
+        try:
+            daemon.reapply_mappings()
+        except Exception as exc:
+            log("mapping maintenance failed: %s" % exc)
+        time.sleep(30)
+
+
+def validate_config(config):
+    if not config["enabled"]:
+        raise SystemExit("UPnP is disabled in %s" % CONFIG_PATH)
+    if not config["wan_interface"] or not config["lan_interfaces"]:
+        raise SystemExit("wan_interface and lan_interfaces are required")
+    if not config["allowed_cidrs"]:
+        raise SystemExit("allowed_cidrs is required")
+    if config["control_port"] < 1024 or config["control_port"] > 65535:
+        raise SystemExit("control_port must be 1024-65535")
+
+
+def main():
+    config = load_config()
+    validate_config(config)
+    daemon = SyncAUpnpDaemon(config)
+    if not daemon.lan_addresses:
+        raise SystemExit("no IPv4 address found on configured LAN interfaces")
+    daemon.clear_stale_rules()
+    UpnpHTTPHandler.daemon = daemon
+    server = ThreadingHTTPServer(("0.0.0.0", config["control_port"]), UpnpHTTPHandler)
+
+    threads = [
+        threading.Thread(target=ssdp_loop, args=(daemon,), daemon=True),
+        threading.Thread(target=notify_loop, args=(daemon,), daemon=True),
+        threading.Thread(target=natpmp_loop, args=(daemon,), daemon=True),
+        threading.Thread(target=expiry_loop, args=(daemon,), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    log("synca-upnpd started wan=%s lan=%s cidrs=%s port=%s" % (
+        config["wan_interface"], ",".join(config["lan_interfaces"]),
+        ",".join(config["allowed_cidrs"]), config["control_port"],
+    ))
+    try:
+        server.serve_forever()
+    finally:
+        daemon.clear_stale_rules()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
