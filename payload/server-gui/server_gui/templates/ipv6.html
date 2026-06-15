@@ -8,17 +8,17 @@
     </h1>
     <div class="d-flex gap-2">
         <button class="btn btn-outline-secondary btn-sm" onclick="loadIpv6()">
-            <i class="bi bi-arrow-clockwise"></i> Refresh
+            <i class="bi bi-arrow-clockwise"></i> 再読込
         </button>
         <button class="btn btn-primary btn-sm" onclick="saveIpv6()">
-            <i class="bi bi-check2"></i> Save and apply
+            <i class="bi bi-check2"></i> 保存して反映
         </button>
     </div>
 </div>
 
 <div class="alert alert-warning d-flex align-items-start gap-2 small" role="alert">
     <i class="bi bi-exclamation-triangle-fill mt-1"></i>
-    <div>IPv6 is disabled by default. Enable it only on interfaces where Router Advertisements, DHCPv6, or IPv6 routing are intended.</div>
+    <div>IPv6は既定で無効です。RA、DHCPv6、IPv6ルーティングを使うインターフェースだけで有効化してください。</div>
 </div>
 
 <div class="row g-3 mb-3">
@@ -26,7 +26,7 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-activity text-secondary"></i>
-                <strong>Status</strong>
+                <strong>状態</strong>
             </div>
             <div class="card-body">
                 <div id="ipv6-status" class="d-flex flex-column gap-2 small"></div>
@@ -37,57 +37,65 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-sliders text-secondary"></i>
-                <strong>Global / WAN</strong>
+                <strong>全体 / WAN</strong>
             </div>
             <div class="card-body">
                 <div class="row g-3 align-items-end">
                     <div class="col-md-3">
                         <div class="form-check form-switch">
                             <input id="ipv6-enabled" class="form-check-input" type="checkbox">
-                            <label class="form-check-label" for="ipv6-enabled">Enable IPv6</label>
+                            <label class="form-check-label" for="ipv6-enabled">IPv6を有効化</label>
                         </div>
+                        <div class="form-text">IPv6転送、RA、DHCPv6、トンネル、FRRの反映を許可します。</div>
                     </div>
                     <div class="col-md-3">
                         <div class="form-check">
                             <input id="ipv6-fw-icmp" class="form-check-input" type="checkbox">
-                            <label class="form-check-label" for="ipv6-fw-icmp">Allow ICMPv6</label>
+                            <label class="form-check-label" for="ipv6-fw-icmp">ICMPv6を許可</label>
                         </div>
+                        <div class="form-text">近隣探索や経路制御に必要なIPv6 ICMPを許可します。</div>
                     </div>
                     <div class="col-md-3">
                         <div class="form-check">
                             <input id="ipv6-fw-dhcp" class="form-check-input" type="checkbox">
-                            <label class="form-check-label" for="ipv6-fw-dhcp">Allow DHCPv6</label>
+                            <label class="form-check-label" for="ipv6-fw-dhcp">DHCPv6を許可</label>
                         </div>
+                        <div class="form-text">LAN側でDHCPv6を使う場合にUDP 547を許可します。</div>
                     </div>
                     <div class="col-md-3 text-md-end">
                         <button class="btn btn-outline-danger btn-sm" onclick="disableIpv6()">
-                            <i class="bi bi-power"></i> Disable
+                            <i class="bi bi-power"></i> 無効化
                         </button>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">WAN interface</label>
+                        <label class="form-label small mb-1">WANインターフェース</label>
                         <select id="ipv6-wan-if" class="form-select form-select-sm font-monospace"></select>
+                        <div class="form-text">上流ISPまたは外部ルータへ接続するNIC。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">WAN method</label>
+                        <label class="form-label small mb-1">WAN取得方式</label>
                         <select id="ipv6-wan-method" class="form-select form-select-sm">
-                            <option value="disabled">disabled</option>
+                            <option value="disabled">無効</option>
                             <option value="slaac">SLAAC</option>
-                            <option value="dhcpv6">DHCPv6 client</option>
-                            <option value="manual">manual</option>
+                            <option value="dhcpv6">DHCPv6クライアント</option>
+                            <option value="manual">手動</option>
                         </select>
+                        <div class="form-text">WAN側IPv6アドレスの設定方法。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">WAN DNS servers</label>
+                        <label class="form-label small mb-1">WAN DNSサーバー</label>
                         <input id="ipv6-wan-dns" class="form-control form-control-sm font-monospace" placeholder="2001:4860:4860::8888, 2606:4700:4700::1111">
+                        <div class="form-text">WAN側で使うIPv6 DNS。カンマまたは空白区切り。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">Manual WAN address</label>
+                        <label class="form-label small mb-1">手動WANアドレス</label>
                         <input id="ipv6-wan-address" class="form-control form-control-sm font-monospace" placeholder="2001:db8::2/64">
+                        <div class="form-text">手動方式の場合に設定するIPv6アドレス/CIDR。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">Manual WAN gateway</label>
+                        <label class="form-label small mb-1">手動WANゲートウェイ</label>
                         <input id="ipv6-wan-gateway" class="form-control form-control-sm font-monospace" placeholder="2001:db8::1">
+                        <div class="form-text">手動方式の場合の上流IPv6ゲートウェイ。</div>
                     </div>
                 </div>
             </div>
@@ -99,10 +107,10 @@
     <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
         <div class="d-flex align-items-center gap-2">
             <i class="bi bi-diagram-3 text-secondary"></i>
-            <strong>Prefix Advertisements / DHCPv6</strong>
+            <strong>プレフィックス通知 / DHCPv6</strong>
         </div>
         <button class="btn btn-outline-primary btn-sm" onclick="addAdvertisement()">
-            <i class="bi bi-plus"></i> Add LAN prefix
+            <i class="bi bi-plus"></i> LANプレフィックス追加
         </button>
     </div>
     <div class="card-body p-0">
@@ -110,17 +118,17 @@
             <table class="table table-sm align-middle mb-0 small">
                 <thead class="table-light">
                     <tr>
-                        <th style="min-width:150px">interface</th>
-                        <th style="min-width:210px">prefix</th>
-                        <th style="min-width:130px">mode</th>
-                        <th style="min-width:210px">router address</th>
-                        <th style="min-width:120px">valid</th>
-                        <th style="min-width:120px">preferred</th>
-                        <th style="min-width:210px">DNS</th>
-                        <th style="min-width:150px">domain</th>
-                        <th style="min-width:180px">DHCPv6 start</th>
-                        <th style="min-width:180px">DHCPv6 end</th>
-                        <th style="min-width:90px">lease</th>
+                        <th style="min-width:150px">インターフェース<div class="text-secondary fw-normal">RA送信先LAN</div></th>
+                        <th style="min-width:210px">プレフィックス<div class="text-secondary fw-normal">通知する/64</div></th>
+                        <th style="min-width:130px">モード<div class="text-secondary fw-normal">SLAAC/DHCPv6</div></th>
+                        <th style="min-width:210px">ルータアドレス<div class="text-secondary fw-normal">SyncA側IPv6</div></th>
+                        <th style="min-width:120px">有効期限<div class="text-secondary fw-normal">秒</div></th>
+                        <th style="min-width:120px">推奨期限<div class="text-secondary fw-normal">秒</div></th>
+                        <th style="min-width:210px">DNS<div class="text-secondary fw-normal">RDNSS/DHCPv6</div></th>
+                        <th style="min-width:150px">ドメイン<div class="text-secondary fw-normal">検索ドメイン</div></th>
+                        <th style="min-width:180px">DHCPv6開始<div class="text-secondary fw-normal">managed用</div></th>
+                        <th style="min-width:180px">DHCPv6終了<div class="text-secondary fw-normal">managed用</div></th>
+                        <th style="min-width:90px">リース<div class="text-secondary fw-normal">例: 12h</div></th>
                         <th style="width:54px"></th>
                     </tr>
                 </thead>
@@ -135,42 +143,48 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-arrow-left-right text-secondary"></i>
-                <strong>6to4 / 6in4 Tunnel</strong>
+                <strong>6to4 / 6in4トンネル</strong>
             </div>
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">mode</label>
+                        <label class="form-label small mb-1">方式</label>
                         <select id="ipv6-trans-mode" class="form-select form-select-sm">
-                            <option value="disabled">disabled</option>
+                            <option value="disabled">無効</option>
                             <option value="6to4">6to4</option>
-                            <option value="6in4">6in4 tunnel broker</option>
+                            <option value="6in4">6in4トンネルブローカー</option>
                         </select>
+                        <div class="form-text">IPv4経由でIPv6接続を作る方式。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">tunnel name</label>
+                        <label class="form-label small mb-1">トンネル名</label>
                         <input id="ipv6-trans-name" class="form-control form-control-sm font-monospace" value="synca6">
+                        <div class="form-text">Linux上に作成するSITインターフェース名。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">local IPv4</label>
+                        <label class="form-label small mb-1">ローカルIPv4</label>
                         <input id="ipv6-trans-local" class="form-control form-control-sm font-monospace" value="auto">
+                        <div class="form-text">autoの場合は既定経路の送信元IPv4を使用。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">remote IPv4</label>
-                        <input id="ipv6-trans-remote" class="form-control form-control-sm font-monospace" placeholder="tunnel broker server">
+                        <label class="form-label small mb-1">リモートIPv4</label>
+                        <input id="ipv6-trans-remote" class="form-control form-control-sm font-monospace" placeholder="トンネルブローカーのサーバーIPv4">
+                        <div class="form-text">6in4で接続する対向サーバーのIPv4。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">tunnel IPv6 address</label>
+                        <label class="form-label small mb-1">トンネルIPv6アドレス</label>
                         <input id="ipv6-trans-address" class="form-control form-control-sm font-monospace" placeholder="2001:db8::2/64">
+                        <div class="form-text">6in4トンネルIFへ付与するIPv6アドレス。</div>
                     </div>
                     <div class="col-md-8">
-                        <label class="form-label small mb-1">routed prefix</label>
+                        <label class="form-label small mb-1">ルーティングプレフィックス</label>
                         <input id="ipv6-trans-prefix" class="form-control form-control-sm font-monospace" placeholder="2001:db8:100::/48">
+                        <div class="form-text">トンネル経由でSyncA UTMへ委譲されたIPv6プレフィックス。</div>
                     </div>
                     <div class="col-md-4 d-flex align-items-end">
                         <div class="form-check">
                             <input id="ipv6-trans-default" class="form-check-input" type="checkbox">
-                            <label class="form-check-label" for="ipv6-trans-default">default route</label>
+                            <label class="form-check-label" for="ipv6-trans-default">既定経路にする</label>
                         </div>
                     </div>
                 </div>
@@ -181,21 +195,23 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-shuffle text-secondary"></i>
-                <strong>Renumbering</strong>
+                <strong>リナンバリング</strong>
             </div>
             <div class="card-body">
                 <div class="row g-3 align-items-end">
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">old prefix</label>
+                        <label class="form-label small mb-1">旧プレフィックス</label>
                         <input id="ipv6-renumber-old" class="form-control form-control-sm font-monospace" list="ipv6-prefix-datalist" placeholder="2001:db8:1::/64">
+                        <div class="form-text">置き換え元のIPv6プレフィックス。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">new prefix</label>
+                        <label class="form-label small mb-1">新プレフィックス</label>
                         <input id="ipv6-renumber-new" class="form-control form-control-sm font-monospace" placeholder="2001:db8:2::/64">
+                        <div class="form-text">置き換え先のIPv6プレフィックス。同じprefix長が必要です。</div>
                     </div>
                     <div class="col-12">
                         <button class="btn btn-outline-primary btn-sm" onclick="renumberIpv6()">
-                            <i class="bi bi-arrow-repeat"></i> Apply renumbering
+                            <i class="bi bi-arrow-repeat"></i> リナンバリングを適用
                         </button>
                     </div>
                 </div>
@@ -208,27 +224,30 @@
 <div class="card border-0 shadow-sm mb-3">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-signpost-2 text-secondary"></i>
-        <strong>Dynamic Routing (FRR)</strong>
+        <strong>動的ルーティング (FRR)</strong>
     </div>
     <div class="card-body">
         <div class="row g-3 mb-3">
             <div class="col-md-3">
                 <div class="form-check form-switch">
                     <input id="ipv6-routing-enabled" class="form-check-input" type="checkbox">
-                    <label class="form-check-label" for="ipv6-routing-enabled">Enable FRR</label>
+                    <label class="form-check-label" for="ipv6-routing-enabled">FRRを有効化</label>
                 </div>
+                <div class="form-text">OSPFv3/BGPでIPv6経路を交換します。</div>
             </div>
             <div class="col-md-3">
                 <div class="form-check">
                     <input id="ipv6-ospf-enabled" class="form-check-input" type="checkbox">
                     <label class="form-check-label" for="ipv6-ospf-enabled">OSPFv3</label>
                 </div>
+                <div class="form-text">LAN/拠点間でIPv6経路を自動交換します。</div>
             </div>
             <div class="col-md-3">
                 <div class="form-check">
                     <input id="ipv6-bgp-enabled" class="form-check-input" type="checkbox">
                     <label class="form-check-label" for="ipv6-bgp-enabled">BGP IPv6</label>
                 </div>
+                <div class="form-text">ISPや上位ルータとIPv6経路を交換します。</div>
             </div>
         </div>
         <div class="row g-3">
@@ -236,14 +255,15 @@
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <strong class="small">OSPFv3</strong>
                     <button class="btn btn-outline-primary btn-sm" onclick="addOspfInterface()">
-                        <i class="bi bi-plus"></i> Add
+                        <i class="bi bi-plus"></i> 追加
                     </button>
                 </div>
-                <label class="form-label small mb-1">router ID</label>
+                <label class="form-label small mb-1">ルータID</label>
                 <input id="ipv6-ospf-router-id" class="form-control form-control-sm font-monospace mb-2" placeholder="10.255.0.1">
+                <div class="form-text mb-2">OSPFv3プロセスを識別するIPv4形式のID。</div>
                 <div class="table-responsive border rounded">
                     <table class="table table-sm mb-0 align-middle small">
-                        <thead class="table-light"><tr><th>interface</th><th>area</th><th style="width:50px"></th></tr></thead>
+                        <thead class="table-light"><tr><th>インターフェース</th><th>エリア</th><th style="width:50px"></th></tr></thead>
                         <tbody id="ipv6-ospf-tbody"></tbody>
                     </table>
                 </div>
@@ -252,26 +272,29 @@
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <strong class="small">BGP</strong>
                     <button class="btn btn-outline-primary btn-sm" onclick="addBgpNeighbor()">
-                        <i class="bi bi-plus"></i> Add peer
+                        <i class="bi bi-plus"></i> ピア追加
                     </button>
                 </div>
                 <div class="row g-2 mb-2">
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">local AS</label>
+                        <label class="form-label small mb-1">ローカルAS</label>
                         <input id="ipv6-bgp-local-as" class="form-control form-control-sm font-monospace" placeholder="65000">
+                        <div class="form-text">自装置のBGP AS番号。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">router ID</label>
+                        <label class="form-label small mb-1">ルータID</label>
                         <input id="ipv6-bgp-router-id" class="form-control form-control-sm font-monospace" placeholder="10.255.0.1">
+                        <div class="form-text">BGPプロセスを識別するIPv4形式のID。</div>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small mb-1">advertised networks</label>
+                        <label class="form-label small mb-1">広告ネットワーク</label>
                         <input id="ipv6-bgp-networks" class="form-control form-control-sm font-monospace" placeholder="2001:db8:100::/48">
+                        <div class="form-text">BGPで広報するIPv6プレフィックス。</div>
                     </div>
                 </div>
                 <div class="table-responsive border rounded">
                     <table class="table table-sm mb-0 align-middle small">
-                        <thead class="table-light"><tr><th>neighbor</th><th>remote AS</th><th>interface</th><th>description</th><th style="width:50px"></th></tr></thead>
+                        <thead class="table-light"><tr><th>ネイバー</th><th>リモートAS</th><th>インターフェース</th><th>説明</th><th style="width:50px"></th></tr></thead>
                         <tbody id="ipv6-bgp-tbody"></tbody>
                     </table>
                 </div>
@@ -291,6 +314,29 @@ let ipv6BgpNeighbors = [];
 
 function ipv6Badge(text, ok) {
     return `<span class="badge ${ok ? 'bg-success-subtle text-success-emphasis' : 'bg-secondary-subtle text-secondary-emphasis'}">${escapeHtml(text)}</span>`;
+}
+
+function statusText(value) {
+    const map = {
+        enabled: '有効',
+        disabled: '無効',
+        active: '稼働中',
+        inactive: '停止中',
+        failed: '失敗',
+        unknown: '不明',
+        installed: '導入済み',
+        missing: '未導入',
+    };
+    return map[value] || value || '不明';
+}
+
+function raModeText(value) {
+    const map = {
+        slaac: 'SLAACのみ',
+        stateless: 'SLAAC + ステートレスDHCPv6',
+        managed: 'ステートフルDHCPv6',
+    };
+    return map[value] || value;
 }
 
 function listValue(value) {
@@ -313,7 +359,7 @@ function interfaceOptions(selected, allowBlank = true) {
     const blank = allowBlank ? '<option value="">-</option>' : '';
     return blank + interfaces.map(item => {
         const sel = item.name === selected ? 'selected' : '';
-        const mark = item.is_wan ? ' [WAN]' : '';
+        const mark = item.is_wan ? ' [WAN候補]' : '';
         return `<option value="${escapeHtml(item.name)}" ${sel}>${escapeHtml(interfaceText(item) + mark)}</option>`;
     }).join('');
 }
@@ -339,20 +385,20 @@ function renderIpv6Status(data) {
     const sysctl = data.sysctl || {};
     const status = document.getElementById('ipv6-status');
     const rows = [
-        ['setting', settings.enabled ? 'enabled' : 'disabled', !!settings.enabled],
-        ['radvd', `${services.radvd?.active || 'unknown'} / ${services.radvd?.enabled || 'unknown'}`, services.radvd?.active === 'active'],
-        ['dnsmasq', `${services.dnsmasq?.active || 'unknown'} / ${services.dnsmasq?.enabled || 'unknown'}`, services.dnsmasq?.active === 'active'],
-        ['transition', `${services.transition?.active || 'unknown'} / ${services.transition?.enabled || 'unknown'}`, services.transition?.active === 'active'],
-        ['FRR', `${services.frr?.active || 'unknown'} / ${services.frr?.enabled || 'unknown'}`, services.frr?.active === 'active'],
-        ['radvd command', tools.radvd ? 'installed' : 'missing', tools.radvd],
-        ['vtysh command', tools.vtysh ? 'installed' : 'missing', tools.vtysh],
-        ['forwarding', sysctl['net.ipv6.conf.all.forwarding'] || '-', sysctl['net.ipv6.conf.all.forwarding'] === '1'],
+        ['設定', settings.enabled ? '有効' : '無効', !!settings.enabled],
+        ['radvd', `${statusText(services.radvd?.active)} / ${statusText(services.radvd?.enabled)}`, services.radvd?.active === 'active'],
+        ['dnsmasq', `${statusText(services.dnsmasq?.active)} / ${statusText(services.dnsmasq?.enabled)}`, services.dnsmasq?.active === 'active'],
+        ['IPv6トンネル', `${statusText(services.transition?.active)} / ${statusText(services.transition?.enabled)}`, services.transition?.active === 'active'],
+        ['FRR', `${statusText(services.frr?.active)} / ${statusText(services.frr?.enabled)}`, services.frr?.active === 'active'],
+        ['radvdコマンド', tools.radvd ? '導入済み' : '未導入', tools.radvd],
+        ['vtyshコマンド', tools.vtysh ? '導入済み' : '未導入', tools.vtysh],
+        ['IPv6転送', sysctl['net.ipv6.conf.all.forwarding'] === '1' ? '有効' : '無効', sysctl['net.ipv6.conf.all.forwarding'] === '1'],
     ];
     status.innerHTML = rows.map(([label, text, ok]) => `
         <div class="d-flex justify-content-between gap-2">
             <span>${escapeHtml(label)}</span>${ipv6Badge(text, ok)}
         </div>`).join('') + `
-        <div><span class="text-secondary">config:</span> <code>${escapeHtml(data.config_path || '')}</code></div>`;
+        <div><span class="text-secondary">設定ファイル:</span> <code>${escapeHtml(data.config_path || '')}</code></div>`;
 }
 
 function renderIpv6Form(data) {
@@ -383,14 +429,14 @@ function renderIpv6Form(data) {
 function renderAdvertisements() {
     const tbody = document.getElementById('ipv6-adv-tbody');
     tbody.innerHTML = ipv6Advertisements.length === 0
-        ? '<tr><td colspan="12" class="text-secondary text-center py-3">No IPv6 LAN prefixes</td></tr>'
+        ? '<tr><td colspan="12" class="text-secondary text-center py-3">IPv6 LANプレフィックスは未設定です</td></tr>'
         : ipv6Advertisements.map((adv, idx) => `
             <tr data-index="${idx}">
                 <td><select class="form-select form-select-sm font-monospace adv-if">${interfaceOptions(adv.interface || '', false)}</select></td>
                 <td><input class="form-control form-control-sm font-monospace adv-prefix" value="${escapeHtml(adv.prefix || '')}" placeholder="2001:db8:1::/64"></td>
                 <td>
                     <select class="form-select form-select-sm adv-mode">
-                        ${['slaac', 'stateless', 'managed'].map(mode => `<option value="${mode}" ${mode === (adv.mode || 'slaac') ? 'selected' : ''}>${mode}</option>`).join('')}
+                        ${['slaac', 'stateless', 'managed'].map(mode => `<option value="${mode}" ${mode === (adv.mode || 'slaac') ? 'selected' : ''}>${raModeText(mode)}</option>`).join('')}
                     </select>
                 </td>
                 <td><input class="form-control form-control-sm font-monospace adv-router" value="${escapeHtml(adv.router_address || '')}" placeholder="auto ::1/64"></td>
@@ -401,7 +447,7 @@ function renderAdvertisements() {
                 <td><input class="form-control form-control-sm font-monospace adv-dhcp-start" value="${escapeHtml(adv.dhcp_start || '')}"></td>
                 <td><input class="form-control form-control-sm font-monospace adv-dhcp-end" value="${escapeHtml(adv.dhcp_end || '')}"></td>
                 <td><input class="form-control form-control-sm font-monospace adv-lease" value="${escapeHtml(adv.lease || '12h')}"></td>
-                <td><button class="btn btn-outline-danger btn-sm" onclick="removeAdvertisement(${idx})" title="Remove"><i class="bi bi-trash"></i></button></td>
+                <td><button class="btn btn-outline-danger btn-sm" onclick="removeAdvertisement(${idx})" title="削除"><i class="bi bi-trash"></i></button></td>
             </tr>`).join('');
 }
 
@@ -461,7 +507,7 @@ function renderRouting(routing) {
 function renderOspfInterfaces() {
     const tbody = document.getElementById('ipv6-ospf-tbody');
     tbody.innerHTML = ipv6OspfInterfaces.length === 0
-        ? '<tr><td colspan="3" class="text-secondary text-center py-2">No OSPFv3 interfaces</td></tr>'
+        ? '<tr><td colspan="3" class="text-secondary text-center py-2">OSPFv3インターフェースは未設定です</td></tr>'
         : ipv6OspfInterfaces.map((item, idx) => `
             <tr data-index="${idx}">
                 <td><select class="form-select form-select-sm font-monospace ospf-if">${interfaceOptions(item.interface || '', false)}</select></td>
@@ -491,7 +537,7 @@ function collectOspfInterfaces() {
 function renderBgpNeighbors() {
     const tbody = document.getElementById('ipv6-bgp-tbody');
     tbody.innerHTML = ipv6BgpNeighbors.length === 0
-        ? '<tr><td colspan="5" class="text-secondary text-center py-2">No BGP peers</td></tr>'
+        ? '<tr><td colspan="5" class="text-secondary text-center py-2">BGPピアは未設定です</td></tr>'
         : ipv6BgpNeighbors.map((item, idx) => `
             <tr data-index="${idx}">
                 <td><input class="form-control form-control-sm font-monospace bgp-address" value="${escapeHtml(item.address || '')}" placeholder="2001:db8::1"></td>
@@ -566,14 +612,14 @@ function collectIpv6Payload(forceDisabled = false) {
 async function saveIpv6() {
     const res = await api.send('/ipv6/api/config', 'POST', collectIpv6Payload());
     if (!res) return;
-    toast(res.ok ? 'IPv6 settings applied' : 'IPv6 apply failed', !res.ok);
+    toast(res.ok ? 'IPv6設定を反映しました' : 'IPv6設定の反映に失敗しました', !res.ok);
     await loadIpv6();
 }
 
 async function disableIpv6() {
     const res = await api.send('/ipv6/api/config', 'POST', collectIpv6Payload(true));
     if (!res) return;
-    toast(res.ok ? 'IPv6 disabled' : 'IPv6 disable failed', !res.ok);
+    toast(res.ok ? 'IPv6を無効化しました' : 'IPv6の無効化に失敗しました', !res.ok);
     await loadIpv6();
 }
 
@@ -582,7 +628,7 @@ async function renumberIpv6() {
     const newPrefix = document.getElementById('ipv6-renumber-new').value.trim();
     const res = await api.send('/ipv6/api/renumber', 'POST', { old_prefix: oldPrefix, new_prefix: newPrefix });
     if (!res) return;
-    toast(res.ok ? 'IPv6 prefix renumbered' : 'IPv6 renumbering failed', !res.ok);
+    toast(res.ok ? 'IPv6プレフィックスをリナンバリングしました' : 'IPv6リナンバリングに失敗しました', !res.ok);
     await loadIpv6();
 }
 

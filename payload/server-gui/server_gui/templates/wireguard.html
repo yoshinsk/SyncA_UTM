@@ -549,7 +549,7 @@ async function refresh() {
     const prev = currentIface;
     sel.innerHTML = interfaces.map(i =>
         `<option value="${escapeHtml(i.name)}" ${i.name === prev ? 'selected' : ''}>
-            ${escapeHtml(i.name)}${i.active ? ' (UP)' : ' (DOWN)'}
+            ${escapeHtml(i.name)}${i.active ? ' (起動中)' : ' (停止中)'}
          </option>`
     ).join('');
     if (!currentIface || !interfaces.find(i => i.name === currentIface)) {
@@ -587,7 +587,7 @@ function openIfaceCreate() {
 }
 
 function openIfaceEdit() {
-    if (!currentData) return toast('Interface を選択してください', true);
+    if (!currentData) return toast('インターフェースを選択してください', true);
     ifaceModalMode = 'edit';
     const intf = currentData.interface || {};
     document.getElementById('iface-modal-title').textContent = `インターフェース編集: ${currentIface}`;
@@ -662,7 +662,7 @@ async function submitIfaceForm() {
 }
 
 async function regenerateServerKeys() {
-    if (!currentIface) return toast('Interface を選択してください', true);
+    if (!currentIface) return toast('インターフェースを選択してください', true);
     const peerCount = (currentData?.peers || []).length;
     if (!confirm(
         `${currentIface} のサーバ鍵ペアを再生成しますか?\n\n` +
@@ -770,7 +770,7 @@ function renderIface(data) {
     const ifaceMeta = interfaces.find(i => i.name === currentIface) || {};
     document.getElementById('iface-state-badge').innerHTML = ifaceMeta.active
         ? '<span class="badge bg-success-subtle text-success-emphasis">UP</span>'
-        : '<span class="badge bg-secondary-subtle text-secondary-emphasis">DOWN</span>';
+        : '<span class="badge bg-secondary-subtle text-secondary-emphasis">停止中</span>';
     document.getElementById('server-pubkey').textContent = intf.public_key || '—';
     const rows = [
         ['Address', (intf.address || []).join(', ') || '—'],
@@ -810,7 +810,7 @@ function renderPeers(data) {
             : '';
         const managedBadge = p.managed
             ? ''
-            : '<span class="badge bg-warning-subtle text-warning-emphasis ms-1" title="秘密鍵が GUI に保存されていません">limited</span>';
+            : '<span class="badge bg-warning-subtle text-warning-emphasis ms-1" title="秘密鍵が GUI に保存されていません">制限あり</span>';
         const showCfgBtn = p.managed
             ? `<button class="btn btn-sm btn-outline-primary" onclick="showClientConfig('${escapeJs(p.public_key)}', '${escapeJs(accountName)}')" title="設定 / QR 表示">
                    <i class="bi bi-qr-code"></i>
@@ -877,7 +877,7 @@ function peerKeyUrl(pubkey, suffix = '') {
 
 /* ---- bulk peer modal ---- */
 function openBulkPeerModal() {
-    if (!currentIface) return toast('Interface を選択してください', true);
+    if (!currentIface) return toast('インターフェースを選択してください', true);
     const sug = _suggestionsOrEmpty();
     renderBulkEndpointCandidates();
     const available = Number(sug.available_peer_count || 0);
@@ -937,7 +937,7 @@ function downloadLastBulkBundle() {
 }
 
 async function downloadAllClientConfigs() {
-    if (!currentIface) return toast('Interface を選択してください', true);
+    if (!currentIface) return toast('インターフェースを選択してください', true);
     const res = await api.get(`/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/client-configs`);
     if (!res) return;
     downloadBase64Zip(res.bundle_base64 || '', res.bundle_filename || 'wireguard-all-accounts.zip');
@@ -986,7 +986,7 @@ async function deleteAlias() {
 
 /* ---- peer modal ---- */
 function openPeerModal(peer) {
-    if (!currentIface) return toast('Interface を選択してください', true);
+    if (!currentIface) return toast('インターフェースを選択してください', true);
     const sug = _suggestionsOrEmpty();
     if (peer) {
         renderEndpointCandidates();
@@ -1050,7 +1050,7 @@ async function submitPeerForm() {
         endpoint: document.getElementById('pf-endpoint').value.trim(),
         persistent_keepalive: document.getElementById('pf-keepalive').value.trim(),
     };
-    if (!payload.peer_address) return toast('Peer Address は必須', true);
+    if (!payload.peer_address) return toast('ピアアドレスは必須です', true);
 
     let res;
     if (editingPubkey) {
@@ -1152,7 +1152,7 @@ async function regenerateKeys(pubkey) {
         `このピアの鍵ペアを再生成しますか?\n\n` +
         `・公開鍵が変わるためクライアント側の設定差し替えが必要です\n` +
         `・新しい .conf がモーダルに表示されます (再表示可)\n` +
-        `・GUI 管理下に取り込まれます (これまで limited だった場合)`)) return;
+        `・GUI 管理下に取り込まれます (これまで制限ありだった場合)`)) return;
     const res = await api.send(
         peerKeyUrl(pubkey, '/regenerate-keys'),
         'POST', { regenerate_psk: true });

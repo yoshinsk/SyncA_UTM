@@ -860,7 +860,7 @@ async function runTest() {
     const data = await api.get('/nginx/api/test');
     if (!data) return;
     if (data.ok) toast('nginx -t OK');
-    else toast('nginx -t 失敗: ' + (data.stderr || 'unknown'), true);
+    else toast('nginx -t 失敗: ' + (data.stderr || '不明'), true);
 }
 
 refresh();

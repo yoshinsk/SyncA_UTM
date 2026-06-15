@@ -245,8 +245,8 @@ async function refresh() {
         ? '<tr><td colspan="6" class="text-center text-secondary py-4">プロバイダ未登録</td></tr>'
         : providers.map(p => {
             const enabledBadge = p.enabled
-                ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">enabled</span>'
-                : '<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">disabled</span>';
+                ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">有効</span>'
+                : '<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">無効</span>';
             return `<tr>
                 <td><span class="fw-semibold">${escapeHtml(p.name)}</span> ${enabledBadge}</td>
                 <td class="font-monospace small">${escapeHtml(p.account || '—')}.<wbr>${escapeHtml(p.domain || '—')}</td>
@@ -337,7 +337,7 @@ async function sendProvider(payload) {
             toast(body.error || '既存ホスト名です。PINを入力してください。', true);
             return null;
         }
-        toast((body && body.error) || `HTTP ${response.status}`, true);
+        toast((body && body.error) || `サーバーエラー (HTTP ${response.status})`, true);
         return null;
     } catch (e) {
         toast('通信エラー: ' + e.message, true);

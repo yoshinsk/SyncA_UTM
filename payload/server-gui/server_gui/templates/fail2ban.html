@@ -149,7 +149,7 @@ async function refresh() {
     installBanner.classList.add('d-none');
     badge.innerHTML = st.active
         ? `<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> active ${escapeHtml(st.version || '')}</span>`
-        : `<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> inactive</span>`;
+        : `<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> 停止中</span>`;
 
     const data = await api.get('/fail2ban/api/jails');
     if (!data) return;
@@ -178,7 +178,7 @@ async function refresh() {
                         <div class="small">
                             <div class="text-secondary">filter: <code>${escapeHtml(j.filter || '-')}</code></div>
                             <div class="text-secondary">log: <code class="text-break">${escapeHtml((j.file_list || []).join(', ') || j.journal_matches || '-')}</code></div>
-                            <div class="text-secondary">failed: ${j.currently_failed} 現在 / ${j.total_failed} 累計</div>
+                            <div class="text-secondary">失敗: ${j.currently_failed} 現在 / ${j.total_failed} 累計</div>
                         </div>
                     </div>
                 </div>

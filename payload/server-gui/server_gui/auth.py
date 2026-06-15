@@ -64,7 +64,7 @@ def login_required(f: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         if "user" not in session:
             if request.path.startswith("/api/") or "/api/" in request.path:
-                return jsonify({"error": "not authenticated"}), 401
+                return jsonify({"error": "ログインが必要です"}), 401
             return redirect(url_for("auth.login", next=request.path))
         return f(*args, **kwargs)
     return wrapper
@@ -80,7 +80,7 @@ def csrf_protect(f: Callable) -> Callable:
                 provided = payload.get("_csrf")
             stored = session.get("csrf_token", "")
             if not provided or not stored or not hmac.compare_digest(str(provided), stored):
-                return jsonify({"error": "invalid CSRF token"}), 403
+                return jsonify({"error": "CSRFトークンが不正です。ページを再読み込みしてください"}), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -97,10 +97,10 @@ def login():
     if request.method == "POST":
         if _record_failure(ip):
             logger.warning("rate limit hit for %s", ip)
-            return render_template("login.html", error="Too many attempts, retry in 1 minute"), 429
+            return render_template("login.html", error="ログイン試行回数が多すぎます。1分後に再試行してください"), 429
         creds = _load_credentials()
         if creds is None:
-            return render_template("login.html", error="Not initialized. Run the installer first."), 500
+            return render_template("login.html", error="初期化されていません。先にインストーラを実行してください"), 500
         username = request.form.get("username", "")
         password = request.form.get("password", "")
         if username == creds["username"] and check_password_hash(creds["password_hash"], password):
@@ -113,7 +113,7 @@ def login():
                 next_url = "/"
             return redirect(next_url)
         logger.warning("failed login for user=%r from %s", username, ip)
-        return render_template("login.html", error="Invalid credentials"), 401
+        return render_template("login.html", error="ユーザー名またはパスワードが正しくありません"), 401
     return render_template("login.html")
 
 

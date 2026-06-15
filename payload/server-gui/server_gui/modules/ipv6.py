@@ -102,9 +102,9 @@ def renumber():
         old_net = ipaddress.IPv6Network(old_prefix, strict=False)
         new_net = ipaddress.IPv6Network(new_prefix, strict=False)
     except ValueError as e:
-        return jsonify({"ok": False, "error": f"invalid IPv6 prefix: {e}"}), 400
+        return jsonify({"ok": False, "error": f"IPv6プレフィックスが不正です: {e}"}), 400
     if old_net.prefixlen != new_net.prefixlen:
-        return jsonify({"ok": False, "error": "old/new prefix length must match"}), 400
+        return jsonify({"ok": False, "error": "旧プレフィックスと新プレフィックスのprefix長は同じにしてください"}), 400
 
     settings = _load_settings()
     changed = False
@@ -118,7 +118,7 @@ def renumber():
         changed = True
 
     if not changed:
-        return jsonify({"ok": False, "error": "old prefix not found in advertisements"}), 404
+        return jsonify({"ok": False, "error": "指定された旧プレフィックスは通知設定内に見つかりません"}), 404
     _save_settings(settings)
     result = _apply_runtime(settings)
     result["renumbered"] = {"old_prefix": str(old_net), "new_prefix": str(new_net)}
@@ -203,9 +203,9 @@ def _normalize_settings(payload: dict) -> dict:
     routing = _normalize_routing(raw_routing, require_enabled=enabled)
 
     if enabled and not advertisements and transition["mode"] == "disabled" and not routing["enabled"]:
-        raise ValidationError("IPv6 enabled requires at least one LAN advertisement, transition tunnel, or dynamic routing profile")
+        raise ValidationError("IPv6を有効にする場合はLANプレフィックス通知、トンネル、動的ルーティングのいずれかを設定してください")
     if enabled and wan["method"] != "disabled" and not wan["interface"]:
-        raise ValidationError("WAN interface is required when WAN IPv6 is enabled")
+        raise ValidationError("WAN側IPv6を有効にする場合はWANインターフェースが必要です")
 
     return {
         "enabled": enabled,
@@ -223,7 +223,7 @@ def _normalize_settings(payload: dict) -> dict:
 def _normalize_wan(raw: dict, require_enabled: bool) -> dict:
     method = str(raw.get("method", "disabled")).strip().lower() or "disabled"
     if method not in {"disabled", "slaac", "dhcpv6", "manual"}:
-        raise ValidationError("WAN method must be disabled, slaac, dhcpv6, or manual")
+        raise ValidationError("WAN取得方式は無効、SLAAC、DHCPv6、手動のいずれかを指定してください")
     interface = str(raw.get("interface", "")).strip()
     if interface:
         interface = validate_interface(interface)
@@ -233,7 +233,7 @@ def _normalize_wan(raw: dict, require_enabled: bool) -> dict:
         address = _validate_ipv6_interface(address, "WAN address")
         gateway = _validate_ipv6_address(gateway, "WAN gateway")
     elif method in {"slaac", "dhcpv6"} and require_enabled and not interface:
-        raise ValidationError("WAN interface is required")
+        raise ValidationError("WANインターフェースが必要です")
     return {
         "interface": interface,
         "method": method,
@@ -251,18 +251,18 @@ def _normalize_advertisement(raw: dict, require_enabled: bool) -> dict:
     if prefix:
         prefix = _validate_ipv6_prefix(prefix, require_64=True)
     elif require_enabled and interface:
-        raise ValidationError(f"IPv6 prefix is required for {interface}")
+        raise ValidationError(f"{interface} のIPv6プレフィックスが必要です")
     mode = str(raw.get("mode", "slaac")).strip().lower() or "slaac"
     if mode not in {"slaac", "stateless", "managed"}:
-        raise ValidationError("RA mode must be slaac, stateless, or managed")
+        raise ValidationError("RAモードはSLAAC、ステートレスDHCPv6、ステートフルDHCPv6のいずれかを指定してください")
     valid_lifetime = _validate_lifetime(raw.get("valid_lifetime", 86400), "valid_lifetime")
     preferred_lifetime = _validate_lifetime(raw.get("preferred_lifetime", 14400), "preferred_lifetime")
     if preferred_lifetime > valid_lifetime:
-        raise ValidationError("preferred_lifetime cannot exceed valid_lifetime")
+        raise ValidationError("推奨期限は有効期限以下にしてください")
     dns_servers = _ipv6_list(raw.get("dns_servers"))
     domain = str(raw.get("domain", "")).strip()
     if domain and not HOST_LABEL_RE.match(domain):
-        raise ValidationError("domain contains invalid characters")
+        raise ValidationError("ドメイン名に使用できない文字が含まれています")
     router_address = str(raw.get("router_address", "")).strip()
     if prefix:
         router_address = _validate_or_default_router_address(router_address, prefix)
@@ -278,10 +278,10 @@ def _normalize_advertisement(raw: dict, require_enabled: bool) -> dict:
     if dhcp_end:
         dhcp_end = _validate_ipv6_address(dhcp_end, "DHCPv6 end")
     if dhcp_start and dhcp_end and ipaddress.IPv6Address(dhcp_start) > ipaddress.IPv6Address(dhcp_end):
-        raise ValidationError("DHCPv6 start must be less than or equal to end")
+        raise ValidationError("DHCPv6開始アドレスは終了アドレス以下にしてください")
     lease = str(raw.get("lease", "12h")).strip() or "12h"
     if not re.match(r"^\d+[smhd]$|^infinite$", lease, re.IGNORECASE):
-        raise ValidationError("lease must look like 12h, 1d, or infinite")
+        raise ValidationError("リース時間は 12h、1d、infinite のように指定してください")
     return {
         "interface": interface,
         "prefix": prefix,
@@ -300,7 +300,7 @@ def _normalize_advertisement(raw: dict, require_enabled: bool) -> dict:
 def _normalize_transition(raw: dict, require_enabled: bool) -> dict:
     mode = str(raw.get("mode", "disabled")).strip().lower() or "disabled"
     if mode not in {"disabled", "6to4", "6in4"}:
-        raise ValidationError("transition mode must be disabled, 6to4, or 6in4")
+        raise ValidationError("トンネル方式は無効、6to4、6in4のいずれかを指定してください")
     name = str(raw.get("name", "synca6")).strip() or "synca6"
     name = validate_interface(name[:15])
     local_ipv4 = str(raw.get("local_ipv4", "auto")).strip() or "auto"
@@ -315,7 +315,7 @@ def _normalize_transition(raw: dict, require_enabled: bool) -> dict:
         if routed_prefix:
             routed_prefix = _validate_ipv6_prefix(routed_prefix, require_64=False)
         elif require_enabled:
-            raise ValidationError("routed prefix is required for 6in4")
+            raise ValidationError("6in4ではルーティングプレフィックスが必要です")
     elif mode == "6to4":
         remote_ipv4 = ""
         tunnel_address = ""
@@ -341,7 +341,7 @@ def _normalize_routing(raw: dict, require_enabled: bool) -> dict:
     ospf6 = _normalize_ospf6(raw.get("ospf6", {}), enabled and require_enabled)
     bgp = _normalize_bgp(raw.get("bgp", {}), enabled and require_enabled)
     if enabled and require_enabled and not ospf6["enabled"] and not bgp["enabled"]:
-        raise ValidationError("dynamic routing requires OSPFv3 or BGP to be enabled")
+        raise ValidationError("動的ルーティングではOSPFv3またはBGPを有効にしてください")
     return {
         "enabled": enabled,
         "ospf6": ospf6,
@@ -367,9 +367,9 @@ def _normalize_ospf6(raw: dict, require_enabled: bool) -> dict:
         })
     if enabled and require_enabled:
         if not router_id:
-            raise ValidationError("OSPFv3 router ID is required")
+            raise ValidationError("OSPFv3ルータIDが必要です")
         if not interfaces:
-            raise ValidationError("OSPFv3 requires at least one interface")
+            raise ValidationError("OSPFv3ではインターフェースを1つ以上指定してください")
     return {
         "enabled": enabled,
         "router_id": router_id,
@@ -394,7 +394,7 @@ def _normalize_bgp(raw: dict, require_enabled: bool) -> dict:
             continue
         description = str(item.get("description", "")).strip()
         if description and not DESCRIPTION_RE.match(description):
-            raise ValidationError("BGP neighbor description contains invalid characters")
+            raise ValidationError("BGPネイバー説明に使用できない文字が含まれています")
         iface = str(item.get("interface", "")).strip()
         neighbors.append({
             "address": _validate_bgp_neighbor(address),
@@ -409,9 +409,9 @@ def _normalize_bgp(raw: dict, require_enabled: bool) -> dict:
             networks.append(_validate_ipv6_prefix(text, require_64=False))
     if enabled and require_enabled:
         if not local_as:
-            raise ValidationError("BGP local AS is required")
+            raise ValidationError("BGPローカルASが必要です")
         if not neighbors:
-            raise ValidationError("BGP requires at least one IPv6 neighbor")
+            raise ValidationError("BGPではIPv6ネイバーを1つ以上指定してください")
     return {
         "enabled": enabled,
         "local_as": local_as,
@@ -492,7 +492,7 @@ def _apply_wan(wan: dict, changed: list[str], errors: list[str]) -> None:
         return
     conn = _connection_for_interface(iface)
     if not conn:
-        errors.append(f"NetworkManager connection not found for WAN {iface}")
+        errors.append(f"WAN {iface} のNetworkManager接続が見つかりません")
         return
     if method == "slaac":
         args = ["nmcli", "connection", "modify", conn, "ipv6.method", "auto", "ipv6.never-default", "no"]
@@ -519,7 +519,7 @@ def _apply_lan_addresses(advertisements: list[dict], changed: list[str], errors:
             continue
         conn = _connection_for_interface(iface)
         if not conn:
-            errors.append(f"NetworkManager connection not found for LAN {iface}")
+            errors.append(f"LAN {iface} のNetworkManager接続が見つかりません")
             continue
         _collect([
             "nmcli", "connection", "modify", conn,
@@ -676,7 +676,7 @@ if [[ "$LOCAL_IPV4" == "auto" ]]; then
   LOCAL_IPV4="$(auto_ipv4)"
 fi
 if [[ -z "$LOCAL_IPV4" ]]; then
-  echo "local IPv4 address not found" >&2
+  echo "ローカルIPv4アドレスが見つかりません" >&2
   exit 1
 fi
 if [[ "$MODE" == "6to4" ]]; then
@@ -1010,30 +1010,30 @@ def _ipv6_list(value: Any) -> list[str]:
         raw = value
     else:
         raw = [item.strip() for item in str(value or "").split(",")]
-    return [_validate_ipv6_address(str(item).strip(), "IPv6 address") for item in raw if str(item).strip()]
+    return [_validate_ipv6_address(str(item).strip(), "IPv6アドレス") for item in raw if str(item).strip()]
 
 
 def _validate_ipv6_address(value: str, label: str) -> str:
     try:
         return str(ipaddress.IPv6Address(value))
     except ValueError as e:
-        raise ValidationError(f"{label} is not a valid IPv6 address: {value!r}") from e
+        raise ValidationError(f"{label}が不正です: {value!r}") from e
 
 
 def _validate_ipv6_interface(value: str, label: str) -> str:
     try:
         return str(ipaddress.IPv6Interface(value))
     except ValueError as e:
-        raise ValidationError(f"{label} is not a valid IPv6 interface address: {value!r}") from e
+        raise ValidationError(f"{label}のIPv6インターフェースアドレスが不正です: {value!r}") from e
 
 
 def _validate_ipv6_prefix(value: str, require_64: bool) -> str:
     try:
         net = ipaddress.IPv6Network(value, strict=False)
     except ValueError as e:
-        raise ValidationError(f"invalid IPv6 prefix: {value!r}") from e
+        raise ValidationError(f"IPv6プレフィックスが不正です: {value!r}") from e
     if require_64 and net.prefixlen != 64:
-        raise ValidationError("LAN prefix advertisements must be /64")
+        raise ValidationError("LANプレフィックス通知は/64で指定してください")
     return str(net)
 
 
@@ -1041,30 +1041,30 @@ def _validate_ipv4(value: str, label: str) -> str:
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError as e:
-        raise ValidationError(f"{label} is not a valid IPv4 address: {value!r}") from e
+        raise ValidationError(f"{label}のIPv4アドレスが不正です: {value!r}") from e
 
 
 def _validate_router_id(value: str) -> str:
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError as e:
-        raise ValidationError(f"router ID must be an IPv4 address: {value!r}") from e
+        raise ValidationError(f"ルーターIDはIPv4アドレス形式で指定してください: {value!r}") from e
 
 
 def _validate_ospf_area(value: str) -> str:
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError as e:
-        raise ValidationError(f"OSPF area must be dotted decimal: {value!r}") from e
+        raise ValidationError(f"OSPFエリアはドット付き10進表記で指定してください: {value!r}") from e
 
 
 def _validate_asn(value: str, label: str) -> int:
     try:
         asn = int(value)
     except ValueError as e:
-        raise ValidationError(f"{label} must be a number") from e
+        raise ValidationError(f"{label}は数値で指定してください") from e
     if not 1 <= asn <= 4294967295:
-        raise ValidationError(f"{label} must be between 1 and 4294967295")
+        raise ValidationError(f"{label}は1から4294967295の範囲で指定してください")
     return asn
 
 
@@ -1073,11 +1073,11 @@ def _validate_bgp_neighbor(value: str) -> str:
     try:
         ipaddress.IPv6Address(host)
     except ValueError as e:
-        raise ValidationError(f"BGP neighbor must be an IPv6 address: {value!r}") from e
+        raise ValidationError(f"BGPネイバーはIPv6アドレスで指定してください: {value!r}") from e
     if "%" in value:
         host_part, iface = value.split("%", 1)
         if not iface:
-            raise ValidationError("BGP link-local neighbor scope is empty")
+            raise ValidationError("BGPリンクローカルネイバーのスコープが空です")
         validate_interface(iface)
         return f"{host_part}%{iface}"
     return str(ipaddress.IPv6Address(host))
@@ -1086,7 +1086,7 @@ def _validate_bgp_neighbor(value: str) -> str:
 def _validate_lifetime(value: Any, label: str) -> int:
     text = str(value)
     if not LIFETIME_RE.match(text):
-        raise ValidationError(f"{label} must be seconds")
+        raise ValidationError(f"{label}は秒数で指定してください")
     return int(text)
 
 
@@ -1095,7 +1095,7 @@ def _validate_or_default_router_address(value: str, prefix: str) -> str:
     if value:
         iface = ipaddress.IPv6Interface(value)
         if iface.ip not in net:
-            raise ValidationError("router address must be inside the advertised prefix")
+            raise ValidationError("ルーターアドレスは通知プレフィックスの範囲内で指定してください")
         return str(iface)
     return f"{net.network_address + 1}/{net.prefixlen}"
 

@@ -318,7 +318,7 @@ async function deleteIpset(name) {
     if (!confirm(`firewalld の ipset "${name}" を削除しますか?\n\n注意: いずれかの zone の source に紐付いている場合は失敗します。先に detach してください。`)) return;
     const res = await api.send(`/geoip/api/ipsets/${encodeURIComponent(name)}`, 'DELETE');
     if (res && res.ok) { toast(`${name} 削除しました`); refreshAll(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 
 function openAttach(code) {

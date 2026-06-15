@@ -25,7 +25,7 @@ def validate_ipv4(value: str) -> str:
     try:
         ipaddress.IPv4Address(value)
     except (ValueError, ipaddress.AddressValueError) as e:
-        raise ValidationError(f"invalid IPv4: {value!r}") from e
+        raise ValidationError(f"IPv4アドレスが不正です: {value!r}") from e
     return value
 
 
@@ -33,13 +33,13 @@ def validate_ipv4_cidr(value: str) -> str:
     try:
         ipaddress.IPv4Network(value, strict=False)
     except ValueError as e:
-        raise ValidationError(f"invalid IPv4 CIDR: {value!r}") from e
+        raise ValidationError(f"IPv4 CIDRが不正です: {value!r}") from e
     return value
 
 
 def validate_hostname(value: str) -> str:
     if not isinstance(value, str) or not HOSTNAME_RE.match(value):
-        raise ValidationError(f"invalid hostname: {value!r}")
+        raise ValidationError(f"ホスト名が不正です: {value!r}")
     return value.lower()
 
 
@@ -52,7 +52,7 @@ def validate_hostname_or_ip(value: str) -> str:
 
 def validate_mac(value: str) -> str:
     if not isinstance(value, str) or not MAC_RE.match(value):
-        raise ValidationError(f"invalid MAC: {value!r}")
+        raise ValidationError(f"MACアドレスが不正です: {value!r}")
     return value.lower()
 
 
@@ -60,31 +60,31 @@ def validate_port(value) -> int:
     try:
         p = int(value)
     except (TypeError, ValueError) as e:
-        raise ValidationError(f"invalid port: {value!r}") from e
+        raise ValidationError(f"ポート番号が不正です: {value!r}") from e
     if not (1 <= p <= 65535):
-        raise ValidationError(f"port out of range: {p}")
+        raise ValidationError(f"ポート番号は1から65535の範囲で指定してください: {p}")
     return p
 
 
 def validate_identifier(value: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER_RE.match(value):
-        raise ValidationError(f"invalid identifier: {value!r}")
+        raise ValidationError(f"識別子が不正です: {value!r}")
     return value
 
 
 def validate_country_code(value: str) -> str:
     if not isinstance(value, str) or not COUNTRY_CODE_RE.match(value):
-        raise ValidationError(f"invalid country code: {value!r} (expected ISO-3166 alpha-2 uppercase)")
+        raise ValidationError(f"国コードが不正です: {value!r} (ISO-3166 alpha-2の大文字2文字で指定してください)")
     return value
 
 
 def validate_interface(value: str) -> str:
     if not isinstance(value, str) or not INTERFACE_RE.match(value):
-        raise ValidationError(f"invalid interface name: {value!r}")
+        raise ValidationError(f"インターフェース名が不正です: {value!r}")
     return value
 
 
 def validate_size(value: str) -> str:
     if not isinstance(value, str) or not SIZE_RE.match(value):
-        raise ValidationError(f"invalid size value: {value!r} (e.g. 10m, 1g, 512k)")
+        raise ValidationError(f"サイズ指定が不正です: {value!r} (例: 10m, 1g, 512k)")
     return value
