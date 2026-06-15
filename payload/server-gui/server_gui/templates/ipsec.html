@@ -573,8 +573,8 @@ async function loadStatus() {
     const data = await api.get('/ipsec/api/status');
     if (!data) return;
     document.getElementById('strongswan-state-badge').innerHTML = data.strongswan_active
-        ? '<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> strongswan active</span>'
-        : '<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> strongswan inactive</span>';
+        ? '<span class="badge bg-success-subtle text-success-emphasis"><i class="bi bi-check-circle"></i> strongSwan 稼働中</span>'
+        : '<span class="badge bg-danger-subtle text-danger-emphasis"><i class="bi bi-x-circle"></i> strongSwan 停止中</span>';
 }
 
 async function loadConns() {

@@ -7,13 +7,13 @@
         <i class="bi bi-router text-primary"></i> UPnP / NAT-PMP
     </h1>
     <button class="btn btn-outline-secondary btn-sm" onclick="loadUpnp()">
-        <i class="bi bi-arrow-clockwise"></i> ???
+        <i class="bi bi-arrow-clockwise"></i> 再読込
     </button>
 </div>
 
 <div class="alert alert-warning d-flex align-items-start gap-2 small" role="alert">
     <i class="bi bi-exclamation-triangle-fill mt-1"></i>
-    <div>UPnP ? LAN ???????????? WAN ???????????????????????????????????????????</div>
+    <div>UPnP は LAN クライアントからの要求で WAN 側ポートを動的に開きます。既定は無効です。必要なネットワークだけで有効化してください。</div>
 </div>
 
 <div class="row g-3">
@@ -21,7 +21,7 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-activity text-secondary"></i>
-                <strong>??</strong>
+                <strong>状態</strong>
             </div>
             <div class="card-body">
                 <div id="upnp-status" class="d-flex flex-column gap-2 small"></div>
@@ -32,57 +32,64 @@
         <div class="card border-0 shadow-sm h-100">
             <div class="card-header bg-white d-flex align-items-center gap-2">
                 <i class="bi bi-sliders text-secondary"></i>
-                <strong>??</strong>
+                <strong>設定</strong>
             </div>
             <div class="card-body">
                 <div class="form-check form-switch mb-3">
                     <input id="upnp-enabled" class="form-check-input" type="checkbox">
-                    <label class="form-check-label" for="upnp-enabled">UPnP ????</label>
+                    <label class="form-check-label" for="upnp-enabled">UPnP を有効化</label>
                 </div>
 
                 <div class="row g-3">
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">WAN interface</label>
+                        <label class="form-label small mb-1">WANインターフェース</label>
                         <select id="upnp-wan" class="form-select form-select-sm font-monospace"></select>
+                        <div class="form-text">UPnP/NAT-PMPで外部へ公開するポートを開くNIC。</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small mb-1">Control port</label>
+                        <label class="form-label small mb-1">制御ポート</label>
                         <input id="upnp-control-port" type="number" min="1024" max="65535" class="form-control form-control-sm font-monospace" value="5000">
+                        <div class="form-text">LAN側クライアントからの制御要求を受けるTCPポート。</div>
                     </div>
                     <div class="col-12">
-                        <label class="form-label small mb-1">LAN listening interfaces</label>
+                        <label class="form-label small mb-1">LAN待受インターフェース</label>
                         <div id="upnp-lan-list" class="d-flex flex-column gap-1 border rounded p-2 bg-light"></div>
+                        <div class="form-text">UPnP/NAT-PMP要求を許可する内部側NIC。</div>
                     </div>
                     <div class="col-12">
-                        <label class="form-label small mb-1">Allowed LAN CIDR</label>
+                        <label class="form-label small mb-1">許可するLAN CIDR</label>
                         <textarea id="upnp-cidrs" class="form-control form-control-sm font-monospace" rows="3" placeholder="172.17.17.0/24"></textarea>
+                        <div class="form-text">ここに含まれる送信元だけがポート開放を要求できます。</div>
                     </div>
                     <div class="col-md-4">
                         <div class="form-check">
                             <input id="upnp-igd" class="form-check-input" type="checkbox" checked>
                             <label class="form-check-label" for="upnp-igd">UPnP IGD</label>
                         </div>
+                        <div class="form-text">ゲーム機などが使うUPnP IGD要求を受け付けます。</div>
                     </div>
                     <div class="col-md-4">
                         <div class="form-check">
                             <input id="upnp-natpmp" class="form-check-input" type="checkbox" checked>
                             <label class="form-check-label" for="upnp-natpmp">NAT-PMP</label>
                         </div>
+                        <div class="form-text">Apple系機器などが使うNAT-PMP要求を受け付けます。</div>
                     </div>
                     <div class="col-md-4">
                         <div class="form-check">
                             <input id="upnp-secure" class="form-check-input" type="checkbox" checked>
-                            <label class="form-check-label" for="upnp-secure">Secure mode</label>
+                            <label class="form-check-label" for="upnp-secure">セキュアモード</label>
                         </div>
+                        <div class="form-text">要求元自身のIPだけを転送先として許可します。</div>
                     </div>
                 </div>
 
                 <div class="d-flex gap-2 mt-3">
                     <button class="btn btn-primary btn-sm" onclick="saveUpnp()">
-                        <i class="bi bi-check2"></i> ??????
+                        <i class="bi bi-check2"></i> 保存して反映
                     </button>
                     <button class="btn btn-outline-danger btn-sm" onclick="disableUpnp()">
-                        <i class="bi bi-power"></i> ???
+                        <i class="bi bi-power"></i> 無効化
                     </button>
                 </div>
             </div>
@@ -93,14 +100,14 @@
 <div class="card border-0 shadow-sm mt-3">
     <div class="card-header bg-white d-flex align-items-center gap-2">
         <i class="bi bi-list-check text-secondary"></i>
-        <strong>SyncA ?? firewalld rules</strong>
+        <strong>SyncA管理 firewalldルール</strong>
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-sm table-hover mb-0 small align-middle">
                 <thead class="table-light">
                     <tr>
-                        <th>rule</th>
+                        <th>ルール</th>
                     </tr>
                 </thead>
                 <tbody id="upnp-rules"></tbody>
@@ -117,6 +124,20 @@ let upnpState = null;
 
 function badge(text, ok) {
     return `<span class="badge ${ok ? 'bg-success-subtle text-success-emphasis' : 'bg-secondary-subtle text-secondary-emphasis'}">${escapeHtml(text)}</span>`;
+}
+
+function statusText(value) {
+    const map = {
+        enabled: '有効',
+        disabled: '無効',
+        active: '稼働中',
+        inactive: '停止中',
+        failed: '失敗',
+        unknown: '不明',
+        installed: '導入済み',
+        missing: '未導入',
+    };
+    return map[value] || value || '不明';
 }
 
 function interfaceLabel(item) {
@@ -141,12 +162,12 @@ function renderStatus(data) {
     const firewalld = data.firewalld || {};
     const status = document.getElementById('upnp-status');
     status.innerHTML = `
-        <div class="d-flex justify-content-between gap-2"><span>??</span>${badge(settings.enabled ? 'enabled' : 'disabled', settings.enabled)}</div>
-        <div class="d-flex justify-content-between gap-2"><span>synca-upnp</span>${badge(`${service.active || 'unknown'} / ${service.enabled || 'unknown'}`, service.active === 'active')}</div>
-        <div class="d-flex justify-content-between gap-2"><span>daemon</span>${badge(daemon.installed ? 'installed' : 'missing', daemon.installed)}</div>
-        <div class="d-flex justify-content-between gap-2"><span>firewalld</span>${badge(firewalld.active ? 'active' : 'inactive', firewalld.active)}</div>
-        <div><span class="text-secondary">config:</span> <code>${escapeHtml(data.config_path || '')}</code></div>
-        <div><span class="text-secondary">daemon:</span> <code>${escapeHtml(daemon.path || '')}</code></div>
+        <div class="d-flex justify-content-between gap-2"><span>設定</span>${badge(settings.enabled ? '有効' : '無効', settings.enabled)}</div>
+        <div class="d-flex justify-content-between gap-2"><span>synca-upnp</span>${badge(`${statusText(service.active)} / ${statusText(service.enabled)}`, service.active === 'active')}</div>
+        <div class="d-flex justify-content-between gap-2"><span>デーモン</span>${badge(daemon.installed ? '導入済み' : '未導入', daemon.installed)}</div>
+        <div class="d-flex justify-content-between gap-2"><span>firewalld</span>${badge(firewalld.active ? '稼働中' : '停止中', firewalld.active)}</div>
+        <div><span class="text-secondary">設定ファイル:</span> <code>${escapeHtml(data.config_path || '')}</code></div>
+        <div><span class="text-secondary">デーモン:</span> <code>${escapeHtml(daemon.path || '')}</code></div>
         <div><span class="text-secondary">WAN:</span> <code>${escapeHtml((settings.wan_interface || data.detected_wan_interfaces?.[0] || '-'))}</code></div>
         <div><span class="text-secondary">LAN:</span> <code>${escapeHtml((settings.lan_interfaces || []).join(', ') || (data.detected_lan_interfaces || []).join(', ') || '-')}</code></div>
     `;
@@ -171,17 +192,17 @@ function renderForm(data) {
 
     const wanSelect = document.getElementById('upnp-wan');
     wanSelect.innerHTML = interfaces.length === 0
-        ? '<option value="">interface not detected</option>'
+        ? '<option value="">インターフェース未検出</option>'
         : interfaces.map(item => {
             const selected = item.name === selectedWan ? 'selected' : '';
-            const mark = item.is_wan_default ? ' [default route]' : '';
+            const mark = item.is_wan_default ? ' [既定経路]' : '';
             return `<option value="${escapeHtml(item.name)}" ${selected}>${escapeHtml(interfaceLabel(item) + mark)}</option>`;
         }).join('');
 
     const lanWrap = document.getElementById('upnp-lan-list');
     const lanItems = interfaces.filter(item => item.name !== selectedWan && item.name !== 'lo');
     lanWrap.innerHTML = lanItems.length === 0
-        ? '<div class="text-secondary small">LAN interface not detected</div>'
+        ? '<div class="text-secondary small">LANインターフェース未検出</div>'
         : lanItems.map(item => {
             const checked = selectedLan.includes(item.name) ? 'checked' : '';
             const id = `upnp-lan-${item.name.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -196,7 +217,7 @@ function renderForm(data) {
 function renderRules(rules) {
     const tbody = document.getElementById('upnp-rules');
     tbody.innerHTML = rules.length === 0
-        ? '<tr><td class="text-secondary text-center py-3">managed rule ??</td></tr>'
+        ? '<tr><td class="text-secondary text-center py-3">管理ルールなし</td></tr>'
         : rules.map(rule => `<tr><td><code>${escapeHtml(rule)}</code></td></tr>`).join('');
 }
 
@@ -218,14 +239,14 @@ function collectPayload(forceDisabled = false) {
 async function saveUpnp() {
     const res = await api.send('/upnp/api/config', 'POST', collectPayload());
     if (!res) return;
-    toast(res.ok ? 'UPnP ?????????' : 'UPnP ????????????', !res.ok);
+    toast(res.ok ? 'UPnP 設定を反映しました' : 'UPnP 設定の反映に失敗しました', !res.ok);
     await loadUpnp();
 }
 
 async function disableUpnp() {
     const res = await api.send('/upnp/api/config', 'POST', collectPayload(true));
     if (!res) return;
-    toast(res.ok ? 'UPnP ????????' : 'UPnP ??????????', !res.ok);
+    toast(res.ok ? 'UPnP を無効化しました' : 'UPnP 無効化に失敗しました', !res.ok);
     await loadUpnp();
 }
 

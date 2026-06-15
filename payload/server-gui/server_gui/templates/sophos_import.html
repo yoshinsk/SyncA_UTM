@@ -140,9 +140,9 @@ async function sendSophosXml(path) {
     try {
         data = await response.json();
     } catch (e) {
-        throw new Error(`サーバ応答をJSONとして読めませんでした。HTTP ${response.status}`);
+        throw new Error(`サーバ応答をJSONとして読めませんでした。サーバーエラー (HTTP ${response.status})`);
     }
-    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok || data.error) throw new Error(data.error || `サーバーエラー (HTTP ${response.status})`);
     return data;
 }
 
@@ -204,7 +204,7 @@ async function importSavedPlan(name) {
             body: JSON.stringify({ replace: true, apply_system: false }),
         });
         const data = await response.json();
-        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        if (!response.ok || data.error) throw new Error(data.error || `サーバーエラー (HTTP ${response.status})`);
         renderImportResult(data);
         setImportBusy(false, 'Import completed.');
     } catch (e) {
@@ -292,7 +292,7 @@ function renderFormPreviewRow(title, row, idx) {
 function renderTargetPreview(items) {
     const byTarget = {};
     for (const item of items) {
-        const target = item.target || 'unknown';
+        const target = item.target || '不明';
         if (!byTarget[target]) byTarget[target] = [];
         byTarget[target].push(item);
     }

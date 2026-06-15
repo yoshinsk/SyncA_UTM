@@ -360,7 +360,7 @@ async function addRange() {
     if (!payload.start || !payload.end) return toast('開始・終了 IP を入力', true);
     const res = await api.send('/dhcp/api/ranges', 'POST', payload);
     if (res && res.ok) { toast('追加しました'); refresh(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteRange(id) {
     if (!confirm('削除しますか?')) return;
@@ -378,7 +378,7 @@ async function addStatic() {
     if (!payload.mac || !payload.ip) return toast('MAC と IP を入力', true);
     const res = await api.send('/dhcp/api/static-hosts', 'POST', payload);
     if (res && res.ok) { toast('追加しました'); refresh(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteStatic(id) {
     if (!confirm('削除しますか?')) return;
@@ -395,7 +395,7 @@ async function addOption() {
     if (!payload.option || !payload.value) return toast('option と value を入力', true);
     const res = await api.send('/dhcp/api/options', 'POST', payload);
     if (res && res.ok) { toast('追加しました'); refresh(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteOption(id) {
     if (!confirm('削除しますか?')) return;

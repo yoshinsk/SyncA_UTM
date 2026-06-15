@@ -178,7 +178,7 @@ async function createBackup() {
         toast(`バックアップ作成: ${res.name} (${formatBytes(res.size)})${suffix}`);
         refresh();
     } else {
-        toast('失敗: ' + (res.error || 'unknown'), true);
+        toast('失敗: ' + (res.error || '不明'), true);
     }
 }
 

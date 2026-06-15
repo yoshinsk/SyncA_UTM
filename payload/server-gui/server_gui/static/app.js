@@ -12,7 +12,7 @@ let _pageUnloading = false;
 window.addEventListener('beforeunload', () => { _pageUnloading = true; });
 window.addEventListener('pagehide',     () => { _pageUnloading = true; });
 
-/* Surface uncaught client-side errors to the console — F12 → Console to inspect.
+/* Surface uncaught client-side errors to the console. Use F12 Console to inspect.
    Backend errors are logged to journald (journalctl -u server-gui.service). */
 window.addEventListener('error', (e) => {
     console.error('[uncaught]', e.message, e.filename + ':' + e.lineno, e.error);
@@ -192,15 +192,15 @@ function toast(message, isError = false) {
 const api = {
     async _handle(res, ctx) {
         if (res.status === 401) {
-            console.warn('[api]', ctx.method, ctx.url, '→ 401, redirecting to /login');
+            console.warn('[api]', ctx.method, ctx.url, '-> 401, redirecting to /login');
             window.location.href = '/login';
             return null;
         }
         let body = null;
         try { body = await res.json(); } catch (_) {}
         if (!res.ok) {
-            console.error('[api]', ctx.method, ctx.url, '→', res.status, body);
-            toast((body && body.error) || `HTTP ${res.status}`, true);
+            console.error('[api]', ctx.method, ctx.url, '->', res.status, body);
+            toast((body && body.error) || `サーバーエラー (HTTP ${res.status})`, true);
             return null;
         }
         return body;
@@ -212,7 +212,7 @@ const api = {
         try {
             const res = await fetch(url, { credentials: 'same-origin' });
             const out = await this._handle(res, ctx);
-            console.debug('[api] GET', url, `${Math.round(performance.now() - t0)}ms`, '→', res.status);
+            console.debug('[api] GET', url, `${Math.round(performance.now() - t0)}ms`, '->', res.status);
             return out;
         } catch (e) {
             if (_pageUnloading) {
@@ -241,7 +241,7 @@ const api = {
                 body: payload !== undefined ? JSON.stringify(payload) : null,
             });
             const out = await this._handle(res, ctx);
-            console.debug('[api]', method, url, `${Math.round(performance.now() - t0)}ms`, '→', res.status);
+            console.debug('[api]', method, url, `${Math.round(performance.now() - t0)}ms`, '->', res.status);
             return out;
         } catch (e) {
             if (_pageUnloading) {

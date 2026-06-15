@@ -118,7 +118,7 @@ def _normalize_settings(payload: dict) -> dict:
     allowed_cidrs = _normalize_cidr_list(payload.get("allowed_cidrs", current.get("allowed_cidrs", [])))
     control_port = validate_port(payload.get("control_port", current.get("control_port", DEFAULT_CONTROL_PORT)))
     if control_port < 1024:
-        raise ValidationError("UPnP control port must be 1024 or higher")
+        raise ValidationError("UPnP制御ポートは1024以上を指定してください")
 
     if wan_interface:
         wan_interface = validate_interface(wan_interface)
@@ -126,20 +126,20 @@ def _normalize_settings(payload: dict) -> dict:
 
     if enabled:
         if not wan_interface:
-            raise ValidationError("WAN interface is required when UPnP is enabled")
+            raise ValidationError("UPnPを有効にする場合はWANインターフェースが必要です")
         if not lan_interfaces:
-            raise ValidationError("at least one LAN interface is required when UPnP is enabled")
+            raise ValidationError("UPnPを有効にする場合はLAN待受インターフェースを1つ以上指定してください")
         if wan_interface in lan_interfaces:
-            raise ValidationError("WAN interface cannot also be a LAN listening interface")
+            raise ValidationError("WANインターフェースをLAN待受インターフェースには指定できません")
         if not allowed_cidrs:
             allowed_cidrs = _cidrs_for_interfaces(lan_interfaces)
         if not allowed_cidrs:
-            raise ValidationError("at least one allowed LAN CIDR is required when UPnP is enabled")
+            raise ValidationError("UPnPを有効にする場合は許可するLAN CIDRを1つ以上指定してください")
 
     enable_upnp = bool(payload.get("enable_upnp", current.get("enable_upnp", True)))
     enable_natpmp = bool(payload.get("enable_natpmp", current.get("enable_natpmp", True)))
     if enabled and not (enable_upnp or enable_natpmp):
-        raise ValidationError("enable at least one of UPnP IGD or NAT-PMP")
+        raise ValidationError("UPnP IGDまたはNAT-PMPの少なくとも一方を有効にしてください")
 
     return {
         "enabled": enabled,
@@ -163,7 +163,7 @@ def _apply_runtime(settings: dict) -> dict:
 
     if settings["enabled"]:
         if not SYNCA_UPNPD_BIN.exists():
-            return {"ok": False, "error": f"daemon not found: {SYNCA_UPNPD_BIN}"}
+            return {"ok": False, "error": f"UPnPデーモンが見つかりません: {SYNCA_UPNPD_BIN}"}
         _apply_firewalld_rules(settings, changed, errors)
         for cmd in (
             ["systemctl", "daemon-reload"],
@@ -238,14 +238,14 @@ def _remove_managed_firewalld_rules(changed: list[str], errors: list[str]) -> No
         try:
             parts = shlex.split(raw)
         except ValueError as e:
-            errors.append(f"failed to parse managed firewalld rule: {e}")
+            errors.append(f"管理対象firewalldルールの解析に失敗しました: {e}")
             continue
         res = sudo_run(["firewall-cmd", "--permanent", "--direct", "--remove-rule", *parts])
         output = (res.stderr or res.stdout).strip()
         if res.ok or "not in list" in output:
             changed.append("removed firewalld direct " + raw)
         else:
-            errors.append(output or "failed to remove managed firewalld rule")
+            errors.append(output or "管理対象firewalldルールの削除に失敗しました")
 
 
 def _collect_firewall_change(cmd: list[str], changed: list[str], errors: list[str]) -> None:
@@ -256,7 +256,7 @@ def _collect_firewall_change(cmd: list[str], changed: list[str], errors: list[st
         return
     if "ALREADY_ENABLED" in output:
         return
-    errors.append(output or "failed: " + " ".join(cmd))
+    errors.append(output or "コマンドに失敗しました: " + " ".join(cmd))
 
 
 def _collect_system_change(
@@ -273,7 +273,7 @@ def _collect_system_change(
         return
     if ignore_missing and any(token in output for token in ("not loaded", "not-found", "does not exist")):
         return
-    errors.append(output or "failed: " + " ".join(cmd))
+    errors.append(output or "コマンドに失敗しました: " + " ".join(cmd))
 
 
 def _reload_firewalld(changed: list[str], errors: list[str]) -> None:
@@ -284,7 +284,7 @@ def _reload_firewalld(changed: list[str], errors: list[str]) -> None:
     if res.ok:
         changed.append("firewall-cmd --reload")
     else:
-        errors.append(output or "firewalld reload failed")
+        errors.append(output or "firewalldの再読み込みに失敗しました")
 
 
 def _managed_firewalld_rules(permanent: bool = False) -> set[str]:

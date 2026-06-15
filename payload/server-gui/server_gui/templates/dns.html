@@ -174,7 +174,7 @@ async function addHost() {
         document.getElementById('h-ip').value = '';
         toast('追加しました');
         refresh();
-    } else if (res) toast(res.error || 'failed', true);
+    } else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteHost(id) {
     if (!confirm('削除しますか?')) return;
@@ -192,7 +192,7 @@ async function addCname() {
         document.getElementById('c-target').value = '';
         toast('追加しました');
         refresh();
-    } else if (res) toast(res.error || 'failed', true);
+    } else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteCname(id) {
     if (!confirm('削除しますか?')) return;
@@ -210,7 +210,7 @@ async function addUpstream() {
         document.getElementById('u-server').value = '';
         toast('追加しました');
         refresh();
-    } else if (res) toast(res.error || 'failed', true);
+    } else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function deleteUpstream(id) {
     if (!confirm('削除しますか?')) return;

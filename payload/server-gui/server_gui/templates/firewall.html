@@ -452,10 +452,10 @@ function renderSidebar() {
     const ul = document.getElementById('zone-list');
     ul.innerHTML = zones.map(z => {
         const activeBadge = activeData[z]
-            ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">active</span>'
+            ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">稼働中</span>'
             : '';
         const defBadge = z === defaultZone
-            ? '<span class="badge bg-primary ms-1">default</span>'
+            ? '<span class="badge bg-primary ms-1">既定</span>'
             : '';
         const cls = z === activeZone ? 'active' : '';
         return `<li class="list-group-item d-flex justify-content-between align-items-center ${cls}"
@@ -488,8 +488,8 @@ function renderDropBoard() {
     const board = document.getElementById('zone-drop-board');
     if (!board) return;
     board.innerHTML = zones.map(z => {
-        const activeBadge = activeData[z] ? '<span class="badge bg-success-subtle text-success-emphasis">active</span>' : '';
-        const defBadge = z === defaultZone ? '<span class="badge bg-primary">default</span>' : '';
+        const activeBadge = activeData[z] ? '<span class="badge bg-success-subtle text-success-emphasis">稼働中</span>' : '';
+        const defBadge = z === defaultZone ? '<span class="badge bg-primary">既定</span>' : '';
         const selected = z === activeZone ? ' selected' : '';
         return `<button type="button" class="zone-drop-card${selected}"
                     onclick="selectZone('${escapeJs(z)}')"
@@ -560,7 +560,7 @@ async function sendZoneItem(zone, kind, method, value) {
     const keyMap = { service: 'service', port: 'port', source: 'source' };
     const path = pathMap[kind];
     const key = keyMap[kind];
-    if (!path || !key) return { ok: false, error: 'unsupported item type' };
+    if (!path || !key) return { ok: false, error: '未対応の項目です' };
     return api.send(`/firewall/api/zones/${encodeURIComponent(zone)}/${path}`, method, { [key]: value });
 }
 
@@ -728,7 +728,7 @@ async function applyPublicAllowlist() {
         await refreshZones();
         await loadDirectRules();
     } else if (res) {
-        toast((res.error || (res.errors || []).join('\\n') || 'failed'), true);
+        toast((res.error || (res.errors || []).join('\\n') || '処理に失敗しました'), true);
     }
 }
 
@@ -740,7 +740,7 @@ async function applyWanHardening() {
         await loadWanProtection();
         await loadDirectRules();
     } else if (res) {
-        toast((res.errors || []).join('\\n') || 'failed', true);
+        toast((res.errors || []).join('\\n') || '処理に失敗しました', true);
     }
 }
 
@@ -761,7 +761,7 @@ async function addDirectRule() {
         toast('追加しました');
         loadDirectRules();
     } else if (res) {
-        toast(res.error || 'failed', true);
+        toast(res.error || '処理に失敗しました', true);
     }
 }
 
@@ -773,7 +773,7 @@ async function removeDirectRuleByIndex(i) {
         ipv: r.ipv, table: r.table, chain: r.chain, priority: r.priority, args: r.args,
     });
     if (res && res.ok) { toast('削除しました'); loadDirectRules(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 
 async function reloadActiveZone() {
@@ -792,7 +792,7 @@ async function addPort() {
     if (!port) return;
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/ports`, 'POST', { port });
     if (res && res.ok) { document.getElementById('port-input').value = ''; toast('追加しました'); reloadActiveZone(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function removePort(port) {
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/ports`, 'DELETE', { port });
@@ -804,7 +804,7 @@ async function addService() {
     if (!service) return;
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/services`, 'POST', { service });
     if (res && res.ok) { document.getElementById('svc-input').value = ''; toast('追加しました'); reloadActiveZone(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function removeService(service) {
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/services`, 'DELETE', { service });
@@ -816,7 +816,7 @@ async function addSource() {
     if (!source) return;
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/sources`, 'POST', { source });
     if (res && res.ok) { document.getElementById('src-input').value = ''; toast('追加しました'); reloadActiveZone(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function removeSource(source) {
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/sources`, 'DELETE', { source });
@@ -828,7 +828,7 @@ async function addRichRule() {
     if (!rule) return;
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/rich-rules`, 'POST', { rule });
     if (res && res.ok) { document.getElementById('rich-input').value = ''; toast('追加しました'); reloadActiveZone(); }
-    else if (res) toast(res.error || 'failed', true);
+    else if (res) toast(res.error || '処理に失敗しました', true);
 }
 async function removeRichRuleByIndex(i) {
     const rule = currentRichRules[i];
@@ -852,7 +852,7 @@ async function addForwardPort() {
         toast('追加しました');
         reloadActiveZone();
     } else if (res) {
-        toast(res.error || 'failed', true);
+        toast(res.error || '処理に失敗しました', true);
     }
 }
 async function removeForwardPortByIndex(i) {
@@ -890,7 +890,7 @@ async function addProtocolForward() {
         await loadProtocolForwards(activeZone);
         await loadDirectRules();
     } else if (res) {
-        toast(res.error || (res.errors || []).join('\\n') || 'failed', true);
+        toast(res.error || (res.errors || []).join('\\n') || '処理に失敗しました', true);
     }
 }
 
@@ -905,7 +905,7 @@ async function removeProtocolForwardByIndex(i) {
         await loadProtocolForwards(activeZone);
         await loadDirectRules();
     } else if (res) {
-        toast(res.error || (res.errors || []).join('\\n') || 'failed', true);
+        toast(res.error || (res.errors || []).join('\\n') || '処理に失敗しました', true);
     }
 }
 
@@ -978,7 +978,7 @@ async function saveForwardPortEdit() {
         { port: editingFpOld.port, proto: editingFpOld.proto,
           toport: editingFpOld.toport || '', toaddr: editingFpOld.toaddr || '' });
     if (!delRes || !delRes.ok) {
-        if (delRes) toast('編集前ルールの削除に失敗: ' + (delRes.error || 'unknown'), true);
+        if (delRes) toast('編集前ルールの削除に失敗: ' + (delRes.error || '不明'), true);
         return;
     }
     const addRes = await api.send(
@@ -991,14 +991,14 @@ async function saveForwardPortEdit() {
         editingFpOld = null;
         reloadActiveZone();
     } else if (addRes) {
-        toast('新ルールの追加に失敗 (旧ルールは削除済 — ログを確認): ' + (addRes.error || 'unknown'), true);
+        toast('新ルールの追加に失敗 (旧ルールは削除済 - ログを確認): ' + (addRes.error || '不明'), true);
         reloadActiveZone();
     }
 }
 
 async function reloadFw() {
     const res = await api.send('/firewall/api/reload', 'POST');
-    if (res) toast(res.ok ? 'reload OK' : 'reload 失敗', !res.ok);
+    if (res) toast(res.ok ? '再読み込み成功' : '再読み込み失敗', !res.ok);
     await refreshZones();
 }
 
