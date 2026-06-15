@@ -215,7 +215,7 @@ def get_interface(iface: str):
             "persistent_keepalive": meta.get("persistent_keepalive"),
             "has_preshared_key": bool(p.get("preshared_key")),
             "enabled": meta.get("enabled", True) if meta else True,
-            "managed": bool(meta),  # has stored metadata → can re-download
+            "managed": bool(meta.get("private_key")) if meta else False,
             "created_at": meta.get("created_at"),
             "updated_at": meta.get("updated_at"),
             "status": status,
@@ -818,6 +818,55 @@ def delete_peer(iface: str, pubkey: str | None = None, pubkey_token: str | None 
     return jsonify({"ok": True})
 
 
+@bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/display-name", methods=["PUT", "DELETE"])
+@bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/display-name", methods=["PUT", "DELETE"])
+@login_required
+@csrf_protect
+def update_peer_display_name(iface: str, pubkey: str | None = None, pubkey_token: str | None = None):
+    pubkey = _pubkey_from_route(pubkey, pubkey_token)
+    if not pubkey:
+        return jsonify({"error": "invalid public key token"}), 400
+    if not INTERFACE_RE.match(iface):
+        return jsonify({"error": "invalid interface name"}), 400
+    path = WG_DIR / f"{iface}.conf"
+    if not path.exists():
+        return jsonify({"error": "interface not found"}), 404
+
+    parsed = _parse_wg_conf(path)
+    conf_peer = next((p for p in parsed["peers"] if p.get("public_key") == pubkey), None)
+    existing_meta = _load_meta(pubkey) or {}
+    if not conf_peer and not existing_meta:
+        return jsonify({"error": "peer not found"}), 404
+
+    display_name = ""
+    if request.method != "DELETE":
+        payload = request.get_json(force=True, silent=True) or {}
+        display_name = str(payload.get("display_name") or "").strip()[:128]
+
+    meta = dict(existing_meta)
+    if display_name:
+        meta["display_name"] = display_name
+        meta.setdefault("interface", iface)
+        meta.setdefault("created_at", _now())
+        meta["updated_at"] = _now()
+        _save_meta(pubkey, meta)
+    else:
+        meta.pop("display_name", None)
+        if meta and (meta.get("private_key") or meta.get("peer_address")):
+            meta["updated_at"] = _now()
+            _save_meta(pubkey, meta)
+        else:
+            _delete_meta(pubkey)
+            meta = {}
+
+    return jsonify({
+        "ok": True,
+        "public_key": pubkey,
+        "display_name": meta.get("display_name", ""),
+        "managed": bool(meta.get("private_key")) if meta else False,
+    })
+
+
 @bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>/client-config", methods=["GET"])
 @bp.route("/api/interfaces/<iface>/peers/<path:pubkey>/client-config", methods=["GET"])
 @login_required
@@ -844,6 +893,39 @@ def get_client_config(iface: str, pubkey: str | None = None, pubkey_token: str |
         "client_config": client_conf,
         "qr_svg": _generate_qr_svg(client_conf),
         "filename": _client_filename(meta),
+    })
+
+
+@bp.route("/api/interfaces/<iface>/peers/client-configs", methods=["GET"])
+@login_required
+def get_all_client_configs(iface: str):
+    """Bundle all GUI-managed client configs for the interface into one ZIP."""
+    if not INTERFACE_RE.match(iface):
+        return jsonify({"error": "invalid interface name"}), 400
+    path = WG_DIR / f"{iface}.conf"
+    if not path.exists():
+        return jsonify({"error": "interface not found"}), 404
+
+    parsed = _parse_wg_conf(path)
+    server_pub = _pubkey_from_priv(parsed["interface"].get("private_key"))
+    data = _load_data()
+    items: list[tuple[str, dict, str, str]] = []
+    for pubkey, meta in sorted(data["peers"].items(), key=lambda item: _client_filename(item[1])):
+        if meta.get("interface") != iface or not meta.get("private_key"):
+            continue
+        client_conf = _build_client_config(meta, server_pub, parsed["interface"].get("listen_port"))
+        items.append((pubkey, meta, client_conf, _client_filename(meta)))
+
+    if not items:
+        return jsonify({"error": "downloadable managed peers not found"}), 404
+
+    bundle = _build_bulk_peer_zip(iface, items)
+    return jsonify({
+        "ok": True,
+        "count": len(items),
+        "peers": [_peer_summary(pubkey, meta) for pubkey, meta, _conf, _filename in items],
+        "bundle_filename": f"{iface}-wireguard-all-accounts.zip",
+        "bundle_base64": base64.b64encode(bundle).decode("ascii"),
     })
 
 
