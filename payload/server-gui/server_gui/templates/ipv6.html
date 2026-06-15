@@ -1,0 +1,591 @@
+{% extends "base.html" %}
+{% block title %}IPv6 - SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-globe2 text-primary"></i> IPv6
+    </h1>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadIpv6()">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="saveIpv6()">
+            <i class="bi bi-check2"></i> Save and apply
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-warning d-flex align-items-start gap-2 small" role="alert">
+    <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+    <div>IPv6 is disabled by default. Enable it only on interfaces where Router Advertisements, DHCPv6, or IPv6 routing are intended.</div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-xl-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-activity text-secondary"></i>
+                <strong>Status</strong>
+            </div>
+            <div class="card-body">
+                <div id="ipv6-status" class="d-flex flex-column gap-2 small"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-xl-8">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-sliders text-secondary"></i>
+                <strong>Global / WAN</strong>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-3">
+                        <div class="form-check form-switch">
+                            <input id="ipv6-enabled" class="form-check-input" type="checkbox">
+                            <label class="form-check-label" for="ipv6-enabled">Enable IPv6</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check">
+                            <input id="ipv6-fw-icmp" class="form-check-input" type="checkbox">
+                            <label class="form-check-label" for="ipv6-fw-icmp">Allow ICMPv6</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check">
+                            <input id="ipv6-fw-dhcp" class="form-check-input" type="checkbox">
+                            <label class="form-check-label" for="ipv6-fw-dhcp">Allow DHCPv6</label>
+                        </div>
+                    </div>
+                    <div class="col-md-3 text-md-end">
+                        <button class="btn btn-outline-danger btn-sm" onclick="disableIpv6()">
+                            <i class="bi bi-power"></i> Disable
+                        </button>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">WAN interface</label>
+                        <select id="ipv6-wan-if" class="form-select form-select-sm font-monospace"></select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">WAN method</label>
+                        <select id="ipv6-wan-method" class="form-select form-select-sm">
+                            <option value="disabled">disabled</option>
+                            <option value="slaac">SLAAC</option>
+                            <option value="dhcpv6">DHCPv6 client</option>
+                            <option value="manual">manual</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">WAN DNS servers</label>
+                        <input id="ipv6-wan-dns" class="form-control form-control-sm font-monospace" placeholder="2001:4860:4860::8888, 2606:4700:4700::1111">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">Manual WAN address</label>
+                        <input id="ipv6-wan-address" class="form-control form-control-sm font-monospace" placeholder="2001:db8::2/64">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">Manual WAN gateway</label>
+                        <input id="ipv6-wan-gateway" class="form-control form-control-sm font-monospace" placeholder="2001:db8::1">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-diagram-3 text-secondary"></i>
+            <strong>Prefix Advertisements / DHCPv6</strong>
+        </div>
+        <button class="btn btn-outline-primary btn-sm" onclick="addAdvertisement()">
+            <i class="bi bi-plus"></i> Add LAN prefix
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0 small">
+                <thead class="table-light">
+                    <tr>
+                        <th style="min-width:150px">interface</th>
+                        <th style="min-width:210px">prefix</th>
+                        <th style="min-width:130px">mode</th>
+                        <th style="min-width:210px">router address</th>
+                        <th style="min-width:120px">valid</th>
+                        <th style="min-width:120px">preferred</th>
+                        <th style="min-width:210px">DNS</th>
+                        <th style="min-width:150px">domain</th>
+                        <th style="min-width:180px">DHCPv6 start</th>
+                        <th style="min-width:180px">DHCPv6 end</th>
+                        <th style="min-width:90px">lease</th>
+                        <th style="width:54px"></th>
+                    </tr>
+                </thead>
+                <tbody id="ipv6-adv-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-xl-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-arrow-left-right text-secondary"></i>
+                <strong>6to4 / 6in4 Tunnel</strong>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">mode</label>
+                        <select id="ipv6-trans-mode" class="form-select form-select-sm">
+                            <option value="disabled">disabled</option>
+                            <option value="6to4">6to4</option>
+                            <option value="6in4">6in4 tunnel broker</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">tunnel name</label>
+                        <input id="ipv6-trans-name" class="form-control form-control-sm font-monospace" value="synca6">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">local IPv4</label>
+                        <input id="ipv6-trans-local" class="form-control form-control-sm font-monospace" value="auto">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">remote IPv4</label>
+                        <input id="ipv6-trans-remote" class="form-control form-control-sm font-monospace" placeholder="tunnel broker server">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">tunnel IPv6 address</label>
+                        <input id="ipv6-trans-address" class="form-control form-control-sm font-monospace" placeholder="2001:db8::2/64">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label small mb-1">routed prefix</label>
+                        <input id="ipv6-trans-prefix" class="form-control form-control-sm font-monospace" placeholder="2001:db8:100::/48">
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check">
+                            <input id="ipv6-trans-default" class="form-check-input" type="checkbox">
+                            <label class="form-check-label" for="ipv6-trans-default">default route</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-xl-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-shuffle text-secondary"></i>
+                <strong>Renumbering</strong>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">old prefix</label>
+                        <input id="ipv6-renumber-old" class="form-control form-control-sm font-monospace" list="ipv6-prefix-datalist" placeholder="2001:db8:1::/64">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">new prefix</label>
+                        <input id="ipv6-renumber-new" class="form-control form-control-sm font-monospace" placeholder="2001:db8:2::/64">
+                    </div>
+                    <div class="col-12">
+                        <button class="btn btn-outline-primary btn-sm" onclick="renumberIpv6()">
+                            <i class="bi bi-arrow-repeat"></i> Apply renumbering
+                        </button>
+                    </div>
+                </div>
+                <datalist id="ipv6-prefix-datalist"></datalist>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-signpost-2 text-secondary"></i>
+        <strong>Dynamic Routing (FRR)</strong>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-3">
+            <div class="col-md-3">
+                <div class="form-check form-switch">
+                    <input id="ipv6-routing-enabled" class="form-check-input" type="checkbox">
+                    <label class="form-check-label" for="ipv6-routing-enabled">Enable FRR</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="form-check">
+                    <input id="ipv6-ospf-enabled" class="form-check-input" type="checkbox">
+                    <label class="form-check-label" for="ipv6-ospf-enabled">OSPFv3</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="form-check">
+                    <input id="ipv6-bgp-enabled" class="form-check-input" type="checkbox">
+                    <label class="form-check-label" for="ipv6-bgp-enabled">BGP IPv6</label>
+                </div>
+            </div>
+        </div>
+        <div class="row g-3">
+            <div class="col-xl-5">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong class="small">OSPFv3</strong>
+                    <button class="btn btn-outline-primary btn-sm" onclick="addOspfInterface()">
+                        <i class="bi bi-plus"></i> Add
+                    </button>
+                </div>
+                <label class="form-label small mb-1">router ID</label>
+                <input id="ipv6-ospf-router-id" class="form-control form-control-sm font-monospace mb-2" placeholder="10.255.0.1">
+                <div class="table-responsive border rounded">
+                    <table class="table table-sm mb-0 align-middle small">
+                        <thead class="table-light"><tr><th>interface</th><th>area</th><th style="width:50px"></th></tr></thead>
+                        <tbody id="ipv6-ospf-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="col-xl-7">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong class="small">BGP</strong>
+                    <button class="btn btn-outline-primary btn-sm" onclick="addBgpNeighbor()">
+                        <i class="bi bi-plus"></i> Add peer
+                    </button>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">local AS</label>
+                        <input id="ipv6-bgp-local-as" class="form-control form-control-sm font-monospace" placeholder="65000">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">router ID</label>
+                        <input id="ipv6-bgp-router-id" class="form-control form-control-sm font-monospace" placeholder="10.255.0.1">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">advertised networks</label>
+                        <input id="ipv6-bgp-networks" class="form-control form-control-sm font-monospace" placeholder="2001:db8:100::/48">
+                    </div>
+                </div>
+                <div class="table-responsive border rounded">
+                    <table class="table table-sm mb-0 align-middle small">
+                        <thead class="table-light"><tr><th>neighbor</th><th>remote AS</th><th>interface</th><th>description</th><th style="width:50px"></th></tr></thead>
+                        <tbody id="ipv6-bgp-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let ipv6State = null;
+let ipv6Advertisements = [];
+let ipv6OspfInterfaces = [];
+let ipv6BgpNeighbors = [];
+
+function ipv6Badge(text, ok) {
+    return `<span class="badge ${ok ? 'bg-success-subtle text-success-emphasis' : 'bg-secondary-subtle text-secondary-emphasis'}">${escapeHtml(text)}</span>`;
+}
+
+function listValue(value) {
+    return Array.isArray(value) ? value.join(', ') : (value || '');
+}
+
+function splitList(value) {
+    return String(value || '').split(/[,\s]+/).map(v => v.trim()).filter(Boolean);
+}
+
+function interfaceText(item) {
+    const v4 = (item.ipv4 || []).join(', ');
+    const v6 = (item.ipv6 || []).join(', ');
+    const suffix = [v4, v6].filter(Boolean).join(' / ');
+    return suffix ? `${item.name} (${suffix})` : item.name;
+}
+
+function interfaceOptions(selected, allowBlank = true) {
+    const interfaces = (ipv6State && ipv6State.interfaces) ? ipv6State.interfaces : [];
+    const blank = allowBlank ? '<option value="">-</option>' : '';
+    return blank + interfaces.map(item => {
+        const sel = item.name === selected ? 'selected' : '';
+        const mark = item.is_wan ? ' [WAN]' : '';
+        return `<option value="${escapeHtml(item.name)}" ${sel}>${escapeHtml(interfaceText(item) + mark)}</option>`;
+    }).join('');
+}
+
+async function loadIpv6() {
+    const data = await api.get('/ipv6/api/status');
+    if (!data) return;
+    ipv6State = data;
+    ipv6Advertisements = [...((data.settings || {}).advertisements || [])];
+    const routing = (data.settings || {}).routing || {};
+    ipv6OspfInterfaces = [...(((routing.ospf6 || {}).interfaces) || [])];
+    ipv6BgpNeighbors = [...(((routing.bgp || {}).neighbors) || [])];
+    renderIpv6Status(data);
+    renderIpv6Form(data);
+    renderAdvertisements();
+    renderRouting(routing);
+}
+
+function renderIpv6Status(data) {
+    const settings = data.settings || {};
+    const services = data.services || {};
+    const tools = data.tools || {};
+    const sysctl = data.sysctl || {};
+    const status = document.getElementById('ipv6-status');
+    const rows = [
+        ['setting', settings.enabled ? 'enabled' : 'disabled', !!settings.enabled],
+        ['radvd', `${services.radvd?.active || 'unknown'} / ${services.radvd?.enabled || 'unknown'}`, services.radvd?.active === 'active'],
+        ['dnsmasq', `${services.dnsmasq?.active || 'unknown'} / ${services.dnsmasq?.enabled || 'unknown'}`, services.dnsmasq?.active === 'active'],
+        ['transition', `${services.transition?.active || 'unknown'} / ${services.transition?.enabled || 'unknown'}`, services.transition?.active === 'active'],
+        ['FRR', `${services.frr?.active || 'unknown'} / ${services.frr?.enabled || 'unknown'}`, services.frr?.active === 'active'],
+        ['radvd command', tools.radvd ? 'installed' : 'missing', tools.radvd],
+        ['vtysh command', tools.vtysh ? 'installed' : 'missing', tools.vtysh],
+        ['forwarding', sysctl['net.ipv6.conf.all.forwarding'] || '-', sysctl['net.ipv6.conf.all.forwarding'] === '1'],
+    ];
+    status.innerHTML = rows.map(([label, text, ok]) => `
+        <div class="d-flex justify-content-between gap-2">
+            <span>${escapeHtml(label)}</span>${ipv6Badge(text, ok)}
+        </div>`).join('') + `
+        <div><span class="text-secondary">config:</span> <code>${escapeHtml(data.config_path || '')}</code></div>`;
+}
+
+function renderIpv6Form(data) {
+    const settings = data.settings || {};
+    const wan = settings.wan || {};
+    const firewall = settings.firewall || {};
+    const transition = settings.transition || {};
+    const wanSelect = document.getElementById('ipv6-wan-if');
+    wanSelect.innerHTML = interfaceOptions(wan.interface || (data.wan_candidates || [])[0] || '');
+    document.getElementById('ipv6-enabled').checked = !!settings.enabled;
+    document.getElementById('ipv6-fw-icmp').checked = firewall.allow_icmpv6 !== false;
+    document.getElementById('ipv6-fw-dhcp').checked = firewall.allow_dhcpv6 !== false;
+    document.getElementById('ipv6-wan-method').value = wan.method || 'disabled';
+    document.getElementById('ipv6-wan-address').value = wan.address || '';
+    document.getElementById('ipv6-wan-gateway').value = wan.gateway || '';
+    document.getElementById('ipv6-wan-dns').value = listValue(wan.dns_servers);
+    document.getElementById('ipv6-trans-mode').value = transition.mode || 'disabled';
+    document.getElementById('ipv6-trans-name').value = transition.name || 'synca6';
+    document.getElementById('ipv6-trans-local').value = transition.local_ipv4 || 'auto';
+    document.getElementById('ipv6-trans-remote').value = transition.remote_ipv4 || '';
+    document.getElementById('ipv6-trans-address').value = transition.tunnel_address || '';
+    document.getElementById('ipv6-trans-prefix').value = transition.routed_prefix || '';
+    document.getElementById('ipv6-trans-default').checked = transition.default_route !== false;
+    document.getElementById('ipv6-prefix-datalist').innerHTML = (data.detected_prefixes || [])
+        .map(prefix => `<option value="${escapeHtml(prefix)}"></option>`).join('');
+}
+
+function renderAdvertisements() {
+    const tbody = document.getElementById('ipv6-adv-tbody');
+    tbody.innerHTML = ipv6Advertisements.length === 0
+        ? '<tr><td colspan="12" class="text-secondary text-center py-3">No IPv6 LAN prefixes</td></tr>'
+        : ipv6Advertisements.map((adv, idx) => `
+            <tr data-index="${idx}">
+                <td><select class="form-select form-select-sm font-monospace adv-if">${interfaceOptions(adv.interface || '', false)}</select></td>
+                <td><input class="form-control form-control-sm font-monospace adv-prefix" value="${escapeHtml(adv.prefix || '')}" placeholder="2001:db8:1::/64"></td>
+                <td>
+                    <select class="form-select form-select-sm adv-mode">
+                        ${['slaac', 'stateless', 'managed'].map(mode => `<option value="${mode}" ${mode === (adv.mode || 'slaac') ? 'selected' : ''}>${mode}</option>`).join('')}
+                    </select>
+                </td>
+                <td><input class="form-control form-control-sm font-monospace adv-router" value="${escapeHtml(adv.router_address || '')}" placeholder="auto ::1/64"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-valid" type="number" min="1" value="${escapeHtml(adv.valid_lifetime || 86400)}"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-preferred" type="number" min="1" value="${escapeHtml(adv.preferred_lifetime || 14400)}"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-dns" value="${escapeHtml(listValue(adv.dns_servers))}" placeholder="2001:4860:4860::8888"></td>
+                <td><input class="form-control form-control-sm adv-domain" value="${escapeHtml(adv.domain || '')}" placeholder="lan.example"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-dhcp-start" value="${escapeHtml(adv.dhcp_start || '')}"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-dhcp-end" value="${escapeHtml(adv.dhcp_end || '')}"></td>
+                <td><input class="form-control form-control-sm font-monospace adv-lease" value="${escapeHtml(adv.lease || '12h')}"></td>
+                <td><button class="btn btn-outline-danger btn-sm" onclick="removeAdvertisement(${idx})" title="Remove"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+
+function addAdvertisement() {
+    const lan = (ipv6State && ipv6State.lan_candidates && ipv6State.lan_candidates[0]) || (ipv6State?.interfaces || [])[0]?.name || '';
+    ipv6Advertisements.push({
+        interface: lan,
+        prefix: '',
+        mode: 'slaac',
+        router_address: '',
+        valid_lifetime: 86400,
+        preferred_lifetime: 14400,
+        dns_servers: [],
+        domain: '',
+        dhcp_start: '',
+        dhcp_end: '',
+        lease: '12h',
+    });
+    renderAdvertisements();
+}
+
+function removeAdvertisement(index) {
+    ipv6Advertisements.splice(index, 1);
+    renderAdvertisements();
+}
+
+function collectAdvertisements() {
+    return Array.from(document.querySelectorAll('#ipv6-adv-tbody tr[data-index]')).map(row => ({
+        interface: row.querySelector('.adv-if').value,
+        prefix: row.querySelector('.adv-prefix').value.trim(),
+        mode: row.querySelector('.adv-mode').value,
+        router_address: row.querySelector('.adv-router').value.trim(),
+        valid_lifetime: Number(row.querySelector('.adv-valid').value || 86400),
+        preferred_lifetime: Number(row.querySelector('.adv-preferred').value || 14400),
+        dns_servers: splitList(row.querySelector('.adv-dns').value),
+        domain: row.querySelector('.adv-domain').value.trim(),
+        dhcp_start: row.querySelector('.adv-dhcp-start').value.trim(),
+        dhcp_end: row.querySelector('.adv-dhcp-end').value.trim(),
+        lease: row.querySelector('.adv-lease').value.trim() || '12h',
+    }));
+}
+
+function renderRouting(routing) {
+    const ospf = routing.ospf6 || {};
+    const bgp = routing.bgp || {};
+    document.getElementById('ipv6-routing-enabled').checked = !!routing.enabled;
+    document.getElementById('ipv6-ospf-enabled').checked = !!ospf.enabled;
+    document.getElementById('ipv6-bgp-enabled').checked = !!bgp.enabled;
+    document.getElementById('ipv6-ospf-router-id').value = ospf.router_id || '';
+    document.getElementById('ipv6-bgp-local-as').value = bgp.local_as || '';
+    document.getElementById('ipv6-bgp-router-id').value = bgp.router_id || '';
+    document.getElementById('ipv6-bgp-networks').value = listValue(bgp.networks);
+    renderOspfInterfaces();
+    renderBgpNeighbors();
+}
+
+function renderOspfInterfaces() {
+    const tbody = document.getElementById('ipv6-ospf-tbody');
+    tbody.innerHTML = ipv6OspfInterfaces.length === 0
+        ? '<tr><td colspan="3" class="text-secondary text-center py-2">No OSPFv3 interfaces</td></tr>'
+        : ipv6OspfInterfaces.map((item, idx) => `
+            <tr data-index="${idx}">
+                <td><select class="form-select form-select-sm font-monospace ospf-if">${interfaceOptions(item.interface || '', false)}</select></td>
+                <td><input class="form-control form-control-sm font-monospace ospf-area" value="${escapeHtml(item.area || '0.0.0.0')}"></td>
+                <td><button class="btn btn-outline-danger btn-sm" onclick="removeOspfInterface(${idx})"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+
+function addOspfInterface() {
+    const lan = (ipv6State && ipv6State.lan_candidates && ipv6State.lan_candidates[0]) || (ipv6State?.interfaces || [])[0]?.name || '';
+    ipv6OspfInterfaces.push({ interface: lan, area: '0.0.0.0' });
+    renderOspfInterfaces();
+}
+
+function removeOspfInterface(index) {
+    ipv6OspfInterfaces.splice(index, 1);
+    renderOspfInterfaces();
+}
+
+function collectOspfInterfaces() {
+    return Array.from(document.querySelectorAll('#ipv6-ospf-tbody tr[data-index]')).map(row => ({
+        interface: row.querySelector('.ospf-if').value,
+        area: row.querySelector('.ospf-area').value.trim() || '0.0.0.0',
+    }));
+}
+
+function renderBgpNeighbors() {
+    const tbody = document.getElementById('ipv6-bgp-tbody');
+    tbody.innerHTML = ipv6BgpNeighbors.length === 0
+        ? '<tr><td colspan="5" class="text-secondary text-center py-2">No BGP peers</td></tr>'
+        : ipv6BgpNeighbors.map((item, idx) => `
+            <tr data-index="${idx}">
+                <td><input class="form-control form-control-sm font-monospace bgp-address" value="${escapeHtml(item.address || '')}" placeholder="2001:db8::1"></td>
+                <td><input class="form-control form-control-sm font-monospace bgp-remote-as" value="${escapeHtml(item.remote_as || '')}" placeholder="65001"></td>
+                <td><select class="form-select form-select-sm font-monospace bgp-if">${interfaceOptions(item.interface || '')}</select></td>
+                <td><input class="form-control form-control-sm bgp-description" value="${escapeHtml(item.description || '')}"></td>
+                <td><button class="btn btn-outline-danger btn-sm" onclick="removeBgpNeighbor(${idx})"><i class="bi bi-trash"></i></button></td>
+            </tr>`).join('');
+}
+
+function addBgpNeighbor() {
+    ipv6BgpNeighbors.push({ address: '', remote_as: '', interface: '', description: '' });
+    renderBgpNeighbors();
+}
+
+function removeBgpNeighbor(index) {
+    ipv6BgpNeighbors.splice(index, 1);
+    renderBgpNeighbors();
+}
+
+function collectBgpNeighbors() {
+    return Array.from(document.querySelectorAll('#ipv6-bgp-tbody tr[data-index]')).map(row => ({
+        address: row.querySelector('.bgp-address').value.trim(),
+        remote_as: row.querySelector('.bgp-remote-as').value.trim(),
+        interface: row.querySelector('.bgp-if').value,
+        description: row.querySelector('.bgp-description').value.trim(),
+    })).filter(item => item.address || item.remote_as);
+}
+
+function collectIpv6Payload(forceDisabled = false) {
+    return {
+        enabled: forceDisabled ? false : document.getElementById('ipv6-enabled').checked,
+        wan: {
+            interface: document.getElementById('ipv6-wan-if').value,
+            method: document.getElementById('ipv6-wan-method').value,
+            address: document.getElementById('ipv6-wan-address').value.trim(),
+            gateway: document.getElementById('ipv6-wan-gateway').value.trim(),
+            dns_servers: splitList(document.getElementById('ipv6-wan-dns').value),
+        },
+        advertisements: collectAdvertisements(),
+        transition: {
+            mode: document.getElementById('ipv6-trans-mode').value,
+            name: document.getElementById('ipv6-trans-name').value.trim() || 'synca6',
+            local_ipv4: document.getElementById('ipv6-trans-local').value.trim() || 'auto',
+            remote_ipv4: document.getElementById('ipv6-trans-remote').value.trim(),
+            tunnel_address: document.getElementById('ipv6-trans-address').value.trim(),
+            routed_prefix: document.getElementById('ipv6-trans-prefix').value.trim(),
+            default_route: document.getElementById('ipv6-trans-default').checked,
+        },
+        firewall: {
+            allow_icmpv6: document.getElementById('ipv6-fw-icmp').checked,
+            allow_dhcpv6: document.getElementById('ipv6-fw-dhcp').checked,
+        },
+        routing: {
+            enabled: document.getElementById('ipv6-routing-enabled').checked,
+            ospf6: {
+                enabled: document.getElementById('ipv6-ospf-enabled').checked,
+                router_id: document.getElementById('ipv6-ospf-router-id').value.trim(),
+                interfaces: collectOspfInterfaces(),
+            },
+            bgp: {
+                enabled: document.getElementById('ipv6-bgp-enabled').checked,
+                local_as: document.getElementById('ipv6-bgp-local-as').value.trim(),
+                router_id: document.getElementById('ipv6-bgp-router-id').value.trim(),
+                neighbors: collectBgpNeighbors(),
+                networks: splitList(document.getElementById('ipv6-bgp-networks').value),
+            },
+        },
+    };
+}
+
+async function saveIpv6() {
+    const res = await api.send('/ipv6/api/config', 'POST', collectIpv6Payload());
+    if (!res) return;
+    toast(res.ok ? 'IPv6 settings applied' : 'IPv6 apply failed', !res.ok);
+    await loadIpv6();
+}
+
+async function disableIpv6() {
+    const res = await api.send('/ipv6/api/config', 'POST', collectIpv6Payload(true));
+    if (!res) return;
+    toast(res.ok ? 'IPv6 disabled' : 'IPv6 disable failed', !res.ok);
+    await loadIpv6();
+}
+
+async function renumberIpv6() {
+    const oldPrefix = document.getElementById('ipv6-renumber-old').value.trim();
+    const newPrefix = document.getElementById('ipv6-renumber-new').value.trim();
+    const res = await api.send('/ipv6/api/renumber', 'POST', { old_prefix: oldPrefix, new_prefix: newPrefix });
+    if (!res) return;
+    toast(res.ok ? 'IPv6 prefix renumbered' : 'IPv6 renumbering failed', !res.ok);
+    await loadIpv6();
+}
+
+document.addEventListener('DOMContentLoaded', loadIpv6);
+</script>
+{% endblock %}

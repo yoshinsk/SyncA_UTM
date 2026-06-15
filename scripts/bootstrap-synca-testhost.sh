@@ -172,6 +172,48 @@ PY
 }
 JSON
 
+    cat > /etc/server-gui/ipv6.json <<JSON
+{
+  "enabled": false,
+  "wan": {
+    "interface": "${WAN_IF}",
+    "method": "disabled",
+    "address": "",
+    "gateway": "",
+    "dns_servers": []
+  },
+  "advertisements": [],
+  "transition": {
+    "mode": "disabled",
+    "name": "synca6",
+    "local_ipv4": "auto",
+    "remote_ipv4": "",
+    "tunnel_address": "",
+    "routed_prefix": "",
+    "default_route": true
+  },
+  "firewall": {
+    "allow_icmpv6": true,
+    "allow_dhcpv6": true
+  },
+  "routing": {
+    "enabled": false,
+    "ospf6": {
+      "enabled": false,
+      "router_id": "",
+      "interfaces": []
+    },
+    "bgp": {
+      "enabled": false,
+      "local_as": "",
+      "router_id": "",
+      "neighbors": [],
+      "networks": []
+    }
+  }
+}
+JSON
+
     local installed_sha_json
     if [[ "$SYNCA_INSTALLED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
         installed_sha_json="\"$SYNCA_INSTALLED_SHA\""
@@ -589,6 +631,10 @@ start_services() {
     systemctl enable --now server-gui nginx wgui-worker
     systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer
     systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
+    systemctl disable --now radvd.service >/dev/null 2>&1 || true
+    systemctl disable --now frr.service >/dev/null 2>&1 || true
+    systemctl disable --now synca-ipv6-transition.service >/dev/null 2>&1 || true
+    rm -f /etc/dnsmasq.d/synca-ipv6.conf
     local central_enabled="${SYNCA_CENTRAL_ENABLED:-1}"
     local central_url="${SYNCA_CENTRAL_URL:-https://nsksys.com/syncautm/admin}"
     if [[ "$central_enabled" != "0" && "$central_enabled" != "false" && "$central_enabled" != "False" && "$central_enabled" != "no" && "$central_enabled" != "No" && -n "$central_url" && -n "${SYNCA_CENTRAL_ENROLLMENT_TOKEN:-}" ]]; then

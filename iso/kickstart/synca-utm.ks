@@ -45,6 +45,7 @@ dnsmasq
 dialog
 fail2ban
 firewalld
+frr
 git
 glibc-langpack-ja
 iproute
@@ -60,6 +61,7 @@ ppp
 passwd
 python3
 python3-pip
+radvd
 rootfiles
 rsync
 shadow-utils

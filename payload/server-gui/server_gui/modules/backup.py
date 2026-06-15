@@ -57,10 +57,12 @@ BACKUP_SPECS: tuple[dict, ...] = (
     {"section": "systemd", "globs": [
         "/etc/systemd/system/server-gui*",
         "/etc/systemd/system/synca-central*",
+        "/etc/systemd/system/synca-ipv6*",
         "/etc/systemd/system/synca-upnp*",
         "/etc/systemd/system/wgui*",
         "/etc/systemd/system/multi-user.target.wants/server-gui*",
         "/etc/systemd/system/timers.target.wants/synca-central*",
+        "/etc/systemd/system/multi-user.target.wants/synca-ipv6*",
         "/etc/systemd/system/multi-user.target.wants/synca-upnp*",
         "/etc/systemd/system/multi-user.target.wants/wgui*",
         "/etc/systemd/system/timers.target.wants/server-gui*",
@@ -73,6 +75,12 @@ BACKUP_SPECS: tuple[dict, ...] = (
     ]},
     {"section": "wireguard", "paths": ["/etc/wireguard"]},
     {"section": "firewalld", "paths": ["/etc/firewalld"]},
+    {"section": "ipv6", "paths": [
+        "/etc/radvd.conf",
+        "/etc/frr",
+        "/etc/sysctl.d/99-synca-ipv6.conf",
+        "/usr/local/sbin/synca-ipv6-transition",
+    ]},
     {"section": "network", "paths": [
         "/etc/NetworkManager/NetworkManager.conf",
         "/etc/NetworkManager/conf.d",
@@ -110,6 +118,7 @@ RESTORE_SECTION_PREFIXES = {
     "dnsmasq": ("/etc/dnsmasq.conf", "/etc/dnsmasq.d/", "/var/lib/dnsmasq/"),
     "wireguard": ("/etc/wireguard/",),
     "firewalld": ("/etc/firewalld/",),
+    "ipv6": ("/etc/radvd.conf", "/etc/frr/", "/etc/sysctl.d/99-synca-ipv6.conf", "/usr/local/sbin/synca-ipv6-transition"),
     "network": ("/etc/NetworkManager/", "/etc/sysconfig/network", "/etc/sysconfig/network-scripts/"),
     "fail2ban": ("/etc/fail2ban/",),
     "letsencrypt": ("/etc/letsencrypt/",),

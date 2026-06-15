@@ -23,6 +23,7 @@ from .modules import fail2ban as fail2ban_module
 from .modules import firewall as firewall_module
 from .modules import geoip as geoip_module
 from .modules import ipsec as ipsec_module
+from .modules import ipv6 as ipv6_module
 from .modules import network as network_module
 from .modules import nginx_proxy as nginx_module
 from .modules import sophos_import as sophos_import_module
@@ -62,6 +63,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     geoip_module.register(app)
     dns_module.register(app)
     dhcp_module.register(app)
+    ipv6_module.register(app)
     upnp_module.register(app)
     ipsec_module.register(app)
     wireguard_module.register(app)
