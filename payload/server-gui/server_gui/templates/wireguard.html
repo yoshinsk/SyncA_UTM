@@ -98,6 +98,9 @@
             <strong>ピア</strong>
         </div>
         <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" onclick="downloadAllClientConfigs()">
+                <i class="bi bi-download"></i> 全設定ZIP
+            </button>
             <button class="btn btn-outline-primary btn-sm" onclick="openBulkPeerModal()">
                 <i class="bi bi-people-fill"></i> 一括発行
             </button>
@@ -116,7 +119,7 @@
                         <th>Extra Allowed IPs</th>
                         <th>最終ハンドシェイク</th>
                         <th>転送量 (RX / TX)</th>
-                        <th style="width:170px">操作</th>
+                        <th style="width:210px">操作</th>
                     </tr>
                 </thead>
                 <tbody id="peer-tbody"></tbody>
@@ -359,7 +362,13 @@
                     </div>
                     <div class="col-md-8">
                         <label class="form-label">Endpoint</label>
-                        <input id="bf-endpoint" class="form-control font-monospace" placeholder="vpn.example.com:51820">
+                        <input id="bf-endpoint" class="form-control font-monospace"
+                               list="bf-endpoint-datalist" placeholder="vpn.example.com:51820">
+                        <datalist id="bf-endpoint-datalist"></datalist>
+                        <select id="bf-endpoint-select" class="form-select form-select-sm mt-2"
+                                onchange="applyBulkEndpointCandidate(this.value)">
+                            <option value="">Endpoint 候補を選択</option>
+                        </select>
                     </div>
                     <div class="col-md-4">
                         <label class="form-label">PersistentKeepalive</label>
@@ -378,6 +387,37 @@
                 <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
                 <button id="bf-submit" class="btn btn-primary" onclick="submitBulkPeerForm()">
                     <i class="bi bi-check2"></i> 発行
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Peer display name modal -->
+<div class="modal fade" id="alias-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">別名編集</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-2">
+                    <label class="form-label">アカウント</label>
+                    <input id="alias-account" class="form-control font-monospace" readonly>
+                </div>
+                <div>
+                    <label class="form-label">別名</label>
+                    <input id="alias-display-name" class="form-control" placeholder="例: 佐藤 iPhone">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-danger me-auto" onclick="deleteAlias()">
+                    <i class="bi bi-trash"></i> 別名削除
+                </button>
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+                <button class="btn btn-primary" onclick="saveAlias()">
+                    <i class="bi bi-check2"></i> 保存
                 </button>
             </div>
         </div>
@@ -468,10 +508,12 @@ let bulkPeerModal = null;
 let configModal = null;
 let adoptModal = null;
 let ifaceModal = null;
+let aliasModal = null;
 
 // Peer modal state
 let editingPubkey = null;   // null = adding
 let adoptingPubkey = null;
+let aliasPubkey = null;
 let lastConfigFilename = 'wg-client.conf';
 let lastBulkBundleBase64 = '';
 let lastBulkBundleFilename = 'wireguard-accounts.zip';
@@ -485,6 +527,7 @@ document.addEventListener('DOMContentLoaded', () => {
     configModal = new bootstrap.Modal(document.getElementById('config-modal'));
     adoptModal = new bootstrap.Modal(document.getElementById('adopt-modal'));
     ifaceModal = new bootstrap.Modal(document.getElementById('iface-modal'));
+    aliasModal = new bootstrap.Modal(document.getElementById('alias-modal'));
     document.getElementById('pf-dns-use').addEventListener('change', e => {
         document.getElementById('pf-dns').disabled = !e.target.checked;
         if (!e.target.checked) document.getElementById('pf-dns').value = '';
@@ -700,6 +743,24 @@ function applyEndpointCandidate(value) {
     document.getElementById('pf-endpoint').value = value;
 }
 
+function renderBulkEndpointCandidates() {
+    const candidates = currentEndpointCandidates();
+    const datalist = document.getElementById('bf-endpoint-datalist');
+    const select = document.getElementById('bf-endpoint-select');
+    if (!datalist || !select) return;
+    datalist.innerHTML = candidates.map(c =>
+        `<option value="${escapeHtml(c.value)}" label="${escapeHtml(c.label)}"></option>`
+    ).join('');
+    select.innerHTML = '<option value="">Endpoint 候補を選択</option>' + candidates.map(c =>
+        `<option value="${escapeHtml(c.value)}">${escapeHtml(c.label)} (${escapeHtml(c.value)})</option>`
+    ).join('');
+}
+
+function applyBulkEndpointCandidate(value) {
+    if (!value) return;
+    document.getElementById('bf-endpoint').value = value;
+}
+
 function _suggestionsOrEmpty() {
     return (currentData && currentData.suggestions) || {};
 }
@@ -785,6 +846,9 @@ function renderPeers(data) {
             <td>
                 <div class="d-flex gap-1">
                     ${editBtn}
+                    <button class="btn btn-sm btn-outline-secondary" onclick='openAliasModal(${JSON.stringify(p)})' title="別名編集">
+                        <i class="bi bi-person-badge"></i>
+                    </button>
                     ${showCfgBtn}
                     <button class="btn btn-sm btn-outline-danger" onclick="deletePeer('${escapeJs(p.public_key)}')" title="削除">
                         <i class="bi bi-trash"></i>
@@ -815,6 +879,7 @@ function peerKeyUrl(pubkey, suffix = '') {
 function openBulkPeerModal() {
     if (!currentIface) return toast('Interface を選択してください', true);
     const sug = _suggestionsOrEmpty();
+    renderBulkEndpointCandidates();
     const available = Number(sug.available_peer_count || 0);
     document.getElementById('bf-available').textContent = String(available);
     document.getElementById('bf-next-name').textContent = sug.next_account_name || 'User001';
@@ -868,16 +933,55 @@ async function submitBulkPeerForm() {
 
 function downloadLastBulkBundle() {
     if (!lastBulkBundleBase64) return toast('ダウンロード対象がありません', true);
-    const bytes = Uint8Array.from(atob(lastBulkBundleBase64), c => c.charCodeAt(0));
+    downloadBase64Zip(lastBulkBundleBase64, lastBulkBundleFilename || 'wireguard-accounts.zip');
+}
+
+async function downloadAllClientConfigs() {
+    if (!currentIface) return toast('Interface を選択してください', true);
+    const res = await api.get(`/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/client-configs`);
+    if (!res) return;
+    downloadBase64Zip(res.bundle_base64 || '', res.bundle_filename || 'wireguard-all-accounts.zip');
+    toast(`${res.count || 0}件の設定をZIPにまとめました`);
+}
+
+function downloadBase64Zip(base64Text, filename) {
+    if (!base64Text) return toast('ダウンロード対象がありません', true);
+    const bytes = Uint8Array.from(atob(base64Text), c => c.charCodeAt(0));
     const blob = new Blob([bytes], { type: 'application/zip' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (lastBulkBundleFilename || 'wireguard-accounts.zip').replace(/[^A-Za-z0-9._\-]/g, '_');
+    a.download = (filename || 'wireguard-accounts.zip').replace(/[^A-Za-z0-9._\-]/g, '_');
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+}
+
+function openAliasModal(peer) {
+    aliasPubkey = peer.public_key;
+    document.getElementById('alias-account').value = peer.account_name || peer.comment || peer.public_key.slice(0, 16) + '…';
+    document.getElementById('alias-display-name').value = peer.display_name || '';
+    aliasModal.show();
+}
+
+async function saveAlias() {
+    if (!aliasPubkey) return;
+    const displayName = document.getElementById('alias-display-name').value.trim();
+    const res = await api.send(peerKeyUrl(aliasPubkey, '/display-name'), 'PUT', { display_name: displayName });
+    if (!res) return;
+    aliasModal.hide();
+    toast(displayName ? '別名を保存しました' : '別名を削除しました');
+    refresh();
+}
+
+async function deleteAlias() {
+    if (!aliasPubkey) return;
+    const res = await api.send(peerKeyUrl(aliasPubkey, '/display-name'), 'DELETE', {});
+    if (!res) return;
+    aliasModal.hide();
+    toast('別名を削除しました');
+    refresh();
 }
 
 /* ---- peer modal ---- */
