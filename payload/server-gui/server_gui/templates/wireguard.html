@@ -97,16 +97,21 @@
             <i class="bi bi-people text-secondary"></i>
             <strong>ピア</strong>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openPeerModal(null)">
-            <i class="bi bi-plus-lg"></i> 新規ピア
-        </button>
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-primary btn-sm" onclick="openBulkPeerModal()">
+                <i class="bi bi-people-fill"></i> 一括発行
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="openPeerModal(null)">
+                <i class="bi bi-plus-lg"></i> 新規ピア
+            </button>
+        </div>
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light">
                     <tr>
-                        <th>名前 / 状態</th>
+                        <th>アカウント / 別名</th>
                         <th>IP アドレス</th>
                         <th>Extra Allowed IPs</th>
                         <th>最終ハンドシェイク</th>
@@ -213,11 +218,15 @@
             </div>
             <div class="modal-body">
                 <div class="row g-3">
-                    <div class="col-md-7">
-                        <label class="form-label">コメント / 名前</label>
-                        <input id="pf-comment" class="form-control" placeholder="例: yoshi-iphone">
+                    <div class="col-md-4">
+                        <label class="form-label">アカウント名</label>
+                        <input id="pf-comment" class="form-control font-monospace" placeholder="例: User001">
                     </div>
-                    <div class="col-md-5 d-flex align-items-end">
+                    <div class="col-md-5">
+                        <label class="form-label">別名</label>
+                        <input id="pf-display-name" class="form-control" placeholder="例: 佐藤 iPhone">
+                    </div>
+                    <div class="col-md-3 d-flex align-items-end">
                         <div class="form-check form-switch">
                             <input id="pf-enabled" type="checkbox" class="form-check-input" checked>
                             <label class="form-check-label" for="pf-enabled">有効</label>
@@ -296,6 +305,79 @@
                 <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
                 <button id="pf-submit" class="btn btn-primary" onclick="submitPeerForm()">
                     <i class="bi bi-check2"></i> <span id="pf-submit-label">追加して鍵生成</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk peer creation modal -->
+<div class="modal fade" id="bulk-peer-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">WireGuardアカウント一括発行</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-secondary small">
+                    空きIP数: <strong id="bf-available">0</strong>
+                    <span class="ms-2">発行名は <code id="bf-next-name">User001</code> から連番になります。</span>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">作成数</label>
+                        <input id="bf-count" type="number" min="1" class="form-control font-monospace" value="1">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">名前プレフィックス</label>
+                        <input id="bf-prefix" class="form-control font-monospace" value="User">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">開始番号</label>
+                        <input id="bf-start" type="number" min="1" class="form-control font-monospace" placeholder="自動">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">別名</label>
+                        <textarea id="bf-display-names" class="form-control" rows="4"
+                                  placeholder="1行に1名。例: 佐藤 iPhone"></textarea>
+                    </div>
+                </div>
+                <hr>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Client DNS</label>
+                        <input id="bf-dns" class="form-control font-monospace" placeholder="任意">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Client MTU</label>
+                        <input id="bf-mtu" type="number" class="form-control font-monospace" value="1450">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Client Allowed IPs</label>
+                        <input id="bf-client-aips" class="form-control font-monospace">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Endpoint</label>
+                        <input id="bf-endpoint" class="form-control font-monospace" placeholder="vpn.example.com:51820">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">PersistentKeepalive</label>
+                        <input id="bf-keepalive" type="number" class="form-control font-monospace" value="25">
+                    </div>
+                </div>
+                <div class="form-check form-switch mt-3">
+                    <input id="bf-psk" type="checkbox" class="form-check-input">
+                    <label class="form-check-label" for="bf-psk">PresharedKey を使用</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="bf-download" class="btn btn-outline-primary d-none" onclick="downloadLastBulkBundle()">
+                    <i class="bi bi-download"></i> ZIPをダウンロード
+                </button>
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+                <button id="bf-submit" class="btn btn-primary" onclick="submitBulkPeerForm()">
+                    <i class="bi bi-check2"></i> 発行
                 </button>
             </div>
         </div>
@@ -382,6 +464,7 @@ let endpointCandidates = [];
 let currentIface = null;
 let currentData = null;
 let peerModal = null;
+let bulkPeerModal = null;
 let configModal = null;
 let adoptModal = null;
 let ifaceModal = null;
@@ -390,12 +473,15 @@ let ifaceModal = null;
 let editingPubkey = null;   // null = adding
 let adoptingPubkey = null;
 let lastConfigFilename = 'wg-client.conf';
+let lastBulkBundleBase64 = '';
+let lastBulkBundleFilename = 'wireguard-accounts.zip';
 
 // Interface modal state: 'create' or 'edit'
 let ifaceModalMode = 'create';
 
 document.addEventListener('DOMContentLoaded', () => {
     peerModal = new bootstrap.Modal(document.getElementById('peer-modal'));
+    bulkPeerModal = new bootstrap.Modal(document.getElementById('bulk-peer-modal'));
     configModal = new bootstrap.Modal(document.getElementById('config-modal'));
     adoptModal = new bootstrap.Modal(document.getElementById('adopt-modal'));
     ifaceModal = new bootstrap.Modal(document.getElementById('iface-modal'));
@@ -647,6 +733,8 @@ function renderPeers(data) {
         return;
     }
     tbody.innerHTML = peers.map(p => {
+        const accountName = p.account_name || p.comment || '(no name)';
+        const displayName = p.display_name || '';
         const status = p.status || {};
         const handshake = status.latest_handshake
             ? new Date(status.latest_handshake * 1000).toLocaleString('ja-JP')
@@ -663,7 +751,7 @@ function renderPeers(data) {
             ? ''
             : '<span class="badge bg-warning-subtle text-warning-emphasis ms-1" title="秘密鍵が GUI に保存されていません">limited</span>';
         const showCfgBtn = p.managed
-            ? `<button class="btn btn-sm btn-outline-primary" onclick="showClientConfig('${escapeJs(p.public_key)}', '${escapeJs(p.comment || '')}')" title="設定 / QR 表示">
+            ? `<button class="btn btn-sm btn-outline-primary" onclick="showClientConfig('${escapeJs(p.public_key)}', '${escapeJs(accountName)}')" title="設定 / QR 表示">
                    <i class="bi bi-qr-code"></i>
                </button>`
             : `<button class="btn btn-sm btn-outline-secondary" disabled title="秘密鍵が無いため再生成不可">
@@ -686,7 +774,8 @@ function renderPeers(data) {
             : '<span class="text-secondary">—</span>';
         return `<tr>
             <td>
-                <div class="fw-semibold">${recent} ${escapeHtml(p.comment || '(no name)')}${stateBadge}${managedBadge}</div>
+                <div class="fw-semibold">${recent} ${escapeHtml(accountName)}${stateBadge}${managedBadge}</div>
+                ${displayName ? `<div class="small text-secondary">${escapeHtml(displayName)}</div>` : ''}
                 <code class="small text-secondary text-break">${escapeHtml((p.public_key || '').slice(0, 28))}…</code>
             </td>
             <td class="font-monospace small">${escapeHtml(p.peer_address || '—')}</td>
@@ -722,6 +811,75 @@ function peerKeyUrl(pubkey, suffix = '') {
     return `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/key/${peerKeyToken(pubkey)}${suffix}`;
 }
 
+/* ---- bulk peer modal ---- */
+function openBulkPeerModal() {
+    if (!currentIface) return toast('Interface を選択してください', true);
+    const sug = _suggestionsOrEmpty();
+    const available = Number(sug.available_peer_count || 0);
+    document.getElementById('bf-available').textContent = String(available);
+    document.getElementById('bf-next-name').textContent = sug.next_account_name || 'User001';
+    document.getElementById('bf-count').value = available > 0 ? '1' : '0';
+    document.getElementById('bf-count').max = String(available);
+    document.getElementById('bf-prefix').value = 'User';
+    document.getElementById('bf-start').value = '';
+    document.getElementById('bf-display-names').value = '';
+    document.getElementById('bf-dns').value = '';
+    document.getElementById('bf-mtu').value = sug.client_mtu || 1450;
+    document.getElementById('bf-client-aips').value = (sug.client_allowed_ips || ['0.0.0.0/0', '::/0']).join(', ');
+    document.getElementById('bf-endpoint').value = sug.endpoint || wanEndpoint;
+    document.getElementById('bf-keepalive').value = 25;
+    document.getElementById('bf-psk').checked = false;
+    document.getElementById('bf-download').classList.add('d-none');
+    lastBulkBundleBase64 = '';
+    bulkPeerModal.show();
+}
+
+async function submitBulkPeerForm() {
+    const payload = {
+        count: Number(document.getElementById('bf-count').value || 0),
+        name_prefix: document.getElementById('bf-prefix').value.trim() || 'User',
+        start_number: document.getElementById('bf-start').value.trim(),
+        display_names: document.getElementById('bf-display-names').value,
+        enabled: true,
+        extra_allowed_ips: '',
+        client_dns: document.getElementById('bf-dns').value.trim(),
+        client_mtu: document.getElementById('bf-mtu').value.trim(),
+        client_allowed_ips: document.getElementById('bf-client-aips').value.trim(),
+        endpoint: document.getElementById('bf-endpoint').value.trim(),
+        persistent_keepalive: document.getElementById('bf-keepalive').value.trim(),
+        preshared_key: document.getElementById('bf-psk').checked,
+    };
+    const available = Number((_suggestionsOrEmpty()).available_peer_count || 0);
+    if (!payload.count || payload.count < 1) return toast('作成数を指定してください', true);
+    if (payload.count > available) return toast(`作成数が空きIP数 (${available}) を超えています`, true);
+
+    const res = await api.send(
+        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/bulk`,
+        'POST',
+        payload);
+    if (!res) return;
+    lastBulkBundleBase64 = res.bundle_base64 || '';
+    lastBulkBundleFilename = res.bundle_filename || 'wireguard-accounts.zip';
+    document.getElementById('bf-download').classList.toggle('d-none', !lastBulkBundleBase64);
+    toast(`${(res.created || []).length}件を発行しました`);
+    refresh();
+    if (lastBulkBundleBase64) downloadLastBulkBundle();
+}
+
+function downloadLastBulkBundle() {
+    if (!lastBulkBundleBase64) return toast('ダウンロード対象がありません', true);
+    const bytes = Uint8Array.from(atob(lastBulkBundleBase64), c => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (lastBulkBundleFilename || 'wireguard-accounts.zip').replace(/[^A-Za-z0-9._\-]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
 /* ---- peer modal ---- */
 function openPeerModal(peer) {
     if (!currentIface) return toast('Interface を選択してください', true);
@@ -729,11 +887,12 @@ function openPeerModal(peer) {
     if (peer) {
         renderEndpointCandidates();
         editingPubkey = peer.public_key;
-        document.getElementById('peer-modal-title').textContent = `ピア編集: ${peer.comment || peer.public_key.slice(0,16)}…`;
+        document.getElementById('peer-modal-title').textContent = `ピア編集: ${peer.account_name || peer.comment || peer.public_key.slice(0,16)}…`;
         document.getElementById('pf-submit-label').textContent = '更新を保存 (鍵は変更しない)';
         document.getElementById('pf-edit-extra').classList.remove('d-none');
         document.getElementById('pf-psk').parentElement.classList.add('d-none');
-        document.getElementById('pf-comment').value = peer.comment || '';
+        document.getElementById('pf-comment').value = peer.account_name || peer.comment || '';
+        document.getElementById('pf-display-name').value = peer.display_name || '';
         document.getElementById('pf-enabled').checked = peer.enabled !== false;
         document.getElementById('pf-peer-address').value = peer.peer_address || '';
         document.getElementById('pf-extra').value = (peer.extra_allowed_ips || []).join(', ');
@@ -755,7 +914,8 @@ function openPeerModal(peer) {
         document.getElementById('pf-submit-label').textContent = '追加して鍵生成';
         document.getElementById('pf-edit-extra').classList.add('d-none');
         document.getElementById('pf-psk').parentElement.classList.remove('d-none');
-        document.getElementById('pf-comment').value = '';
+        document.getElementById('pf-comment').value = sug.next_account_name || '';
+        document.getElementById('pf-display-name').value = '';
         document.getElementById('pf-enabled').checked = true;
         document.getElementById('pf-peer-address').value = sug.next_peer_address || '';
         document.getElementById('pf-extra').value = '';
@@ -775,6 +935,8 @@ async function submitPeerForm() {
     const useDns = document.getElementById('pf-dns-use').checked;
     const payload = {
         comment: document.getElementById('pf-comment').value.trim(),
+        account_name: document.getElementById('pf-comment').value.trim(),
+        display_name: document.getElementById('pf-display-name').value.trim(),
         enabled: document.getElementById('pf-enabled').checked,
         peer_address: document.getElementById('pf-peer-address').value.trim(),
         extra_allowed_ips: document.getElementById('pf-extra').value.trim(),
@@ -805,7 +967,7 @@ async function submitPeerForm() {
     refresh();
     // Open config modal with the fresh client config
     if (res.client_config) {
-        const title = `クライアント設定: ${payload.comment || (res.peer && res.peer.public_key.slice(0,16) + '…') || '(no name)'}`;
+        const title = `クライアント設定: ${payload.account_name || (res.peer && res.peer.public_key.slice(0,16) + '…') || '(no name)'}`;
         showConfigPanel(title, res.client_config, res.qr_svg,
             editingPubkey ? '設定を更新しました。新しい .conf をクライアントに反映してください。'
                           : '<strong>このピアの設定は何度でも再表示できます。</strong>');
