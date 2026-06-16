@@ -799,9 +799,13 @@ After=network-online.target NetworkManager.service
 StartLimitIntervalSec=0
 
 [Service]
+ExecStartPre=/bin/sh -c 'test ! -x /opt/server-gui/bin/dnsmasq-runtime-guard || exec /opt/server-gui/bin/dnsmasq-runtime-guard'
 Restart=on-failure
 RestartSec=5s
 CONF
+    if [[ -x /opt/server-gui/bin/dnsmasq-runtime-guard ]]; then
+        /opt/server-gui/bin/dnsmasq-runtime-guard
+    fi
     if [[ -f /etc/dnsmasq.conf ]] && grep -Eq '^[[:space:]]*bind-interfaces([[:space:]]|$)' /etc/dnsmasq.conf; then
         cp -a /etc/dnsmasq.conf "/etc/dnsmasq.conf.synca-bind-dynamic.$(date +%Y%m%d%H%M%S).bak"
         sed -i -E 's/^([[:space:]]*)bind-interfaces([[:space:]]*)$/# SyncA UTM: bind-dynamic is used so LAN bridges can appear after dnsmasq starts.\n#\1bind-interfaces\2/' /etc/dnsmasq.conf

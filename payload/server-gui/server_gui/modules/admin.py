@@ -450,8 +450,9 @@ def apply_update():
                     pass
             return _apply_failure(f"ファイル置換失敗: {e}", log_lines)
 
-        # Also refresh /opt/server-gui/bin/* and systemd unit files if the
-        # update changed them. (Skip for now — keeping minimum-disruption.)
+        # Refresh the dnsmasq unit guard before recording update success; stale
+        # generated DHCP config can survive package updates on existing hosts.
+        _refresh_dnsmasq_runtime_guard(_log)
 
         # Record success + new installed_sha
         with _store().transaction(MODULE_NAME, _default()) as data:
@@ -494,6 +495,56 @@ def _apply_failure(reason: str, log_lines: list[str]):
         data["last_apply_ok"] = False
         data["last_apply_log"] = "\n".join(log_lines)
     return jsonify({"error": reason, "log": "\n".join(log_lines)}), 500
+
+
+def _refresh_dnsmasq_runtime_guard(log) -> None:
+    """Install and run the dnsmasq pre-start guard after self-update.
+
+    Existing appliances can already have a stale /etc/dnsmasq.d/server-gui.conf
+    from an older build. The updated Python package alone cannot fix that file
+    until an operator edits DHCP/DNS again, so this post-update task refreshes
+    the systemd drop-in and repairs the live dnsmasq config immediately.
+    """
+    guard = SERVER_GUI_BIN / "dnsmasq-runtime-guard"
+    if not guard.exists():
+        log("dnsmasq runtime guard not present; skipped")
+        return
+
+    script = r"""
+set -e
+install -d -m 0755 /etc/systemd/system/dnsmasq.service.d
+cat > /etc/systemd/system/dnsmasq.service.d/synca-utm.conf <<'EOF'
+# Managed by server-gui.
+[Unit]
+Wants=network-online.target
+After=network-online.target NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=/bin/sh -c 'test ! -x /opt/server-gui/bin/dnsmasq-runtime-guard || exec /opt/server-gui/bin/dnsmasq-runtime-guard'
+Restart=on-failure
+RestartSec=5s
+EOF
+chmod 0644 /etc/systemd/system/dnsmasq.service.d/synca-utm.conf
+/opt/server-gui/bin/dnsmasq-runtime-guard
+systemctl daemon-reload
+if systemctl is-enabled --quiet dnsmasq || systemctl is-active --quiet dnsmasq; then
+    systemctl reset-failed dnsmasq >/dev/null 2>&1 || true
+    systemctl restart dnsmasq
+fi
+"""
+    proc = subprocess.run(
+        ["/bin/bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    output = "\n".join(part for part in (proc.stdout.strip(), proc.stderr.strip()) if part)
+    if proc.returncode == 0:
+        log("refreshed dnsmasq runtime guard")
+    else:
+        log(f"WARNING: dnsmasq runtime guard refresh failed rc={proc.returncode}: {_truncate_output(output)}")
 
 
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
