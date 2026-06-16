@@ -39,6 +39,7 @@ NetworkManager
 NetworkManager-ppp
 bind-utils
 certbot
+chrony
 cronie
 curl
 dnsmasq

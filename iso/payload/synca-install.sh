@@ -110,6 +110,16 @@ install_extra_rpms() {
     fi
 }
 
+enable_time_sync() {
+    # Fresh installs must have a valid clock before HTTPS-based DDNS, GeoIP,
+    # GitHub updates, and central enrollment can pass certificate validation.
+    if command -v chronyd >/dev/null 2>&1; then
+        systemctl enable chronyd >/dev/null 2>&1 || true
+        systemctl start chronyd >/dev/null 2>&1 || true
+        timedatectl set-ntp true >/dev/null 2>&1 || true
+    fi
+}
+
 install_wireguard_ui() {
     # wireguard-ui is optional at ISO build time. The service is installed only
     # when the binary is present, avoiding a broken unit on minimal builds.
@@ -529,6 +539,7 @@ main() {
     systemctl daemon-reload
     systemctl enable synca-firstboot.service
     install_extra_rpms
+    enable_time_sync
     install_server_gui
     install_wireguard_ui
     install_letsencrypt_hooks
