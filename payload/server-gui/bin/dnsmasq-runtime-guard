@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# payload/server-gui/bin/dnsmasq-runtime-guard
+# Repair SyncA-managed dnsmasq bind settings before dnsmasq starts.
+
+set -euo pipefail
+
+MAIN_CONF="${DNSMASQ_MAIN_CONF:-/etc/dnsmasq.conf}"
+GENERATED_CONF="${DNSMASQ_GENERATED_CONF:-/etc/dnsmasq.d/server-gui.conf}"
+FIRSTBOOT_CONF="${DNSMASQ_FIRSTBOOT_CONF:-/etc/dnsmasq.d/synca-lan.conf}"
+LOG_TAG="synca-dnsmasq-runtime-guard"
+CHANGED=0
+
+log_change() {
+    # Use journald when available, but keep boot from failing if logger is not
+    # installed in a minimal image.
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$LOG_TAG" "$1" || true
+    fi
+}
+
+timestamp() {
+    date +%Y%m%d%H%M%S
+}
+
+backup_file() {
+    local path="$1"
+    cp -a "$path" "${path}.synca-runtime-guard.$(timestamp).bak"
+}
+
+has_managed_lan_binding() {
+    local path="$1"
+    [[ -f "$path" ]] || return 1
+    grep -Eq '^[[:space:]]*interface=[^[:space:]#]+' "$path" && return 0
+    grep -Eq '^[[:space:]]*dhcp-range=interface:[^,[:space:]#]+' "$path" && return 0
+    return 1
+}
+
+ensure_bind_dynamic() {
+    local path="$1"
+    local tmp
+
+    has_managed_lan_binding "$path" || return 0
+    if grep -Eq '^[[:space:]]*bind-dynamic([[:space:]]|$)' "$path"; then
+        return 0
+    fi
+
+    backup_file "$path"
+    tmp="$(mktemp "${path}.XXXXXX")"
+    awk '
+        {
+            print
+            if (!inserted && $0 ~ /^[[:space:]]*interface=[^[:space:]#]+/) {
+                print "bind-dynamic"
+                inserted = 1
+            }
+        }
+        END {
+            if (!inserted) {
+                print "bind-dynamic"
+            }
+        }
+    ' "$path" > "$tmp"
+    install -m 0644 "$tmp" "$path"
+    rm -f "$tmp"
+    CHANGED=1
+    log_change "added bind-dynamic to $path"
+}
+
+disable_bind_interfaces() {
+    local path="$1"
+    [[ -f "$path" ]] || return 0
+    if ! grep -Eq '^[[:space:]]*bind-interfaces([[:space:]]|$)' "$path"; then
+        return 0
+    fi
+
+    backup_file "$path"
+    sed -i -E \
+        's/^([[:space:]]*)bind-interfaces([[:space:]]*)$/# SyncA UTM: bind-dynamic is used so LAN bridges can appear after dnsmasq starts.\n#\1bind-interfaces\2/' \
+        "$path"
+    CHANGED=1
+    log_change "disabled bind-interfaces in $path"
+}
+
+ensure_bind_dynamic "$GENERATED_CONF"
+ensure_bind_dynamic "$FIRSTBOOT_CONF"
+disable_bind_interfaces "$MAIN_CONF"
+disable_bind_interfaces "$GENERATED_CONF"
+disable_bind_interfaces "$FIRSTBOOT_CONF"
+
+if [[ "$CHANGED" -eq 1 ]]; then
+    log_change "dnsmasq runtime settings repaired"
+fi

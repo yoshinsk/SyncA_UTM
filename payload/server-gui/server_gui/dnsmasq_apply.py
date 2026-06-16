@@ -28,6 +28,7 @@ After=network-online.target NetworkManager.service
 StartLimitIntervalSec=0
 
 [Service]
+ExecStartPre=/bin/sh -c 'test ! -x /opt/server-gui/bin/dnsmasq-runtime-guard || exec /opt/server-gui/bin/dnsmasq-runtime-guard'
 Restart=on-failure
 RestartSec=5s
 """
