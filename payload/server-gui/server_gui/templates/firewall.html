@@ -111,7 +111,7 @@
                 <!-- forward ports -->
                 <h6><i class="bi bi-arrow-right-square"></i> forward ports <small class="text-secondary">(ポート転送 / DNAT)</small></h6>
                 <div class="small text-secondary mb-2">
-                    追加時は、転送元の <code>port/proto</code> も同じzoneへ自動許可します。
+                    着信NIC/IPを空欄にした場合のみ、転送元の <code>port/proto</code> も同じzoneへ自動許可します。
                 </div>
                 <div id="z-forward-ports" class="list-group mb-2"></div>
                 <div class="row g-2 align-items-end small">
@@ -140,6 +140,16 @@
                         <button class="btn btn-primary btn-sm w-100" onclick="addForwardPort()">
                             <i class="bi bi-plus"></i> 追加
                         </button>
+                    </div>
+                </div>
+                <div class="row g-2 align-items-end small mt-1">
+                    <div class="col-sm-3">
+                        <label class="form-label mb-0">着信NIC</label>
+                        <input id="fp-interface" type="text" class="form-control form-control-sm font-monospace" placeholder="ens34 (任意)">
+                    </div>
+                    <div class="col-sm-4">
+                        <label class="form-label mb-0">着信IP</label>
+                        <input id="fp-inaddr" type="text" class="form-control form-control-sm font-monospace" placeholder="203.0.113.10 (任意)">
                     </div>
                 </div>
                 <div class="border rounded bg-light p-2 mt-3 small">
@@ -231,6 +241,16 @@
                     <div class="col-sm-8">
                         <label class="form-label small mb-1">→ toaddr</label>
                         <input id="fp-edit-toaddr" class="form-control form-control-sm font-monospace" placeholder="任意">
+                    </div>
+                </div>
+                <div class="row g-2 mt-2">
+                    <div class="col-sm-6">
+                        <label class="form-label small mb-1">着信NIC</label>
+                        <input id="fp-edit-interface" class="form-control form-control-sm font-monospace" placeholder="任意">
+                    </div>
+                    <div class="col-sm-6">
+                        <label class="form-label small mb-1">着信IP</label>
+                        <input id="fp-edit-inaddr" class="form-control form-control-sm font-monospace" placeholder="任意">
                     </div>
                 </div>
                 <div class="form-text mt-2">
@@ -398,6 +418,25 @@ function tag(text, onRemove, dragMeta = null) {
         ? ` draggable="true" ondragstart="dragFirewallItem(event,'${escapeJs(dragMeta.kind)}','${escapeJs(text)}','${escapeJs(dragMeta.originZone || '')}')"`
         : '';
     return `<span class="badge bg-primary-subtle text-primary-emphasis d-inline-flex align-items-center font-monospace fw-draggable"${drag}>${safe}${handler}</span>`;
+}
+
+function forwardPortPayload(fp) {
+    return {
+        port: fp.port || '',
+        proto: fp.proto || 'tcp',
+        toport: fp.toport || '',
+        toaddr: fp.toaddr || '',
+        interface: fp.interface || '',
+        inaddr: fp.inaddr || '',
+    };
+}
+
+function forwardPortBadges(fp) {
+    const badges = [];
+    if (fp.managed) badges.push('<span class="badge bg-secondary-subtle text-secondary-emphasis">direct</span>');
+    if (fp.interface) badges.push(`<span class="badge bg-info-subtle text-info-emphasis">NIC ${escapeHtml(fp.interface)}</span>`);
+    if (fp.inaddr) badges.push(`<span class="badge bg-info-subtle text-info-emphasis">IP ${escapeHtml(fp.inaddr)}</span>`);
+    return badges.length ? `<div class="d-flex flex-wrap gap-1 mt-1">${badges.join('')}</div>` : '';
 }
 
 async function init() {
@@ -600,9 +639,12 @@ function renderZoneDetail(info) {
         currentForwardPorts.length === 0
             ? '<div class="list-group-item text-secondary small">なし</div>'
             : currentForwardPorts.map((fp, i) => `
-                <div class="list-group-item d-flex justify-content-between align-items-center">
-                    <code class="small">${escapeHtml(fp.raw || JSON.stringify(fp))}</code>
-                    <div class="d-flex gap-1">
+                <div class="list-group-item d-flex justify-content-between align-items-start gap-2">
+                    <div>
+                        <code class="small">${escapeHtml(fp.raw || JSON.stringify(fp))}</code>
+                        ${forwardPortBadges(fp)}
+                    </div>
+                    <div class="d-flex gap-1 flex-shrink-0">
                         <button class="btn btn-sm btn-outline-primary" onclick="editForwardPortByIndex(${i})" title="編集">
                             <i class="bi bi-pencil"></i>
                         </button>
@@ -843,12 +885,19 @@ async function addForwardPort() {
     const proto  = document.getElementById('fp-proto').value;
     const toport = document.getElementById('fp-toport').value.trim();
     const toaddr = document.getElementById('fp-toaddr').value.trim();
+    const iface  = document.getElementById('fp-interface').value.trim();
+    const inaddr = document.getElementById('fp-inaddr').value.trim();
     if (!port) return toast('port は必須', true);
-    const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`, 'POST', { port, proto, toport, toaddr });
+    const res = await api.send(
+        `/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`,
+        'POST',
+        { port, proto, toport, toaddr, interface: iface, inaddr });
     if (res && res.ok) {
         document.getElementById('fp-port').value = '';
         document.getElementById('fp-toport').value = '';
         document.getElementById('fp-toaddr').value = '';
+        document.getElementById('fp-interface').value = '';
+        document.getElementById('fp-inaddr').value = '';
         toast('追加しました');
         reloadActiveZone();
     } else if (res) {
@@ -860,7 +909,7 @@ async function removeForwardPortByIndex(i) {
     if (!fp) return;
     if (!confirm('この転送ルールを削除しますか?\n' + fp.raw)) return;
     const res = await api.send(`/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`, 'DELETE',
-        { port: fp.port, proto: fp.proto, toport: fp.toport || '', toaddr: fp.toaddr || '' });
+        forwardPortPayload(fp));
     if (res && res.ok) { toast('削除しました'); reloadActiveZone(); }
 }
 
@@ -945,6 +994,8 @@ function editForwardPortByIndex(i) {
     document.getElementById('fp-edit-proto').value = fp.proto || 'tcp';
     document.getElementById('fp-edit-toport').value = fp.toport || '';
     document.getElementById('fp-edit-toaddr').value = fp.toaddr || '';
+    document.getElementById('fp-edit-interface').value = fp.interface || '';
+    document.getElementById('fp-edit-inaddr').value = fp.inaddr || '';
     fpEditModal.show();
 }
 
@@ -955,6 +1006,8 @@ async function saveForwardPortEdit() {
         proto:  document.getElementById('fp-edit-proto').value,
         toport: document.getElementById('fp-edit-toport').value.trim(),
         toaddr: document.getElementById('fp-edit-toaddr').value.trim(),
+        interface: document.getElementById('fp-edit-interface').value.trim(),
+        inaddr: document.getElementById('fp-edit-inaddr').value.trim(),
     };
     if (!newRule.port) return toast('port は必須', true);
     if (!newRule.toport && !newRule.toaddr) return toast('toport または toaddr を入力', true);
@@ -964,7 +1017,9 @@ async function saveForwardPortEdit() {
         newRule.port === (editingFpOld.port || '') &&
         newRule.proto === (editingFpOld.proto || '') &&
         newRule.toport === (editingFpOld.toport || '') &&
-        newRule.toaddr === (editingFpOld.toaddr || '')
+        newRule.toaddr === (editingFpOld.toaddr || '') &&
+        newRule.interface === (editingFpOld.interface || '') &&
+        newRule.inaddr === (editingFpOld.inaddr || '')
     );
     if (sameAsOld) {
         toast('変更なし');
@@ -975,8 +1030,7 @@ async function saveForwardPortEdit() {
     const delRes = await api.send(
         `/firewall/api/zones/${encodeURIComponent(activeZone)}/forward-ports`,
         'DELETE',
-        { port: editingFpOld.port, proto: editingFpOld.proto,
-          toport: editingFpOld.toport || '', toaddr: editingFpOld.toaddr || '' });
+        forwardPortPayload(editingFpOld));
     if (!delRes || !delRes.ok) {
         if (delRes) toast('編集前ルールの削除に失敗: ' + (delRes.error || '不明'), true);
         return;
