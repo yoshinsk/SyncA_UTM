@@ -47,7 +47,7 @@ from typing import Optional
 
 from flask import Blueprint, Flask, current_app, jsonify, render_template, request
 
-from ..auth import csrf_protect, login_required
+from ..auth import csrf_protect, login_required, verify_admin_password
 from ..config_store import ConfigStore
 from ..shell import run, sudo_run
 from ..validators import ValidationError, validate_ipv4, validate_ipv4_cidr
@@ -124,6 +124,17 @@ def _delete_meta(pubkey: str) -> None:
         data["peers"].pop(pubkey, None)
 
 
+def _delete_many_meta(pubkeys: list[str]) -> None:
+    """Remove multiple peer metadata entries in one config-store transaction."""
+    target = set(pubkeys)
+    if not target:
+        return
+    with _store().transaction(MODULE_NAME, _default_data()) as data:
+        data.setdefault("peers", {})
+        for pubkey in target:
+            data["peers"].pop(pubkey, None)
+
+
 def _rename_pubkey_meta(old_pubkey: str, new_pubkey: str, new_meta: dict) -> None:
     """Used by regenerate-keys: move metadata to a new pubkey key."""
     with _store().transaction(MODULE_NAME, _default_data()) as data:
@@ -146,6 +157,23 @@ def _pubkey_from_route(pubkey: str | None, pubkey_token: str | None) -> str | No
     if not re.match(r"^[A-Za-z0-9+/]{43}=$", value):
         return None
     return value
+
+
+def _normalize_pubkey_list(value: object) -> list[str]:
+    """Return a de-duplicated list of WireGuard public keys from JSON input."""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        pubkey = str(item or "").strip()
+        if not re.match(r"^[A-Za-z0-9+/]{43}=$", pubkey):
+            continue
+        if pubkey in seen:
+            continue
+        seen.add(pubkey)
+        out.append(pubkey)
+    return out
 
 
 # ---- views --------------------------------------------------------------
@@ -709,6 +737,63 @@ def bulk_add_peers(iface: str):
         "bundle_base64": base64.b64encode(bundle).decode("ascii"),
         "available_peer_count": max(available_count - count, 0),
     }), 201
+
+
+@bp.route("/api/interfaces/<iface>/peers/bulk-delete", methods=["POST"])
+@login_required
+@csrf_protect
+def bulk_delete_peers(iface: str):
+    if not INTERFACE_RE.match(iface):
+        return jsonify({"error": "invalid interface name"}), 400
+    path = WG_DIR / f"{iface}.conf"
+    if not path.exists():
+        return jsonify({"error": "interface not found"}), 404
+
+    payload = request.get_json(force=True, silent=True) or {}
+    if not verify_admin_password(str(payload.get("password") or "")):
+        return jsonify({"error": "?????????????????"}), 401
+
+    requested = _normalize_pubkey_list(payload.get("public_keys"))
+    if not requested:
+        return jsonify({"error": "????????????????"}), 400
+    if len(requested) > 512:
+        return jsonify({"error": "?????512????????????"}), 400
+
+    parsed = _parse_wg_conf(path)
+    data = _load_data()
+    conf_keys = {p.get("public_key") for p in parsed["peers"] if p.get("public_key")}
+    meta_keys = {
+        pubkey
+        for pubkey, meta in data["peers"].items()
+        if isinstance(meta, dict) and meta.get("interface") == iface
+    }
+    eligible = conf_keys | meta_keys
+    targets = [pubkey for pubkey in requested if pubkey in eligible]
+    if not targets:
+        return jsonify({"error": "???????????????"}), 404
+
+    target_set = set(targets)
+    before = len(parsed["peers"])
+    parsed["peers"] = [p for p in parsed["peers"] if p.get("public_key") not in target_set]
+    conf_deleted = before - len(parsed["peers"])
+    metadata_deleted = sum(1 for pubkey in targets if pubkey in data["peers"])
+
+    try:
+        if conf_deleted:
+            _write_conf(iface, parsed)
+            _sync_interface(iface)
+            _sync_firewalld_for_interface(iface, parsed)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    _delete_many_meta(targets)
+    return jsonify({
+        "ok": True,
+        "deleted": len(targets),
+        "conf_deleted": conf_deleted,
+        "metadata_deleted": metadata_deleted,
+        "not_found": len(requested) - len(targets),
+    })
 
 
 @bp.route("/api/interfaces/<iface>/peers/key/<pubkey_token>", methods=["PUT"])
@@ -1520,6 +1605,11 @@ def _client_filename(meta: dict) -> str:
     return re.sub(r"[^A-Za-z0-9._\-]", "_", name) + ".conf"
 
 
+def _client_qr_filename(config_filename: str) -> str:
+    stem = config_filename[:-5] if config_filename.lower().endswith(".conf") else config_filename
+    return f"{stem}.qr.svg"
+
+
 def _parse_display_names(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(v).strip()[:128] for v in value]
@@ -1532,14 +1622,17 @@ def _build_bulk_peer_zip(iface: str, created: list[tuple[str, dict, str, str]]) 
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         manifest_buf = io.StringIO()
         writer = csv.writer(manifest_buf)
-        writer.writerow(["account_name", "display_name", "peer_address", "filename", "public_key"])
+        writer.writerow(["account_name", "display_name", "peer_address", "filename", "qr_filename", "public_key"])
         for pubkey, meta, client_conf, filename in created:
+            qr_filename = _client_qr_filename(filename)
             zf.writestr(filename, client_conf)
+            zf.writestr(qr_filename, _generate_qr_svg(client_conf))
             writer.writerow([
                 meta.get("account_name") or meta.get("comment") or "",
                 meta.get("display_name") or "",
                 meta.get("peer_address") or "",
                 filename,
+                qr_filename,
                 pubkey,
             ])
         zf.writestr(f"{iface}-accounts.csv", manifest_buf.getvalue())

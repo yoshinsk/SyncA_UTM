@@ -62,7 +62,7 @@ INSTALL_DIR = Path("/opt/server-gui")
 SERVER_GUI_PKG = INSTALL_DIR / "server_gui"
 SERVER_GUI_BIN = INSTALL_DIR / "bin"
 DEFAULT_GITHUB_URL = "https://github.com/yoshinsk/SyncA_UTM"
-DEFAULT_GITHUB_BRANCH = os.environ.get("SYNCA_UPDATE_BRANCH", "main").strip() or "main"
+ALMALINUX8_UPDATE_BRANCH = "codex/almalinux8-iso"
 
 # Match the GitHub URL formats we accept. Allow optional .git suffix and
 # optional trailing slash. https only.
@@ -80,6 +80,35 @@ _COMMAND_OUTPUT_MAX = 128 * 1024
 _COMMAND_AUDIT_LOG = Path("/var/log/server-gui/admin-command.log")
 
 
+def _os_major_version() -> str:
+    try:
+        text = Path("/etc/os-release").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.startswith("VERSION_ID="):
+            return line.split("=", 1)[1].strip().strip('"').split(".", 1)[0]
+    return ""
+
+
+def _default_update_branch() -> str:
+    branch = os.environ.get("SYNCA_UPDATE_BRANCH", "").strip()
+    if branch:
+        return branch
+    return ALMALINUX8_UPDATE_BRANCH if _os_major_version() == "8" else "main"
+
+
+def _normalize_update_branch(branch: object) -> str:
+    """Keep GitHub self-update pointed at the branch matching the OS family."""
+    value = str(branch or "").strip() or _default_update_branch()
+    os_major = _os_major_version()
+    if os_major == "8" and value == "main":
+        return ALMALINUX8_UPDATE_BRANCH
+    if os_major and os_major != "8" and value in ("codex/almalinux8", ALMALINUX8_UPDATE_BRANCH):
+        return "main"
+    return value
+
+
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
 
@@ -91,7 +120,7 @@ def _store() -> ConfigStore:
 def _default() -> dict:
     return {
         "github_url": DEFAULT_GITHUB_URL,
-        "branch": DEFAULT_GITHUB_BRANCH,
+        "branch": _default_update_branch(),
         "installed_sha": "",
         "last_check_at": None,
         "latest_sha": "",
@@ -122,7 +151,7 @@ def get_settings():
     data = _store().load(MODULE_NAME, _default())
     return jsonify({
         "github_url": data.get("github_url", ""),
-        "branch": data.get("branch", "main"),
+        "branch": _normalize_update_branch(data.get("branch")),
         "installed_sha": data.get("installed_sha", ""),
         "last_check_at": data.get("last_check_at"),
         "latest_sha": data.get("latest_sha", ""),
@@ -268,7 +297,7 @@ def change_password():
 def save_github():
     payload = request.get_json(force=True, silent=True) or {}
     url = (payload.get("github_url") or "").strip()
-    branch = (payload.get("branch") or "main").strip() or "main"
+    branch = _normalize_update_branch(payload.get("branch"))
 
     if url and not _GITHUB_URL_RE.match(url):
         return jsonify({
@@ -315,7 +344,7 @@ def _run_update_check(config_dir: Optional[Path] = None) -> dict:
     store = ConfigStore(config_dir or current_app.config["CONFIG_DIR"])
     data = store.load(MODULE_NAME, _default())
     url = data.get("github_url", "").strip()
-    branch = data.get("branch", "main").strip() or "main"
+    branch = _normalize_update_branch(data.get("branch"))
     if not url:
         raise RuntimeError("GitHub URL が未設定です")
     m = _GITHUB_URL_RE.match(url)
@@ -344,6 +373,7 @@ def _run_update_check(config_dir: Optional[Path] = None) -> dict:
     msg = (commit.get("commit") or {}).get("message", "").splitlines()[0] if commit.get("commit") else ""
 
     with store.transaction(MODULE_NAME, _default()) as data2:
+        data2["branch"] = branch
         # Unknown local builds must stay unknown. Fresh ISO installs can carry
         # stale bundled files, so treating an empty installed_sha as "latest"
         # hides the only safe remediation path: applying the GitHub update.
@@ -358,6 +388,7 @@ def _run_update_check(config_dir: Optional[Path] = None) -> dict:
 
     return {
         "ok": True,
+        "branch": branch,
         "installed_sha": data2["installed_sha"],
         "latest_sha": latest_sha,
         "latest_message": msg,
@@ -374,7 +405,7 @@ def _run_update_check(config_dir: Optional[Path] = None) -> dict:
 def apply_update():
     settings = _store().load(MODULE_NAME, _default())
     url = settings.get("github_url", "").strip()
-    branch = settings.get("branch", "main").strip() or "main"
+    branch = _normalize_update_branch(settings.get("branch"))
     latest_sha = settings.get("latest_sha", "")
     if not url:
         return jsonify({"error": "GitHub URL が未設定です"}), 400
@@ -456,6 +487,7 @@ def apply_update():
 
         # Record success + new installed_sha
         with _store().transaction(MODULE_NAME, _default()) as data:
+            data["branch"] = branch
             data["installed_sha"] = latest_sha or data.get("installed_sha", "")
             data["update_available"] = False
             data["last_apply_at"] = _now_iso()
