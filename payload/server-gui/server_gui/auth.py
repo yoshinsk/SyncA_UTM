@@ -47,6 +47,16 @@ def set_password(username: str, password: str, config_dir: Path) -> None:
     p.chmod(0o600)
 
 
+def verify_admin_password(password: str) -> bool:
+    """Verify the current GUI administrator password for sensitive actions."""
+    if not password:
+        return False
+    creds = _load_credentials()
+    if creds is None:
+        return False
+    return check_password_hash(creds.get("password_hash", ""), password)
+
+
 def _record_failure(ip: str) -> bool:
     now = time.time()
     bucket = _failures[ip]

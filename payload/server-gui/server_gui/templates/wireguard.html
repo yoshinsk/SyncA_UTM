@@ -98,6 +98,14 @@
             <strong>ピア</strong>
         </div>
         <div class="d-flex gap-2">
+            <button id="bulk-created-download" class="btn btn-outline-primary btn-sm d-none"
+                    onclick="downloadLastBulkBundle()" title="直近の一括発行ZIPをダウンロード">
+                <i class="bi bi-download"></i> 一括DL
+            </button>
+            <button id="bulk-delete-btn" class="btn btn-outline-danger btn-sm" onclick="openBulkDeleteModal()" disabled>
+                <i class="bi bi-trash3"></i> 一括削除
+                <span id="bulk-delete-count" class="badge text-bg-danger ms-1 d-none">0</span>
+            </button>
             <button class="btn btn-outline-secondary btn-sm" onclick="downloadAllClientConfigs()">
                 <i class="bi bi-download"></i> 全設定ZIP
             </button>
@@ -114,6 +122,10 @@
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light">
                     <tr>
+                        <th style="width:44px" class="text-center">
+                            <input id="peer-select-all" class="form-check-input" type="checkbox"
+                                   onchange="toggleAllPeerSelection(this.checked)" title="全選択">
+                        </th>
                         <th>アカウント / 別名</th>
                         <th>IP アドレス</th>
                         <th>Extra Allowed IPs</th>
@@ -393,6 +405,32 @@
     </div>
 </div>
 
+<!-- Bulk peer delete modal -->
+<div class="modal fade" id="bulk-delete-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">WireGuardアカウント一括削除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-danger small">
+                    選択した <strong id="bd-count">0</strong> 件のWireGuardアカウントを削除します。
+                    削除後は対象クライアントから接続できなくなります。
+                </div>
+                <label class="form-label">管理者パスワード <span class="text-danger">*</span></label>
+                <input id="bd-password" type="password" class="form-control" autocomplete="current-password">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                <button id="bd-submit" class="btn btn-danger" onclick="submitBulkDelete()">
+                    <i class="bi bi-trash3"></i> 削除
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Peer display name modal -->
 <div class="modal fade" id="alias-modal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -505,6 +543,7 @@ let currentIface = null;
 let currentData = null;
 let peerModal = null;
 let bulkPeerModal = null;
+let bulkDeleteModal = null;
 let configModal = null;
 let adoptModal = null;
 let ifaceModal = null;
@@ -514,9 +553,12 @@ let aliasModal = null;
 let editingPubkey = null;   // null = adding
 let adoptingPubkey = null;
 let aliasPubkey = null;
+let selectedPeerKeys = new Set();
 let lastConfigFilename = 'wg-client.conf';
 let lastBulkBundleBase64 = '';
 let lastBulkBundleFilename = 'wireguard-accounts.zip';
+let bulkPeerSubmitting = false;
+let bulkDeleteSubmitting = false;
 
 // Interface modal state: 'create' or 'edit'
 let ifaceModalMode = 'create';
@@ -524,6 +566,7 @@ let ifaceModalMode = 'create';
 document.addEventListener('DOMContentLoaded', () => {
     peerModal = new bootstrap.Modal(document.getElementById('peer-modal'));
     bulkPeerModal = new bootstrap.Modal(document.getElementById('bulk-peer-modal'));
+    bulkDeleteModal = new bootstrap.Modal(document.getElementById('bulk-delete-modal'));
     configModal = new bootstrap.Modal(document.getElementById('config-modal'));
     adoptModal = new bootstrap.Modal(document.getElementById('adopt-modal'));
     ifaceModal = new bootstrap.Modal(document.getElementById('iface-modal'));
@@ -563,7 +606,9 @@ function renderEmpty() {
     document.getElementById('iface-info').innerHTML =
         '<tr><td class="text-secondary py-3 text-center">WireGuard 設定ファイル (/etc/wireguard/*.conf) が見つかりません。「+」から新規作成してください。</td></tr>';
     document.getElementById('peer-tbody').innerHTML =
-        '<tr><td colspan="6" class="text-center text-secondary py-4">—</td></tr>';
+        '<tr><td colspan="7" class="text-center text-secondary py-4">-</td></tr>';
+    selectedPeerKeys.clear();
+    updateBulkDeleteControls();
 }
 
 /* ---- interface create / edit modal ---- */
@@ -790,9 +835,13 @@ function renderPeers(data) {
     const peers = data.peers || [];
     const tbody = document.getElementById('peer-tbody');
     if (peers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-4">ピア未登録</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-secondary py-4">ピア未登録</td></tr>';
+        selectedPeerKeys.clear();
+        updateBulkDeleteControls();
         return;
     }
+    const visibleKeys = new Set(peers.map(p => p.public_key).filter(Boolean));
+    selectedPeerKeys = new Set([...selectedPeerKeys].filter(pubkey => visibleKeys.has(pubkey)));
     tbody.innerHTML = peers.map(p => {
         const accountName = p.account_name || p.comment || '(no name)';
         const displayName = p.display_name || '';
@@ -832,8 +881,14 @@ function renderPeers(data) {
                </div>`;
         const extraStr = (p.extra_allowed_ips || []).length
             ? p.extra_allowed_ips.map(escapeHtml).join('<br>')
-            : '<span class="text-secondary">—</span>';
+            : '<span class="text-secondary">-</span>';
+        const selected = selectedPeerKeys.has(p.public_key) ? 'checked' : '';
         return `<tr>
+            <td class="text-center">
+                <input class="form-check-input peer-select" type="checkbox" ${selected}
+                       onchange="togglePeerSelection('${escapeJs(p.public_key)}', this.checked)"
+                       title="一括削除対象に選択">
+            </td>
             <td>
                 <div class="fw-semibold">${recent} ${escapeHtml(accountName)}${stateBadge}${managedBadge}</div>
                 ${displayName ? `<div class="small text-secondary">${escapeHtml(displayName)}</div>` : ''}
@@ -857,6 +912,41 @@ function renderPeers(data) {
             </td>
         </tr>`;
     }).join('');
+    updateBulkDeleteControls();
+}
+
+function togglePeerSelection(pubkey, checked) {
+    if (checked) selectedPeerKeys.add(pubkey);
+    else selectedPeerKeys.delete(pubkey);
+    updateBulkDeleteControls();
+}
+
+function toggleAllPeerSelection(checked) {
+    const peers = (currentData && currentData.peers) || [];
+    if (checked) {
+        peers.forEach(p => { if (p.public_key) selectedPeerKeys.add(p.public_key); });
+    } else {
+        selectedPeerKeys.clear();
+    }
+    document.querySelectorAll('.peer-select').forEach(cb => { cb.checked = checked; });
+    updateBulkDeleteControls();
+}
+
+function updateBulkDeleteControls() {
+    const count = selectedPeerKeys.size;
+    const btn = document.getElementById('bulk-delete-btn');
+    const badge = document.getElementById('bulk-delete-count');
+    const selectAll = document.getElementById('peer-select-all');
+    if (btn) btn.disabled = count === 0;
+    if (badge) {
+        badge.textContent = String(count);
+        badge.classList.toggle('d-none', count === 0);
+    }
+    if (selectAll) {
+        const peerCount = ((currentData && currentData.peers) || []).length;
+        selectAll.checked = peerCount > 0 && count === peerCount;
+        selectAll.indeterminate = count > 0 && count < peerCount;
+    }
 }
 
 function formatBytes(n) {
@@ -895,11 +985,11 @@ function openBulkPeerModal() {
     document.getElementById('bf-keepalive').value = 25;
     document.getElementById('bf-psk').checked = false;
     document.getElementById('bf-download').classList.add('d-none');
-    lastBulkBundleBase64 = '';
     bulkPeerModal.show();
 }
 
 async function submitBulkPeerForm() {
+    if (bulkPeerSubmitting) return;
     const payload = {
         count: Number(document.getElementById('bf-count').value || 0),
         name_prefix: document.getElementById('bf-prefix').value.trim() || 'User',
@@ -918,22 +1008,35 @@ async function submitBulkPeerForm() {
     if (!payload.count || payload.count < 1) return toast('作成数を指定してください', true);
     if (payload.count > available) return toast(`作成数が空きIP数 (${available}) を超えています`, true);
 
-    const res = await api.send(
-        `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/bulk`,
-        'POST',
-        payload);
-    if (!res) return;
-    lastBulkBundleBase64 = res.bundle_base64 || '';
-    lastBulkBundleFilename = res.bundle_filename || 'wireguard-accounts.zip';
-    document.getElementById('bf-download').classList.toggle('d-none', !lastBulkBundleBase64);
-    toast(`${(res.created || []).length}件を発行しました`);
-    refresh();
-    if (lastBulkBundleBase64) downloadLastBulkBundle();
+    const btn = document.getElementById('bf-submit');
+    bulkPeerSubmitting = true;
+    btn.disabled = true;
+    try {
+        const res = await api.send(
+            `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/bulk`,
+            'POST',
+            payload);
+        if (!res) return;
+        setLastBulkBundle(res.bundle_base64 || '', res.bundle_filename || 'wireguard-accounts.zip');
+        bulkPeerModal.hide();
+        toast(`${(res.created || []).length}件を発行しました。一括DLボタンからZIPを取得できます`);
+        refresh();
+    } finally {
+        bulkPeerSubmitting = false;
+        btn.disabled = false;
+    }
 }
 
 function downloadLastBulkBundle() {
     if (!lastBulkBundleBase64) return toast('ダウンロード対象がありません', true);
     downloadBase64Zip(lastBulkBundleBase64, lastBulkBundleFilename || 'wireguard-accounts.zip');
+}
+
+function setLastBulkBundle(base64Text, filename) {
+    lastBulkBundleBase64 = base64Text || '';
+    lastBulkBundleFilename = filename || 'wireguard-accounts.zip';
+    const btn = document.getElementById('bulk-created-download');
+    if (btn) btn.classList.toggle('d-none', !lastBulkBundleBase64);
 }
 
 async function downloadAllClientConfigs() {
@@ -1170,6 +1273,42 @@ async function deletePeer(pubkey) {
     if (!confirm('このピアを削除しますか?\n' + pubkey)) return;
     const res = await api.send(peerKeyUrl(pubkey), 'DELETE');
     if (res && res.ok) { toast('削除しました'); refresh(); }
+}
+
+function openBulkDeleteModal() {
+    const count = selectedPeerKeys.size;
+    if (!currentIface) return toast('インターフェースを選択してください', true);
+    if (!count) return toast('削除対象のピアを選択してください', true);
+    document.getElementById('bd-count').textContent = String(count);
+    document.getElementById('bd-password').value = '';
+    bulkDeleteModal.show();
+    setTimeout(() => document.getElementById('bd-password').focus(), 150);
+}
+
+async function submitBulkDelete() {
+    if (bulkDeleteSubmitting) return;
+    const password = document.getElementById('bd-password').value;
+    if (!password) return toast('管理者パスワードを入力してください', true);
+    const keys = [...selectedPeerKeys];
+    if (keys.length === 0) return toast('削除対象のピアを選択してください', true);
+
+    const btn = document.getElementById('bd-submit');
+    bulkDeleteSubmitting = true;
+    btn.disabled = true;
+    try {
+        const res = await api.send(
+            `/wg/api/interfaces/${encodeURIComponent(currentIface)}/peers/bulk-delete`,
+            'POST',
+            { public_keys: keys, password });
+        if (!res) return;
+        selectedPeerKeys.clear();
+        bulkDeleteModal.hide();
+        toast(`${res.deleted || 0}件を削除しました`);
+        refresh();
+    } finally {
+        bulkDeleteSubmitting = false;
+        btn.disabled = false;
+    }
 }
 
 async function upIface() {
