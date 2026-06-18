@@ -1245,7 +1245,7 @@ def _list_connections() -> list[dict]:
 
 def _describe_connection(name: str) -> dict:
     """Return summarized ipv4 settings + a curated subset of fields."""
-    res = run(["nmcli", "-t", "connection", "show", name])
+    res = run(["nmcli", "-t", "-e", "no", "connection", "show", name])
     if not res.ok:
         return {"error": "connection not found", "stderr": res.stderr.strip()}
     raw: dict[str, str] = {}
@@ -1330,26 +1330,42 @@ def _parse_nm_routes(value: str) -> list[dict]:
     if not s or s == "--":
         return []
     out: list[dict] = []
-    for chunk in s.split(";"):
-        chunk = chunk.strip()
-        m = re.match(r"^\{\s*(.+?)\s*\}$", chunk)
-        if not m:
+    chunks = re.findall(r"\{\s*(.+?)\s*\}", s)
+    if chunks:
+        for chunk in chunks:
+            route: dict = {"dest": "", "gateway": "", "metric": None}
+            for pair in chunk.split(","):
+                k, _, v = pair.partition("=")
+                k = k.strip()
+                v = v.strip()
+                if k == "ip":
+                    route["dest"] = v
+                elif k == "nh":
+                    # NM stores no-gateway link-scope routes as "0.0.0.0"; hide.
+                    route["gateway"] = "" if v == "0.0.0.0" else v
+                elif k == "mt":
+                    try:
+                        route["metric"] = int(v)
+                    except ValueError:
+                        pass
+            if route["dest"]:
+                out.append(route)
+        return out
+
+    # Older nmcli builds may show routes as `dest gateway metric` entries.
+    for chunk in re.split(r"\s*[,;]\s*", s.replace("\\;", ";")):
+        parts = chunk.split()
+        if not parts:
             continue
         route: dict = {"dest": "", "gateway": "", "metric": None}
-        for pair in m.group(1).split(","):
-            k, _, v = pair.partition("=")
-            k = k.strip()
-            v = v.strip()
-            if k == "ip":
-                route["dest"] = v
-            elif k == "nh":
-                # NM stores no-gateway link-scope routes as "0.0.0.0"; hide.
-                route["gateway"] = "" if v == "0.0.0.0" else v
-            elif k == "mt":
-                try:
-                    route["metric"] = int(v)
-                except ValueError:
-                    pass
+        route["dest"] = parts[0]
+        if len(parts) > 1:
+            route["gateway"] = "" if parts[1] == "0.0.0.0" else parts[1]
+        if len(parts) > 2:
+            try:
+                route["metric"] = int(parts[2])
+            except ValueError:
+                pass
         if route["dest"]:
             out.append(route)
     return out
