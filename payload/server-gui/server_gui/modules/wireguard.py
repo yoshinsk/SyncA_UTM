@@ -1607,7 +1607,7 @@ def _client_filename(meta: dict) -> str:
 
 def _client_qr_filename(config_filename: str) -> str:
     stem = config_filename[:-5] if config_filename.lower().endswith(".conf") else config_filename
-    return f"{stem}.qr.svg"
+    return f"{stem}.qr.png"
 
 
 def _parse_display_names(value: object) -> list[str]:
@@ -1626,7 +1626,7 @@ def _build_bulk_peer_zip(iface: str, created: list[tuple[str, dict, str, str]]) 
         for pubkey, meta, client_conf, filename in created:
             qr_filename = _client_qr_filename(filename)
             zf.writestr(filename, client_conf)
-            zf.writestr(qr_filename, _generate_qr_svg(client_conf))
+            zf.writestr(qr_filename, _generate_qr_png(client_conf))
             writer.writerow([
                 meta.get("account_name") or meta.get("comment") or "",
                 meta.get("display_name") or "",
@@ -2266,6 +2266,28 @@ def _generate_qr_svg(text: str) -> str:
         return _normalize_inline_svg(res.stdout)
     logger.warning("WireGuard QR generation failed: %s", (res.stderr or res.stdout).strip())
     return ""
+
+
+def _generate_qr_png(text: str) -> bytes:
+    """Generate QR PNG bytes for ZIP downloads."""
+    if not text:
+        return b""
+    try:
+        import qrcode
+
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=2,
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+        image = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        logger.warning("WireGuard QR PNG generation failed: %s", exc)
+        return b""
 
 
 def _normalize_inline_svg(svg: str) -> str:
