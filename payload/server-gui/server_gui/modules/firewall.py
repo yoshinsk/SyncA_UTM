@@ -37,9 +37,20 @@ bp = Blueprint("firewall", __name__, url_prefix="/firewall")
 PORT_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?/(tcp|udp|sctp|dccp)$")
 PORT_RANGE_RE = re.compile(r"^\d{1,5}(?:-\d{1,5})?$")
 FORWARD_PROTO_RE = re.compile(r"^(gre|esp|ah)$")
+FORWARD_PORT_COMMENT_RE = re.compile(
+    r"synca-forward-port:"
+    r"([A-Za-z0-9_-]{1,63}):"
+    r"(tcp|udp|sctp|dccp):"
+    r"(\d{1,5}(?:-\d{1,5})?):"
+    r"(\d{1,5}(?:-\d{1,5})?|_):"
+    r"(\d{1,3}(?:\.\d{1,3}){3}|_):"
+    r"([A-Za-z0-9_.+-]{1,64}|_):"
+    r"(\d{1,3}(?:\.\d{1,3}){3}|_)"
+)
 PROTOCOL_FORWARD_COMMENT_RE = re.compile(
     r"synca-protocol-forward:([A-Za-z0-9_-]{1,63}):(gre|esp|ah):(\d{1,3}(?:\.\d{1,3}){3})"
 )
+INTERFACE_SELECTOR_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 SERVICE_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,63}$")
 SOURCE_RE = re.compile(
     r"^(ipset:[a-zA-Z0-9_\-]+|"
@@ -150,37 +161,88 @@ def manage_rich_rule(zone: str):
 def manage_forward_port(zone: str):
     """Add or remove a port-forward.
 
-    Body:  {"port": "8080", "proto": "tcp", "toport": "80", "toaddr": "1.2.3.4"}
+    Body:  {"port": "8080", "proto": "tcp", "toport": "80", "toaddr": "1.2.3.4",
+            "interface": "ens34", "inaddr": "203.0.113.10"}
     Either 'toport' or 'toaddr' (or both) must be provided.
+    If 'interface' or 'inaddr' is provided, SyncA uses managed direct rules
+    because firewalld's forward-port primitive cannot limit the incoming side.
     """
     payload = request.get_json(force=True, silent=True) or {}
+    rule, error = _normalize_forward_port_payload(payload)
+    if error:
+        return jsonify({"error": error}), 400
+
+    add = request.method == "POST"
+    if rule["interface"] or rule["inaddr"]:
+        result = _apply_scoped_forward_port_change(zone, rule, add)
+    else:
+        spec = _forward_port_spec(rule)
+        result = _apply_forward_port_change(zone, spec, rule["port"], rule["proto"], add)
+    return jsonify(result), (200 if result.get("ok") else 500)
+
+
+def _normalize_forward_port_payload(payload: dict) -> tuple[dict, str | None]:
     port = str(payload.get("port", "")).strip()
     proto = str(payload.get("proto", "")).strip().lower()
     toport = str(payload.get("toport", "")).strip()
     toaddr = str(payload.get("toaddr", "")).strip()
+    interface = str(payload.get("interface", "") or payload.get("iface", "")).strip()
+    inaddr = str(payload.get("inaddr", "") or payload.get("incoming_addr", "")).strip()
 
-    if not PORT_RANGE_RE.match(port):
-        return jsonify({"error": "invalid port (e.g. 80 or 8000-8100)"}), 400
+    error = _validate_forward_port_fields(port, proto, toport, toaddr, interface, inaddr)
+    if error:
+        return {}, error
+
+    return {
+        "port": port,
+        "proto": proto,
+        "toport": toport,
+        "toaddr": toaddr,
+        "interface": interface,
+        "inaddr": inaddr,
+    }, None
+
+
+def _validate_forward_port_fields(
+    port: str,
+    proto: str,
+    toport: str,
+    toaddr: str,
+    interface: str,
+    inaddr: str,
+) -> str | None:
+    if not _valid_port_range(port):
+        return "invalid port (e.g. 80 or 8000-8100)"
     if proto not in ("tcp", "udp", "sctp", "dccp"):
-        return jsonify({"error": "proto must be one of: tcp, udp, sctp, dccp"}), 400
+        return "proto must be one of: tcp, udp, sctp, dccp"
     if not toport and not toaddr:
-        return jsonify({"error": "toport or toaddr must be specified"}), 400
-    if toport and not PORT_RANGE_RE.match(toport):
-        return jsonify({"error": "invalid toport"}), 400
+        return "toport or toaddr must be specified"
+    if toport and not _valid_port_range(toport):
+        return "invalid toport"
     if toaddr:
         try:
             validate_ipv4(toaddr)
         except ValidationError as e:
-            return jsonify({"error": str(e)}), 400
+            return str(e)
+    if inaddr:
+        try:
+            validate_ipv4(inaddr)
+        except ValidationError as e:
+            return "invalid incoming IP address: " + str(e)
+    if interface and not INTERFACE_SELECTOR_RE.match(interface):
+        return "invalid incoming interface"
+    if (interface or inaddr) and not toaddr:
+        return "toaddr is required when incoming IP or interface is specified"
+    return None
 
-    spec = f"port={port}:proto={proto}"
-    if toport:
-        spec += f":toport={toport}"
-    if toaddr:
-        spec += f":toaddr={toaddr}"
 
-    result = _apply_forward_port_change(zone, spec, port, proto, request.method == "POST")
-    return jsonify(result), (200 if result.get("ok") else 500)
+def _valid_port_range(value: str) -> bool:
+    if not PORT_RANGE_RE.match(value):
+        return False
+    start_text, end_text = value.split("-", 1) if "-" in value else (value, value)
+    start = int(start_text)
+    end = int(end_text)
+    return 1 <= start <= end <= 65535
 
 
 @bp.route("/api/zones/<zone>/protocol-forwards", methods=["GET", "POST", "DELETE"])
@@ -422,12 +484,146 @@ def _apply_forward_port_change(zone: str, spec: str, port: str, proto: str, add:
     return {"ok": not errors, "changed": changed, "errors": errors}
 
 
+def _apply_scoped_forward_port_change(zone: str, rule: dict, add: bool) -> dict:
+    """Apply an incoming-IP/NIC scoped port-forward as managed direct rules."""
+    try:
+        zone = validate_identifier(zone)
+    except ValidationError:
+        return {"ok": False, "error": "invalid zone name"}
+
+    errors: list[str] = []
+    changed: list[str] = []
+    direct_rules = _scoped_forward_port_rules(zone, rule)
+    existing_direct = _direct_rule_lines(permanent=True)
+
+    if add:
+        for direct_rule in direct_rules:
+            added, error = _ensure_direct_rule(direct_rule, existing_direct)
+            if error:
+                errors.append(error)
+            elif added:
+                changed.append("direct " + _direct_rule_raw(direct_rule))
+    else:
+        for direct_rule in direct_rules:
+            removed, error = _remove_direct_rule(direct_rule, existing_direct)
+            if error:
+                errors.append(error)
+            elif removed:
+                changed.append("removed direct " + _direct_rule_raw(direct_rule))
+
+    reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+    if not reload_ok:
+        errors.append(reload_output)
+    return {"ok": not errors, "changed": changed, "errors": errors}
+
+
 def _zone_has_forward_port(zone: str, port: str, proto: str) -> bool:
     info = _describe_zone(zone, permanent=True)
     for item in info.get("forward_ports", []):
+        if item.get("managed"):
+            continue
         if item.get("port") == port and item.get("proto") == proto:
             return True
     return False
+
+
+def _scoped_forward_port_rules(zone: str, rule: dict) -> list[dict]:
+    comment = _forward_port_comment(zone, rule)
+    nat_parts: list[str] = []
+    forward_parts: list[str] = []
+    if rule.get("interface"):
+        nat_parts.extend(["-i", rule["interface"]])
+        forward_parts.extend(["-i", rule["interface"]])
+    if rule.get("inaddr"):
+        nat_parts.extend(["-d", rule["inaddr"]])
+
+    original_port = _iptables_port_match(rule["port"])
+    forward_port = _iptables_port_match(rule.get("toport") or rule["port"])
+    nat_prefix = (" ".join(nat_parts) + " ") if nat_parts else ""
+    forward_prefix = (" ".join(forward_parts) + " ") if forward_parts else ""
+    target = rule["toaddr"]
+    if rule.get("toport"):
+        target += ":" + rule["toport"]
+
+    return _dedupe_direct_rules([
+        _direct_rule(
+            "ipv4", "nat", "PREROUTING", 0,
+            f"{nat_prefix}-p {rule['proto']} --dport {original_port} "
+            f"-m comment --comment {comment} -j DNAT --to-destination {target}",
+        ),
+        _direct_rule(
+            "ipv4", "filter", "FORWARD", 0,
+            f"{forward_prefix}-p {rule['proto']} -d {rule['toaddr']} --dport {forward_port} "
+            f"-m comment --comment {comment} -j ACCEPT",
+        ),
+    ])
+
+
+def _forward_port_comment(zone: str, rule: dict) -> str:
+    values = [
+        zone,
+        rule["proto"],
+        rule["port"],
+        rule.get("toport") or "_",
+        rule.get("toaddr") or "_",
+        rule.get("interface") or "_",
+        rule.get("inaddr") or "_",
+    ]
+    return "synca-forward-port:" + ":".join(values)
+
+
+def _iptables_port_match(value: str) -> str:
+    return value.replace("-", ":", 1)
+
+
+def _scoped_forward_port_rows(zone: str | None = None, permanent: bool = True) -> list[dict]:
+    rows: dict[tuple[str, str, str, str, str, str, str], dict] = {}
+    for raw in _direct_rule_lines(permanent=permanent):
+        if "synca-forward-port:" not in raw:
+            continue
+        m = FORWARD_PORT_COMMENT_RE.search(raw)
+        if not m:
+            continue
+        row_zone, proto, port, toport, toaddr, interface, inaddr = m.groups()
+        if zone and row_zone != zone:
+            continue
+        key = (row_zone, proto, port, toport, toaddr, interface, inaddr)
+        normalized = {
+            "zone": row_zone,
+            "proto": proto,
+            "port": port,
+            "toport": "" if toport == "_" else toport,
+            "toaddr": "" if toaddr == "_" else toaddr,
+            "interface": "" if interface == "_" else interface,
+            "inaddr": "" if inaddr == "_" else inaddr,
+            "managed": True,
+            "scope": "direct",
+            "rules": [],
+        }
+        normalized["raw"] = _forward_port_display_spec(normalized)
+        row = rows.setdefault(key, normalized)
+        row["rules"].append(raw)
+    return sorted(
+        rows.values(),
+        key=lambda item: (
+            item["zone"],
+            item.get("interface") or "",
+            item.get("inaddr") or "",
+            item["proto"],
+            item["port"],
+            item.get("toaddr") or "",
+            item.get("toport") or "",
+        ),
+    )
+
+
+def _forward_port_display_spec(rule: dict) -> str:
+    spec = _forward_port_spec(rule)
+    if rule.get("interface"):
+        spec += f":interface={rule['interface']}"
+    if rule.get("inaddr"):
+        spec += f":inaddr={rule['inaddr']}"
+    return spec
 
 
 def _apply_protocol_forward_change(zone: str, proto: str, toaddr: str, add: bool) -> dict:
@@ -612,6 +808,8 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
                 changed, errors, ignore_missing=True,
             )
     for fp in forward_ports:
+        if fp.get("managed"):
+            continue
         spec = _forward_port_spec(fp)
         if not spec:
             continue
@@ -932,6 +1130,7 @@ def _describe_zone(zone: str, permanent: bool = False) -> dict:
     fp = sudo_run(fp_cmd)
     if fp.ok:
         info["forward_ports"] = _parse_forward_ports(fp.stdout)
+    info["forward_ports"].extend(_scoped_forward_port_rows(zone, permanent=permanent))
 
     rr_cmd = ["firewall-cmd"]
     if permanent:
@@ -951,7 +1150,13 @@ def _parse_forward_ports(text: str) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        parsed: dict = {"raw": line}
+        parsed: dict = {
+            "raw": line,
+            "managed": False,
+            "scope": "firewalld",
+            "interface": "",
+            "inaddr": "",
+        }
         for kv in line.split(":"):
             if "=" in kv:
                 k, v = kv.split("=", 1)
