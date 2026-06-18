@@ -115,7 +115,10 @@
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light">
-                    <tr><th>option</th><th>value</th><th>tag (任意)</th><th style="width:80px"></th></tr>
+                    <tr>
+                        <th>対象ネットワーク</th><th>option</th><th>value</th><th>tag (任意)</th>
+                        <th style="width:80px"></th>
+                    </tr>
                 </thead>
                 <tbody id="option-tbody"></tbody>
             </table>
@@ -148,11 +151,17 @@
                         <option value="150">Cisco TFTP (150)</option>
                     </datalist>
                 </div>
-                <div class="col-sm-4">
+                <div class="col-sm-3">
                     <label class="form-label small mb-0">value</label>
                     <input id="o-value" class="form-control form-control-sm font-monospace" placeholder="例: 192.168.1.1 / tftp.example.com">
                 </div>
-                <div class="col-sm-3">
+                <div class="col-sm-2">
+                    <label class="form-label small mb-0">対象ネットワーク</label>
+                    <select id="o-range" class="form-select form-select-sm font-monospace">
+                        <option value="">全ネットワーク</option>
+                    </select>
+                </div>
+                <div class="col-sm-2">
                     <label class="form-label small mb-0">tag (任意)</label>
                     <input id="o-tag" class="form-control form-control-sm font-monospace">
                 </div>
@@ -301,6 +310,7 @@ function renderRanges() {
                 <td class="font-monospace">${escapeHtml(r.lease)}</td>
                 <td><button class="btn btn-sm btn-outline-danger" onclick="deleteRange('${r.id}')"><i class="bi bi-trash"></i></button></td>
             </tr>`).join('');
+    renderOptionRangeChoices();
 }
 function renderStatic() {
     const tbody = document.getElementById('static-tbody');
@@ -318,14 +328,44 @@ function renderStatic() {
 function renderOptions() {
     const tbody = document.getElementById('option-tbody');
     tbody.innerHTML = (dhcp.options || []).length === 0
-        ? '<tr><td colspan="4" class="text-center text-secondary py-3">未登録</td></tr>'
+        ? '<tr><td colspan="5" class="text-center text-secondary py-3">未登録</td></tr>'
         : dhcp.options.map(o => `
             <tr>
+                <td class="font-monospace">${escapeHtml(optionTargetLabel(o))}</td>
                 <td class="font-monospace">${escapeHtml(o.option)}</td>
                 <td class="font-monospace">${escapeHtml(o.value)}</td>
                 <td class="font-monospace">${escapeHtml(o.tag || '—')}</td>
                 <td><button class="btn btn-sm btn-outline-danger" onclick="deleteOption('${o.id}')"><i class="bi bi-trash"></i></button></td>
             </tr>`).join('');
+}
+
+function rangeLabel(r) {
+    const iface = r.interface || 'interfaceなし';
+    const scope = [r.start, r.end].filter(Boolean).join('-');
+    const netmask = r.netmask ? ` / ${r.netmask}` : '';
+    return `${iface}: ${scope}${netmask}`;
+}
+
+function optionTargetLabel(option) {
+    if (option.range_id) {
+        const range = (dhcp.ranges || []).find(r => r.id === option.range_id);
+        return range ? rangeLabel(range) : `削除済みレンジ: ${option.range_id}`;
+    }
+    return option.tag ? `tag:${option.tag}` : '全ネットワーク';
+}
+
+function renderOptionRangeChoices() {
+    const select = document.getElementById('o-range');
+    if (!select) return;
+    const current = select.value;
+    const options = ['<option value="">全ネットワーク</option>'];
+    for (const range of (dhcp.ranges || [])) {
+        options.push(`<option value="${escapeHtml(range.id)}">${escapeHtml(rangeLabel(range))}</option>`);
+    }
+    select.innerHTML = options.join('');
+    if ([...select.options].some(opt => opt.value === current)) {
+        select.value = current;
+    }
 }
 async function loadLeases() {
     const data = await api.get('/dhcp/api/leases');
@@ -391,6 +431,7 @@ async function addOption() {
         option: document.getElementById('o-option').value.trim(),
         value: document.getElementById('o-value').value.trim(),
         tag: document.getElementById('o-tag').value.trim(),
+        range_id: document.getElementById('o-range').value,
     };
     if (!payload.option || !payload.value) return toast('option と value を入力', true);
     const res = await api.send('/dhcp/api/options', 'POST', payload);

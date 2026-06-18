@@ -1529,8 +1529,6 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
     if mode not in ("manual", "auto"):
         raise ValidationError("method must be 'manual' or 'auto'")
 
-    modifications: list[list[str]] = []
-
     if mode == "manual":
         addresses_raw = payload.get("addresses")
         primary = (payload.get("address") or "").strip()
@@ -1547,28 +1545,41 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
         for d in dns_list:
             validate_ipv4(d)
 
-        modifications.append(["ipv4.method", "manual"])
-        modifications.append(["ipv4.addresses", ",".join(addresses)])
-        modifications.append(["ipv4.gateway", gateway or ""])
-        modifications.append(["ipv4.dns", ",".join(dns_list)])
+        cmd = [
+            "nmcli", "connection", "modify", name,
+            "ipv4.addresses", ",".join(addresses),
+            "ipv4.gateway", gateway or "",
+            "ipv4.dns", ",".join(dns_list),
+            "ipv4.never-default", "no" if gateway else "yes",
+            "ipv4.method", "manual",
+            "ipv6.method", "ignore",
+        ]
     else:  # auto / DHCP
-        modifications.append(["ipv4.method", "auto"])
-        modifications.append(["ipv4.addresses", ""])
-        modifications.append(["ipv4.gateway", ""])
+        cmd = [
+            "nmcli", "connection", "modify", name,
+            "ipv4.method", "auto",
+            "ipv4.addresses", "",
+            "ipv4.gateway", "",
+            "ipv4.never-default", "no",
+        ]
         # Leave DNS alone (auto can still get DNS from DHCP)
 
-    # Apply all modifications first
-    for key, value in modifications:
-        # nmcli accepts "" to clear a property
-        cmd = ["nmcli", "connection", "modify", name, key, value]
-        res = sudo_run(cmd)
-        if not res.ok:
-            return {"ok": False, "error": f"nmcli modify {key} failed", "stderr": res.stderr.strip()}
+    # NetworkManager validates manual profiles after each modify command. Apply
+    # address, gateway, DNS, and method atomically so an auto profile can become
+    # manual even when it did not previously have ipv4.addresses.
+    res = sudo_run(cmd)
+    if not res.ok:
+        return {"ok": False, "error": "nmcli IPv4 設定変更に失敗しました", "stderr": res.stderr.strip()}
 
     # Bring the connection back up so changes take effect
     if payload.get("activate", True):
         up = sudo_run(["nmcli", "connection", "up", name])
         if not up.ok:
-            return {"ok": False, "error": "connection up failed", "stderr": up.stderr.strip()}
+            return {
+                "ok": True,
+                "activated": False,
+                "warning": "IPv4 設定は保存しましたが、接続を up できませんでした。",
+                "stderr": up.stderr.strip(),
+            }
 
-    return {"ok": True}
+    return {"ok": True, "activated": bool(payload.get("activate", True))}
