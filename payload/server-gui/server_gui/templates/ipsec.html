@@ -1,3 +1,4 @@
+<!-- payload/server-gui/server_gui/templates/ipsec.html - IPsec管理画面とEAP一括発行UI -->
 {% extends "base.html" %}
 {% block title %}IPsec — SyncA UTM{% endblock %}
 {% block content %}
@@ -25,6 +26,12 @@
             <strong>GUI 管理の接続 (PSK / EAP)</strong>
         </div>
         <div class="d-flex gap-2 flex-wrap">
+            <button id="ipsec-last-bulk-download" class="btn btn-outline-primary btn-sm d-none" onclick="downloadLastIpsecBulkBundle()">
+                <i class="bi bi-download"></i> 直近の一括ZIP
+            </button>
+            <button class="btn btn-outline-primary btn-sm" onclick="openBulkEapModal(null)">
+                <i class="bi bi-people-fill"></i> EAP一括作成
+            </button>
             <button class="btn btn-primary btn-sm" onclick="openConnModal(null)">
                 <i class="bi bi-plus-lg"></i> 接続追加
             </button>
@@ -39,7 +46,7 @@
                         <th>local_addrs</th>
                         <th>remote_addrs</th>
                         <th>local_ts → remote_ts</th>
-                        <th style="width:170px">操作</th>
+                        <th style="width:250px">操作</th>
                     </tr>
                 </thead>
                 <tbody id="managed-tbody"></tbody>
@@ -247,6 +254,55 @@
     </div>
 </div>
 
+<!-- EAP bulk user modal -->
+<div class="modal fade" id="bulk-eap-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">IPsec EAPユーザー一括作成</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-secondary small" id="be-summary">
+                    EAP接続を選択してください。
+                </div>
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label">対象EAP接続</label>
+                        <select id="be-conn" class="form-select" onchange="updateBulkEapSummary()"></select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">作成数</label>
+                        <input id="be-count" type="number" min="1" max="512" class="form-control font-monospace" value="1">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">名前プレフィックス</label>
+                        <input id="be-prefix" class="form-control font-monospace" value="User">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">開始番号</label>
+                        <input id="be-start" type="number" min="1" class="form-control font-monospace" placeholder="1">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">パスワード長</label>
+                        <input id="be-password-length" type="number" min="8" max="64" class="form-control font-monospace" value="16">
+                    </div>
+                </div>
+                <div class="alert alert-info small mt-3 mb-0">
+                    作成後、各ユーザーの <code>.conf</code> とQRコード <code>.svg</code> を含むZIPを生成します。
+                    ダウンロードは作成完了後に表示される一括ダウンロードボタンから実行します。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+                <button id="be-submit" class="btn btn-primary" onclick="submitBulkEapForm()">
+                    <i class="bi bi-check2"></i> 作成
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Loaded connections -->
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
@@ -318,12 +374,16 @@
 <script>
 let fileModal = null;
 let connModal = null;
+let bulkEapModal = null;
 let editingConnId = null;
 let managedConns = [];
+let lastIpsecBulkBundleBase64 = '';
+let lastIpsecBulkBundleFilename = 'ipsec-eap-accounts.zip';
 
 document.addEventListener('DOMContentLoaded', () => {
     fileModal = new bootstrap.Modal(document.getElementById('file-modal'));
     connModal = new bootstrap.Modal(document.getElementById('conn-modal'));
+    bulkEapModal = new bootstrap.Modal(document.getElementById('bulk-eap-modal'));
 });
 
 async function refresh() {
@@ -352,6 +412,14 @@ async function loadManaged() {
             const childCount = children.length > 1
                 ? `<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${children.length} children</span>`
                 : '';
+            const eapActions = c.auth_type === 'eap'
+                ? `<button class="btn btn-sm btn-outline-primary" onclick="openBulkEapModal('${escapeJs(c.id)}')" title="EAPユーザー一括作成">
+                        <i class="bi bi-people"></i>
+                   </button>
+                   <button class="btn btn-sm btn-outline-primary" onclick="downloadManagedEapBundle('${escapeJs(c.id)}')" title="EAP設定一括ダウンロード">
+                        <i class="bi bi-download"></i>
+                   </button>`
+                : '';
             return `<tr>
                 <td>
                     <span class="fw-semibold font-monospace">${escapeHtml(c.name)}</span>
@@ -364,6 +432,7 @@ async function loadManaged() {
                     <button class="btn btn-sm btn-outline-primary" onclick='openConnModal(${JSON.stringify(c)})' title="編集">
                         <i class="bi bi-pencil"></i>
                     </button>
+                    ${eapActions}
                     ${children.map(ch => `<button class="btn btn-sm btn-outline-success" onclick="initiate('${escapeJs(ch.name)}')" title="${escapeHtml(ch.name)} initiate"><i class="bi bi-play"></i></button>`).join('')}
                     <button class="btn btn-sm btn-outline-danger" onclick="deleteConn('${escapeJs(c.id)}', '${escapeJs(c.name)}')" title="削除">
                         <i class="bi bi-trash"></i>
@@ -481,6 +550,102 @@ function collectEapUsers() {
         username: row.querySelector('.eap-user').value.trim(),
         password: row.querySelector('.eap-pass').value,
     })).filter(u => u.username);
+}
+
+function eapManagedConns() {
+    return managedConns.filter(c => c.auth_type === 'eap');
+}
+
+function renderBulkEapOptions(selectedId) {
+    const eapConns = eapManagedConns();
+    const select = document.getElementById('be-conn');
+    select.innerHTML = eapConns.map(c =>
+        `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} (${(c.eap_users || []).length} users)</option>`
+    ).join('');
+    if (selectedId && eapConns.some(c => c.id === selectedId)) {
+        select.value = selectedId;
+    }
+    updateBulkEapSummary();
+}
+
+function openBulkEapModal(connId) {
+    const eapConns = eapManagedConns();
+    if (eapConns.length === 0) return toast('EAP接続を先に作成してください', true);
+    renderBulkEapOptions(connId);
+    document.getElementById('be-count').value = '1';
+    document.getElementById('be-prefix').value = 'User';
+    document.getElementById('be-start').value = '';
+    document.getElementById('be-password-length').value = '16';
+    document.getElementById('be-submit').disabled = false;
+    bulkEapModal.show();
+}
+
+function selectedBulkEapConn() {
+    const cid = document.getElementById('be-conn').value;
+    return managedConns.find(c => c.id === cid);
+}
+
+function updateBulkEapSummary() {
+    const conn = selectedBulkEapConn();
+    const summary = document.getElementById('be-summary');
+    if (!conn) {
+        summary.textContent = 'EAP接続を選択してください。';
+        return;
+    }
+    const users = conn.eap_users || [];
+    summary.innerHTML =
+        `対象: <strong>${escapeHtml(conn.name)}</strong>` +
+        `<span class="ms-2">server_id: <code>${escapeHtml(conn.server_id || '')}</code></span>` +
+        `<span class="ms-2">既存ユーザー: <strong>${users.length}</strong></span>`;
+}
+
+async function submitBulkEapForm() {
+    const conn = selectedBulkEapConn();
+    if (!conn) return toast('EAP接続を選択してください', true);
+    const submit = document.getElementById('be-submit');
+    if (submit.disabled) return;
+    const payload = {
+        count: Number(document.getElementById('be-count').value || 0),
+        name_prefix: document.getElementById('be-prefix').value.trim() || 'User',
+        start_number: document.getElementById('be-start').value.trim(),
+        password_length: Number(document.getElementById('be-password-length').value || 16),
+    };
+    if (!payload.count || payload.count < 1) return toast('作成数を指定してください', true);
+    submit.disabled = true;
+    const res = await api.send(`/ipsec/api/managed/${encodeURIComponent(conn.id)}/eap-users/bulk`, 'POST', payload);
+    submit.disabled = false;
+    if (!res) return;
+    lastIpsecBulkBundleBase64 = res.bundle_base64 || '';
+    lastIpsecBulkBundleFilename = res.bundle_filename || 'ipsec-eap-accounts.zip';
+    document.getElementById('ipsec-last-bulk-download').classList.toggle('d-none', !lastIpsecBulkBundleBase64);
+    bulkEapModal.hide();
+    toast(`${(res.created || []).length}件を作成しました。一括ダウンロードボタンからZIPを保存できます。`);
+    refresh();
+}
+
+function downloadLastIpsecBulkBundle() {
+    downloadBase64Zip(lastIpsecBulkBundleBase64, lastIpsecBulkBundleFilename);
+}
+
+async function downloadManagedEapBundle(cid) {
+    const res = await api.get(`/ipsec/api/managed/${encodeURIComponent(cid)}/eap-users/client-configs`);
+    if (!res) return;
+    downloadBase64Zip(res.bundle_base64 || '', res.bundle_filename || 'ipsec-eap-accounts.zip');
+    toast(`${res.count || 0}件のEAP設定とQRをZIPにまとめました`);
+}
+
+function downloadBase64Zip(base64Text, filename) {
+    if (!base64Text) return toast('ダウンロード対象がありません', true);
+    const bytes = Uint8Array.from(atob(base64Text), c => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (filename || 'ipsec-eap-accounts.zip').replace(/[^A-Za-z0-9._\-]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
 }
 
 function openConnModal(c) {
