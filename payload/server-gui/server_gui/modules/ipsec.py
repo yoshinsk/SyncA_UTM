@@ -1,4 +1,4 @@
-"""StrongSwan (swanctl) read-only view.
+"""payload/server-gui/server_gui/modules/ipsec.py - Manage StrongSwan swanctl/IPsec GUI state.
 
 Phase 1 scope:
   - List loaded connections (`swanctl --list-conns`)
@@ -11,12 +11,18 @@ later Sprint — the file editor module can still be used in the meantime.
 """
 from __future__ import annotations
 
+import base64
+import csv
+import io
 import json
 import logging
 import ipaddress
 import re
+import secrets
 import shlex
+import string
 import uuid
+import zipfile
 from pathlib import Path
 
 from flask import Blueprint, Flask, current_app, jsonify, render_template, request
@@ -77,6 +83,7 @@ _EAP_USER_RE = re.compile(r"^[A-Za-z0-9_\-.@]{1,128}$")
 _START_ACTIONS = {"", "none", "trap", "start"}
 _DPD_ACTIONS = {"", "none", "clear", "hold", "restart"}
 _AUTH_TYPES = {"psk", "eap", "cert"}
+_BULK_PASSWORD_ALPHABET = string.ascii_letters + string.digits + "-_@#%+=:"
 
 
 def register(app: Flask) -> None:
@@ -336,6 +343,85 @@ def delete_managed(cid: str):
     return jsonify({"ok": True})
 
 
+@bp.route("/api/managed/<cid>/eap-users/bulk", methods=["POST"])
+@login_required
+@csrf_protect
+def bulk_add_eap_users(cid: str):
+    payload = request.get_json(force=True, silent=True) or {}
+    created_users: list[dict] = []
+    refreshed: list[dict] = []
+    updated_conn: dict | None = None
+
+    try:
+        with _store().transaction(MODULE_NAME, _default()) as data:
+            idx = next((i for i, c in enumerate(data["connections"]) if c["id"] == cid), None)
+            if idx is None:
+                return jsonify({"error": "not found"}), 404
+            conn = data["connections"][idx]
+            if conn.get("auth_type") != "eap":
+                return jsonify({"error": "EAP接続だけが一括作成に対応しています"}), 400
+            _eap_profile_server_addr(conn)
+            existing = {u.get("username", "") for u in conn.get("eap_users", []) or []}
+            created_users = _parse_bulk_eap_users(payload, existing)
+            updated_conn = json.loads(json.dumps(conn))
+            updated_conn.setdefault("eap_users", [])
+            updated_conn["eap_users"].extend(created_users)
+            data["connections"][idx] = updated_conn
+            refreshed = list(data["connections"])
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        _apply(refreshed)
+    except RuntimeError as e:
+        created_names = {u["username"] for u in created_users}
+        with _store().transaction(MODULE_NAME, _default()) as data:
+            idx = next((i for i, c in enumerate(data["connections"]) if c["id"] == cid), None)
+            if idx is not None:
+                users = data["connections"][idx].get("eap_users", []) or []
+                data["connections"][idx]["eap_users"] = [u for u in users if u.get("username") not in created_names]
+        return jsonify({"error": str(e)}), 500
+
+    bundle = _build_eap_client_zip(updated_conn or {}, created_users)
+    return jsonify({
+        "ok": True,
+        "created": [
+            {
+                "username": u["username"],
+                "filename": _eap_client_filename(updated_conn or {}, u),
+                "qr_filename": _eap_qr_filename(updated_conn or {}, u),
+            }
+            for u in created_users
+        ],
+        "bundle_filename": _eap_bundle_filename(updated_conn or {}),
+        "bundle_base64": base64.b64encode(bundle).decode("ascii"),
+    }), 201
+
+
+@bp.route("/api/managed/<cid>/eap-users/client-configs", methods=["GET"])
+@login_required
+def download_eap_client_configs(cid: str):
+    data = _store().load(MODULE_NAME, _default())
+    conn = next((c for c in data.get("connections", []) if c.get("id") == cid), None)
+    if conn is None:
+        return jsonify({"error": "not found"}), 404
+    if conn.get("auth_type") != "eap":
+        return jsonify({"error": "EAP接続だけが一括ダウンロードに対応しています"}), 400
+    users = [u for u in conn.get("eap_users", []) or [] if u.get("username")]
+    if not users:
+        return jsonify({"error": "EAPユーザーがありません"}), 400
+    try:
+        bundle = _build_eap_client_zip(conn, users)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({
+        "ok": True,
+        "count": len(users),
+        "bundle_filename": _eap_bundle_filename(conn),
+        "bundle_base64": base64.b64encode(bundle).decode("ascii"),
+    })
+
+
 # ---- payload validation --------------------------------------------------
 
 def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
@@ -506,6 +592,206 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
         "eap_users": eap_users,
         "children": children,
     }
+
+
+def _parse_bulk_eap_users(raw: dict, existing_usernames: set[str]) -> list[dict]:
+    try:
+        count = int(raw.get("count", 0))
+    except (TypeError, ValueError):
+        raise ValidationError("作成数は数値で指定してください")
+    if not (1 <= count <= 512):
+        raise ValidationError("作成数は1..512で指定してください")
+
+    try:
+        password_length = int(raw.get("password_length", 16) or 16)
+    except (TypeError, ValueError):
+        raise ValidationError("パスワード長は数値で指定してください")
+    if not (8 <= password_length <= 64):
+        raise ValidationError("パスワード長は8..64で指定してください")
+
+    try:
+        number_width = int(raw.get("number_width", 3) or 3)
+    except (TypeError, ValueError):
+        number_width = 3
+    number_width = min(max(number_width, 1), 8)
+
+    start_number = raw.get("start_number")
+    try:
+        start_number = int(start_number) if start_number not in ("", None) else 1
+    except (TypeError, ValueError):
+        raise ValidationError("開始番号は数値で指定してください")
+    if start_number < 1:
+        raise ValidationError("開始番号は1以上で指定してください")
+
+    prefix = _safe_eap_username_prefix(raw.get("name_prefix") or "User")
+    usernames = _generate_eap_usernames(prefix, count, existing_usernames, start_number, number_width)
+    return [
+        {
+            "username": username,
+            "password": _generate_eap_password(password_length),
+        }
+        for username in usernames
+    ]
+
+
+def _safe_eap_username_prefix(value: object) -> str:
+    prefix = re.sub(r"[^A-Za-z0-9_.@-]", "", str(value or "User")).strip(".-")[:64]
+    if not prefix:
+        prefix = "User"
+    if not re.match(r"^[A-Za-z0-9]", prefix):
+        prefix = "User" + prefix
+    return prefix
+
+
+def _generate_eap_usernames(
+    prefix: str,
+    count: int,
+    existing_usernames: set[str],
+    start: int,
+    width: int,
+) -> list[str]:
+    names: list[str] = []
+    used = set(existing_usernames)
+    number = start
+    attempts = 0
+    while len(names) < count and attempts < 100000:
+        attempts += 1
+        username = f"{prefix}{number:0{width}d}"
+        number += 1
+        if username in used:
+            continue
+        if not _EAP_USER_RE.match(username):
+            raise ValidationError(f"生成ユーザー名が不正です: {username!r}")
+        used.add(username)
+        names.append(username)
+    if len(names) < count:
+        raise ValidationError("重複しないユーザー名を生成できません")
+    return names
+
+
+def _generate_eap_password(length: int) -> str:
+    return "".join(secrets.choice(_BULK_PASSWORD_ALPHABET) for _ in range(length))
+
+
+def _build_eap_client_zip(conn: dict, users: list[dict]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest_buf = io.StringIO()
+        writer = csv.writer(manifest_buf)
+        writer.writerow(["username", "config_filename", "qr_filename", "server_id"])
+        for user in users:
+            config_filename = _eap_client_filename(conn, user)
+            qr_filename = _eap_qr_filename(conn, user)
+            profile_text = _build_eap_client_profile(conn, user)
+            zf.writestr(config_filename, profile_text)
+            qr_svg = _generate_qr_svg(profile_text)
+            if qr_svg:
+                zf.writestr(qr_filename, qr_svg)
+            writer.writerow([
+                user.get("username", ""),
+                config_filename,
+                qr_filename if qr_svg else "",
+                conn.get("server_id", ""),
+            ])
+        zf.writestr(f"{_safe_filename_part(conn.get('name') or 'ipsec')}-accounts.csv", manifest_buf.getvalue())
+    return buf.getvalue()
+
+
+def _build_eap_client_profile(conn: dict, user: dict) -> str:
+    server_addr = _eap_profile_server_addr(conn)
+    profile = {
+        "uuid": str(uuid.uuid4()),
+        "name": f"{conn.get('name', 'IPsec')} - {user.get('username', '')}",
+        "type": "ikev2-eap",
+        "remote": {
+            "addr": server_addr,
+            "id": conn.get("server_id") or server_addr,
+        },
+        "local": {
+            "eap_id": user.get("username", ""),
+        },
+    }
+    if user.get("password"):
+        profile["local"]["shared_secret"] = user["password"]
+    if conn.get("pool_dns"):
+        profile["dns-servers"] = conn["pool_dns"]
+    if conn.get("proposals"):
+        profile["ike-proposal"] = str(conn["proposals"]).split(",", 1)[0].strip()
+    esp_proposal = _first_eap_esp_proposal(conn)
+    if esp_proposal:
+        profile["esp-proposal"] = esp_proposal
+    return json.dumps(profile, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _eap_profile_server_addr(conn: dict) -> str:
+    server_id = str(conn.get("server_id") or "").strip().lstrip("@")
+    if server_id:
+        return server_id
+    local_addrs = str(conn.get("local_addrs") or "").strip()
+    if local_addrs and local_addrs != "%any":
+        return local_addrs.split(",", 1)[0].strip()
+    raise ValidationError("EAP接続のserver_idが未設定です")
+
+
+def _first_eap_esp_proposal(conn: dict) -> str:
+    for child in conn.get("children", []) or []:
+        value = str(child.get("esp_proposals") or "").strip()
+        if value:
+            return value.split(",", 1)[0].strip()
+    return ""
+
+
+def _eap_client_filename(conn: dict, user: dict) -> str:
+    return f"{_safe_filename_part(conn.get('name') or 'ipsec')}-{_safe_filename_part(user.get('username') or 'user')}.conf"
+
+
+def _eap_qr_filename(conn: dict, user: dict) -> str:
+    return f"{_safe_filename_part(conn.get('name') or 'ipsec')}-{_safe_filename_part(user.get('username') or 'user')}.qr.svg"
+
+
+def _eap_bundle_filename(conn: dict) -> str:
+    return f"{_safe_filename_part(conn.get('name') or 'ipsec')}-eap-accounts.zip"
+
+
+def _safe_filename_part(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or "").strip())[:80].strip("._-")
+    return text or "item"
+
+
+def _generate_qr_svg(text: str) -> str:
+    """Generate QR SVG for a client profile without requiring qrencode RPM."""
+    if not text:
+        return ""
+    try:
+        import qrcode
+        import qrcode.image.svg
+
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=2,
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        out = io.BytesIO()
+        image.save(out)
+        return _normalize_inline_svg(out.getvalue().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        logger.warning("IPsec QR generation failed through Python qrcode: %s", exc)
+
+    res = run(["qrencode", "-t", "SVG", "-o", "-", text])
+    if res.ok and res.stdout.strip():
+        return _normalize_inline_svg(res.stdout)
+    logger.warning("IPsec QR generation failed: %s", (res.stderr or res.stdout).strip())
+    return ""
+
+
+def _normalize_inline_svg(svg: str) -> str:
+    start = svg.find("<svg")
+    end = svg.rfind("</svg>")
+    if start == -1 or end == -1:
+        return svg.strip()
+    return svg[start:end + len("</svg>")]
 
 
 # ---- rendering + apply --------------------------------------------------
