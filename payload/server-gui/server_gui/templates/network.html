@@ -1070,7 +1070,7 @@ async function saveConnection() {
     };
     const res = await api.send(`/network/api/connections/${encodeURIComponent(editingConn)}`, 'PUT', payload);
     if (res && res.ok) {
-        toast('適用しました');
+        toast(res.warning ? `設定は保存しました: ${res.warning}` : '適用しました', Boolean(res.warning));
         connModal.hide();
         refresh();
     }

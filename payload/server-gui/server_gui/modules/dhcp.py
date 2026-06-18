@@ -68,19 +68,32 @@ _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", re.IGNORECASE)
 
 
 def _parse_dhcp_range_raw(raw: str) -> dict:
-    """Parse a dhcp-range value into {interface, start, end, netmask, lease}.
+    """Parse a dhcp-range value into {interface, tag, start, end, netmask, lease}.
 
-    Handles the common shapes: 'interface:X,start,end[,netmask],lease'.
-    Raises ValueError on unsupported forms (set:/tag: prefixes, IPv6, etc.).
+    Handles the common shapes:
+      interface:X,start,end[,netmask],lease
+      set:TAG,start,end[,netmask],lease
+      interface:X,set:TAG,start,end[,netmask],lease
     """
     parts = [p.strip() for p in raw.split(",") if p.strip()]
-    out = {"interface": None, "start": None, "end": None, "netmask": None, "lease": "12h"}
+    out = {"interface": None, "tag": "", "start": None, "end": None, "netmask": None, "lease": "12h"}
     i = 0
-    if parts[i].startswith("interface:"):
-        out["interface"] = parts[i][len("interface:"):]
-        i += 1
-    if parts[i].startswith(("set:", "tag:")):
-        raise ValueError(f"set:/tag: 接頭辞は未対応です ({parts[i]})")
+    while i < len(parts):
+        if parts[i].startswith("interface:"):
+            out["interface"] = parts[i][len("interface:"):]
+            i += 1
+            continue
+        if parts[i].startswith("set:"):
+            out["tag"] = parts[i][len("set:"):]
+            i += 1
+            continue
+        if parts[i].startswith("tag:"):
+            # tag:<name> selects a range; it is not the option-scope tag set
+            # by dnsmasq. Keep parsing the address portion but do not persist it
+            # as the generated set:<tag> value.
+            i += 1
+            continue
+        break
     # start
     if i >= len(parts):
         raise ValueError("start IP がありません")
@@ -421,6 +434,10 @@ def delete_range(rid: str):
         data["dhcp"]["ranges"] = [h for h in data["dhcp"]["ranges"] if h["id"] != rid]
         if len(data["dhcp"]["ranges"]) == before:
             return jsonify({"error": "not found"}), 404
+        data["dhcp"]["options"] = [
+            item for item in data["dhcp"].get("options", [])
+            if str(item.get("range_id", "")) != rid
+        ]
     try:
         apply_dnsmasq(current_app.config["CONFIG_DIR"])
     except RuntimeError as e:
@@ -562,16 +579,22 @@ def add_option():
     option = str(payload.get("option", "")).strip()
     value = str(payload.get("value", "")).strip()
     tag = str(payload.get("tag", "")).strip() or ""
+    range_id = str(payload.get("range_id", "")).strip() or ""
     if not OPTION_RE.match(option):
         return jsonify({"error": "invalid option name/number"}), 400
     if not value or "\n" in value:
         return jsonify({"error": "invalid value"}), 400
     if tag and not OPTION_RE.match(tag):
         return jsonify({"error": "invalid tag"}), 400
+    if range_id:
+        current = _store().load(MODULE_NAME, default_data())
+        range_ids = {str(item.get("id", "")) for item in current.get("dhcp", {}).get("ranges", [])}
+        if range_id not in range_ids:
+            return jsonify({"error": "selected DHCP range was not found"}), 400
     new_id = uuid.uuid4().hex
     with _store().transaction(MODULE_NAME, default_data()) as data:
         data["dhcp"]["options"].append({
-            "id": new_id, "option": option, "value": value, "tag": tag,
+            "id": new_id, "option": option, "value": value, "tag": tag, "range_id": range_id,
         })
     try:
         apply_dnsmasq(current_app.config["CONFIG_DIR"])

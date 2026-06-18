@@ -5,6 +5,7 @@ and the generated file `/etc/dnsmasq.d/server-gui.conf`.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ DNSMASQ_MAIN_CONFIG_PATH = Path("/etc/dnsmasq.conf")
 DNSMASQ_SYSTEMD_DROPIN_DIR = Path("/etc/systemd/system/dnsmasq.service.d")
 DNSMASQ_SYSTEMD_DROPIN_PATH = DNSMASQ_SYSTEMD_DROPIN_DIR / "synca-utm.conf"
 MODULE_NAME = "dnsmasq"
+_TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DEFAULT_UPSTREAM = (
     {"id": "cloudflare-1", "domain": "", "server": "1.1.1.1"},
     {"id": "cloudflare-2", "domain": "", "server": "1.0.0.1"},
@@ -42,9 +44,9 @@ def default() -> dict:
             "upstream": _default_upstream(),  # [{id, domain, server}] (domain optional)
         },
         "dhcp": {
-            "ranges": [],      # [{id, interface, start, end, lease}]
+            "ranges": [],      # [{id, interface, start, end, lease, tag}]
             "static_hosts": [],# [{id, mac, ip, hostname, lease}]
-            "options": [],     # [{id, option, value, tag}]
+            "options": [],     # [{id, option, value, tag, range_id}]
         },
     }
 
@@ -61,6 +63,7 @@ def generate(data: dict) -> str:
     dns = data.get("dns", {})
     dhcp = data.get("dhcp", {})
     upstream = dns.get("upstream") or _default_upstream()
+    range_tags = _range_tags(dhcp.get("ranges", []))
     listen_interfaces = _listen_interfaces(data)
     if listen_interfaces:
         lines.append("# --- Listening interfaces ---")
@@ -97,8 +100,9 @@ def generate(data: dict) -> str:
         lines.append("# --- DHCP ---")
     for r in dhcp.get("ranges", []):
         parts: list[str] = []
-        if r.get("interface"):
-            parts.append(f"interface:{r['interface']}")
+        range_tag = range_tags.get(str(r.get("id", "")).strip())
+        if range_tag:
+            parts.append(f"set:{range_tag}")
         parts.append(r["start"])
         parts.append(r["end"])
         if r.get("netmask"):
@@ -114,8 +118,9 @@ def generate(data: dict) -> str:
         lines.append(f"dhcp-host={','.join(parts)}")
     for o in dhcp.get("options", []):
         opt = _format_option(str(o["option"]))
-        if o.get("tag"):
-            line = f"dhcp-option=tag:{o['tag']},{opt},{o['value']}"
+        option_tag = _option_tag(o, range_tags)
+        if option_tag:
+            line = f"dhcp-option=tag:{option_tag},{opt},{o['value']}"
         else:
             line = f"dhcp-option={opt},{o['value']}"
         lines.append(line)
@@ -191,6 +196,44 @@ def _format_option(name: str) -> str:
     if name.isdigit():
         return name
     return f"option:{name}"
+
+
+def _range_tags(ranges: list[dict]) -> dict[str, str]:
+    """Build stable dnsmasq tags for DHCP ranges keyed by range id."""
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for idx, item in enumerate(ranges):
+        range_id = str(item.get("id", "")).strip()
+        if not range_id:
+            continue
+        preferred = str(item.get("tag", "")).strip()
+        seed = preferred or f"synca_{range_id}"
+        tag = _safe_tag(seed, f"synca_range_{idx + 1}")
+        base = tag
+        suffix = 2
+        while tag in used:
+            tag = _safe_tag(f"{base}_{suffix}", f"synca_range_{idx + 1}_{suffix}")
+            suffix += 1
+        used.add(tag)
+        out[range_id] = tag
+    return out
+
+
+def _option_tag(option: dict, range_tags: dict[str, str]) -> str:
+    """Resolve an option target: range_id takes precedence over manual tag."""
+    range_id = str(option.get("range_id", "")).strip()
+    if range_id and range_id in range_tags:
+        return range_tags[range_id]
+    tag = str(option.get("tag", "")).strip()
+    return tag if _TAG_RE.match(tag) else ""
+
+
+def _safe_tag(value: str, fallback: str) -> str:
+    """Return a dnsmasq-safe tag while preserving stable user-provided tags."""
+    value = re.sub(r"[^A-Za-z0-9_-]", "_", value.strip())[:64]
+    if value and _TAG_RE.match(value):
+        return value
+    return fallback[:64]
 
 
 def _default_upstream() -> list[dict[str, str]]:
