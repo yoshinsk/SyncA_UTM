@@ -413,18 +413,14 @@ from pathlib import Path
 
 payload = json.load(sys.stdin)
 domains = payload.get("domains") or []
-listen_ip = payload.get("listen_ip") or ""
 webroot = Path("/var/www/letsencrypt/.well-known/acme-challenge")
 conf = Path("/etc/nginx/conf.d/00-synca-acme.conf")
 webroot.mkdir(parents=True, exist_ok=True)
-if listen_ip:
-    listen_lines = f"    listen {listen_ip}:80;"
-else:
-    listen_lines = "    listen 80;\n    listen [::]:80;"
 server_name = " ".join(domains) if domains else "synca-acme.invalid"
 conf.write_text(f"""# Managed by SyncA UTM. Serves Let's Encrypt HTTP-01 challenges only.
 server {{
-{listen_lines}
+    listen 80;
+    listen [::]:80;
     server_name {server_name};
     location ^~ /.well-known/acme-challenge/ {{
         root /var/www/letsencrypt;
@@ -664,7 +660,7 @@ if central_config.exists():
     test = sudo_run(["nginx", "-t"])
     if not test.ok:
         return {"ok": False, "error": test.stderr or test.stdout}
-    reload_res = sudo_run(["systemctl", "reload", "nginx"])
+    reload_res = _reload_or_restart_nginx_for_gui(name)
     report_res = sudo_run(["systemctl", "start", "synca-central-report.service"])
     return {
         "ok": reload_res.ok,
@@ -677,6 +673,36 @@ if central_config.exists():
             report_res.stdout + report_res.stderr
         ).strip(),
     }
+
+
+def _reload_or_restart_nginx_for_gui(name: str):
+    """Reload nginx, then restart if the live 4444 certificate did not switch."""
+    reload_res = sudo_run(["systemctl", "reload", "nginx"])
+    verify_res = _served_gui_certificate(name)
+    if reload_res.ok and verify_res.ok:
+        return reload_res
+    restart_res = sudo_run(["systemctl", "restart", "nginx"])
+    verify_after_restart = _served_gui_certificate(name)
+    if verify_after_restart.ok:
+        return restart_res
+    return verify_after_restart if not verify_after_restart.ok else restart_res
+
+
+def _served_gui_certificate(name: str):
+    """Return ok when nginx 4444 is actively serving the requested certificate."""
+    script = (
+        "echo | openssl s_client -connect 127.0.0.1:4444 "
+        f"-servername {name} 2>/dev/null | "
+        "openssl x509 -noout -subject -ext subjectAltName"
+    )
+    res = sudo_run(["bash", "-lc", script], timeout=15)
+    if not res.ok:
+        return res
+    if f"DNS:{name}" in res.stdout or f"CN = {name}" in res.stdout or f"CN={name}" in res.stdout:
+        return res
+    res.returncode = 1
+    res.stderr = f"nginx is not serving certificate for {name}\n{res.stdout}"
+    return res
 
 
 def _current_gui_certificate() -> dict | None:
