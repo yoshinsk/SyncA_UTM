@@ -706,13 +706,18 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
 
     changed = False
     endpoint_zone = _preferred_ipsec_endpoint_zone()
-    if endpoint_zone:
+    if endpoint_zone and not remote_endpoints:
         changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "ipsec"])
-        for endpoint in remote_endpoints:
+    for endpoint in sorted(remote_endpoints):
+        existing_zone = _firewalld_source_zone(endpoint)
+        if existing_zone:
+            changed |= _firewalld_add_ipsec_endpoint_rule(existing_zone, endpoint)
+        elif endpoint_zone:
+            changed |= _firewalld_add(["--zone", endpoint_zone, "--add-service", "ipsec"])
             changed |= _firewalld_add(["--zone", endpoint_zone, "--add-source", endpoint])
 
     for local_net, remote_net in sorted(local_remote_pairs):
-        changed |= _firewalld_add(["--zone", "trusted", "--add-source", remote_net])
+        changed |= _firewalld_add_source_if_unassigned("trusted", remote_net)
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {local_net} -d {remote_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {remote_net} -d {local_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "nat", "POSTROUTING", 0, f"-d {remote_net} -j ACCEPT")
@@ -764,6 +769,36 @@ def _preferred_ipsec_endpoint_zone() -> str | None:
     if default.ok and default.stdout.strip():
         return default.stdout.strip()
     return None
+
+
+def _firewalld_source_zone(source: str) -> str | None:
+    """Return the zone that already owns a source in permanent or runtime config."""
+    zones = sudo_run(["firewall-cmd", "--get-zones"], timeout=15)
+    if not zones.ok:
+        return None
+    for permanent in (True, False):
+        for zone in zones.stdout.split():
+            cmd = ["firewall-cmd", "--zone", zone, "--query-source", source]
+            if permanent:
+                cmd.insert(1, "--permanent")
+            res = sudo_run(cmd, timeout=15)
+            if res.ok and res.stdout.strip() == "yes":
+                return zone
+    return None
+
+
+def _firewalld_add_source_if_unassigned(zone: str, source: str) -> bool:
+    """Add a source only when firewalld has not assigned it to another zone."""
+    existing_zone = _firewalld_source_zone(source)
+    if existing_zone:
+        return False
+    return _firewalld_add(["--zone", zone, "--add-source", source])
+
+
+def _firewalld_add_ipsec_endpoint_rule(zone: str, endpoint: str) -> bool:
+    """Allow IPsec from an endpoint without moving its existing zone source."""
+    rule = f'rule family="ipv4" source address="{endpoint}" service name="ipsec" accept'
+    return _firewalld_add(["--zone", zone, "--add-rich-rule", rule])
 
 
 def _firewalld_add(args: list[str]) -> bool:
