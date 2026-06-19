@@ -23,7 +23,7 @@ from flask import Blueprint, Flask, jsonify, render_template, request
 
 from ..auth import csrf_protect, login_required
 from ..shell import sudo_run
-from ..validators import ValidationError, validate_hostname
+from ..validators import ValidationError, validate_hostname, validate_ipv4
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,11 @@ def issue_certificate():
     ]
     if payload.get("staging"):
         cmd.append("--staging")
+    try:
+        listen_ip = _optional_listen_ip(payload)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
     if method == "standalone":
         hook_result = _ensure_letsencrypt_hooks()
         if not hook_result.get("ok"):
@@ -118,7 +123,7 @@ def issue_certificate():
         # firewalld is "default DROP" on the WAN zone.
         cmd.extend(["--pre-hook", str(LE_HOOK_PRE), "--post-hook", str(LE_HOOK_POST)])
     else:
-        acme_result = _ensure_acme_http_vhost()
+        acme_result = _ensure_acme_http_vhost(fqdns, listen_ip)
         if not acme_result.get("ok"):
             return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
         hook_result = _ensure_letsencrypt_hooks()
@@ -129,11 +134,13 @@ def issue_certificate():
     for f in fqdns:
         cmd.extend(["-d", f])
 
-    firewall_state = _open_http_for_acme()
+    firewall_state = _open_http_for_acme(listen_ip)
     try:
         res = sudo_run(cmd, timeout=180)
     finally:
         _close_http_for_acme(firewall_state)
+        if method == "webroot":
+            _ensure_acme_http_vhost()
     applied = None
     if res.ok and bool(payload.get("apply_to_gui", False)):
         applied = _apply_gui_certificate(fqdns[0])
@@ -141,6 +148,7 @@ def issue_certificate():
         "ok": res.ok,
         "requested_method": requested_method,
         "effective_method": method,
+        "listen_ip": listen_ip,
         "warning": method_warning,
         "command": " ".join(cmd),
         "stdout": res.stdout,
@@ -162,6 +170,9 @@ def renew_certificate():
     hook_result = _ensure_letsencrypt_hooks()
     if not hook_result.get("ok"):
         return jsonify({"error": hook_result.get("error", "failed to install Let's Encrypt hooks")}), 500
+    acme_result = _ensure_acme_http_vhost()
+    if not acme_result.get("ok"):
+        return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
 
     cmd = ["certbot", "renew", "--non-interactive"]
     if dry_run:
@@ -217,8 +228,13 @@ def reissue_production_certificate():
         "--force-renewal", "--cert-name", name,
         "--email", email,
     ]
+    try:
+        listen_ip = _optional_listen_ip(payload)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
     if method == "webroot":
-        acme_result = _ensure_acme_http_vhost()
+        acme_result = _ensure_acme_http_vhost(fqdns, listen_ip)
         if not acme_result.get("ok"):
             return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
         hook_result = _ensure_letsencrypt_hooks()
@@ -234,11 +250,13 @@ def reissue_production_certificate():
     for fqdn in fqdns:
         cmd.extend(["-d", fqdn])
 
-    firewall_state = _open_http_for_acme()
+    firewall_state = _open_http_for_acme(listen_ip)
     try:
         res = sudo_run(cmd, timeout=180)
     finally:
         _close_http_for_acme(firewall_state)
+        if method == "webroot":
+            _ensure_acme_http_vhost()
     applied = None
     if res.ok and bool(payload.get("apply_to_gui", False)):
         applied = _apply_gui_certificate(name)
@@ -246,6 +264,7 @@ def reissue_production_certificate():
         "ok": res.ok,
         "requested_method": requested_method,
         "effective_method": method,
+        "listen_ip": listen_ip,
         "warning": method_warning,
         "command": " ".join(cmd),
         "stdout": res.stdout,
@@ -313,6 +332,15 @@ def list_certificates():
     return jsonify({"certificates": certs, "gui_certificate": gui_cert})
 
 
+def _optional_listen_ip(payload: dict) -> str:
+    """Return the optional public IPv4 address used for HTTP-01 validation."""
+    raw = payload.get("listen_ip") or payload.get("bind_ip") or payload.get("ip_address") or ""
+    listen_ip = str(raw).strip()
+    if not listen_ip:
+        return ""
+    return validate_ipv4(listen_ip)
+
+
 def _ensure_letsencrypt_hooks() -> dict:
     """Install certbot hooks that temporarily open HTTP for ACME renewal."""
     script = r'''
@@ -326,6 +354,7 @@ pre.write_text("""#!/usr/bin/env bash
 set -euo pipefail
 install -d -m 0755 /run/synca-acme
 if systemctl is-active --quiet firewalld; then
+    : > /run/synca-acme/ip80-added
     if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
         touch /run/synca-acme/http-was-open
     else
@@ -338,11 +367,25 @@ if systemctl is-active --quiet firewalld; then
         rm -f /run/synca-acme/ppp80-was-open
         firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
     fi
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        rule="ipv4 filter INPUT 0 -d ${ip} -p tcp --dport 80 -j ACCEPT"
+        if ! firewall-cmd --direct --get-all-rules | grep -Fxq "$rule"; then
+            firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT || true
+            echo "$ip" >> /run/synca-acme/ip80-added
+        fi
+    done < <(ip -o -4 addr show scope global | awk '{print $4}' | cut -d/ -f1)
 fi
 """, encoding="utf-8")
 post.write_text("""#!/usr/bin/env bash
 set -euo pipefail
 if systemctl is-active --quiet firewalld; then
+    if [[ -f /run/synca-acme/ip80-added ]]; then
+        while read -r ip; do
+            [[ -z "$ip" ]] && continue
+            firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT || true
+        done < /run/synca-acme/ip80-added
+    fi
     if [[ ! -f /run/synca-acme/ppp80-was-open ]]; then
         firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
     fi
@@ -350,7 +393,7 @@ if systemctl is-active --quiet firewalld; then
         firewall-cmd --zone=public --remove-service=http || true
     fi
 fi
-rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open
+rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open /run/synca-acme/ip80-added
 """, encoding="utf-8")
 pre.chmod(0o755)
 post.chmod(0o755)
@@ -361,31 +404,43 @@ post.chmod(0o755)
     return {"ok": True}
 
 
-def _ensure_acme_http_vhost() -> dict:
+def _ensure_acme_http_vhost(domains: list[str] | None = None, listen_ip: str = "") -> dict:
     """Prepare a port 80 nginx vhost that serves only ACME HTTP-01 files."""
     script = r'''
+import json
+import sys
 from pathlib import Path
 
+payload = json.load(sys.stdin)
+domains = payload.get("domains") or []
+listen_ip = payload.get("listen_ip") or ""
 webroot = Path("/var/www/letsencrypt/.well-known/acme-challenge")
 conf = Path("/etc/nginx/conf.d/00-synca-acme.conf")
 webroot.mkdir(parents=True, exist_ok=True)
-conf.write_text("""# Managed by SyncA UTM. Serves Let's Encrypt HTTP-01 challenges only.
-server {
-    listen 80;
-    listen [::]:80;
-    server_name synca-acme.invalid;
-    location ^~ /.well-known/acme-challenge/ {
+if listen_ip:
+    listen_lines = f"    listen {listen_ip}:80;"
+else:
+    listen_lines = "    listen 80;\n    listen [::]:80;"
+server_name = " ".join(domains) if domains else "synca-acme.invalid"
+conf.write_text(f"""# Managed by SyncA UTM. Serves Let's Encrypt HTTP-01 challenges only.
+server {{
+{listen_lines}
+    server_name {server_name};
+    location ^~ /.well-known/acme-challenge/ {{
         root /var/www/letsencrypt;
         default_type "text/plain";
         try_files $uri =404;
-    }
-    location / {
+    }}
+    location / {{
         return 404;
-    }
-}
+    }}
+}}
 """, encoding="utf-8")
 '''
-    write_res = sudo_run(["python3", "-c", script])
+    write_res = sudo_run(
+        ["python3", "-c", script],
+        stdin=json.dumps({"domains": domains or [], "listen_ip": listen_ip}),
+    )
     if not write_res.ok:
         return {"ok": False, "error": write_res.stderr or write_res.stdout}
     test = sudo_run(["nginx", "-t"])
@@ -397,15 +452,36 @@ server {
     return {"ok": True}
 
 
-def _open_http_for_acme() -> dict:
+def _global_ipv4_addresses() -> list[str]:
+    """Return global IPv4 addresses currently configured on the appliance."""
+    res = sudo_run(["ip", "-o", "-4", "addr", "show", "scope", "global"], timeout=10)
+    if not res.ok:
+        return []
+    ips: list[str] = []
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        ip = parts[3].split("/", 1)[0]
+        try:
+            validate_ipv4(ip)
+        except ValidationError:
+            continue
+        if ip not in ips:
+            ips.append(ip)
+    return ips
+
+
+def _open_http_for_acme(listen_ip: str = "") -> dict:
     """Open HTTP on firewalld only for the ACME transaction window."""
-    state = {"http_was_open": False, "ppp80_was_open": False}
+    state = {"http_was_open": False, "ppp80_was_open": False, "ip_rules": []}
     http_state = sudo_run(["firewall-cmd", "--zone=public", "--query-service=http"])
     state["http_was_open"] = http_state.ok and http_state.stdout.strip() == "yes"
     direct_rules = sudo_run(["firewall-cmd", "--direct", "--get-all-rules"])
+    direct_lines = direct_rules.stdout.splitlines() if direct_rules.ok else []
     state["ppp80_was_open"] = (
         direct_rules.ok
-        and "ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT" in direct_rules.stdout.splitlines()
+        and "ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT" in direct_lines
     )
     if not state["http_was_open"]:
         sudo_run(["firewall-cmd", "--zone=public", "--add-service=http"])
@@ -414,11 +490,31 @@ def _open_http_for_acme() -> dict:
             "firewall-cmd", "--direct", "--add-rule", "ipv4", "filter", "INPUT", "0",
             "-i", "ppp+", "-p", "tcp", "--dport", "80", "-j", "ACCEPT",
         ])
+    target_ips = [listen_ip] if listen_ip else _global_ipv4_addresses()
+    for ip in target_ips:
+        rule_line = f"ipv4 filter INPUT 0 -d {ip} -p tcp --dport 80 -j ACCEPT"
+        was_open = direct_rules.ok and rule_line in direct_lines
+        state["ip_rules"].append({"ip": ip, "was_open": was_open})
+        if not was_open:
+            sudo_run([
+                "firewall-cmd", "--direct", "--add-rule", "ipv4", "filter", "INPUT", "0",
+                "-d", ip, "-p", "tcp", "--dport", "80", "-j", "ACCEPT",
+            ])
     return state
 
 
 def _close_http_for_acme(state: dict) -> None:
     """Close the temporary HTTP firewalld rules after certbot returns."""
+    for entry in state.get("ip_rules") or []:
+        if entry.get("was_open"):
+            continue
+        ip = entry.get("ip")
+        if not ip:
+            continue
+        sudo_run([
+            "firewall-cmd", "--direct", "--remove-rule", "ipv4", "filter", "INPUT", "0",
+            "-d", ip, "-p", "tcp", "--dport", "80", "-j", "ACCEPT",
+        ])
     if not state.get("ppp80_was_open"):
         sudo_run([
             "firewall-cmd", "--direct", "--remove-rule", "ipv4", "filter", "INPUT", "0",

@@ -29,6 +29,7 @@ from ..validators import (
     validate_hostname,
     validate_hostname_or_ip,
     validate_identifier,
+    validate_ipv4,
     validate_ipv4_cidr,
     validate_port,
     validate_size,
@@ -586,13 +587,23 @@ def _parse_server_body(body: str) -> dict | None:
         # an IPv6 listen automatically for every IPv4 one.
         if first.startswith("["):
             continue
-        port_str = first.rsplit(":", 1)[-1]
+        address = ""
+        if ":" in first:
+            address_part, port_part = first.rsplit(":", 1)
+            if address_part not in ("", "*", "0.0.0.0"):
+                try:
+                    address = validate_ipv4(address_part)
+                except ValidationError:
+                    continue
+        else:
+            port_part = first
         try:
-            port = int(port_str)
+            port = int(port_part)
         except ValueError:
             continue
         flags = set(args[1:])
         listens.append({
+            "address": address,
             "port": port,
             "ssl": "ssl" in flags,
             "http2": "http2" in flags,
@@ -737,7 +748,11 @@ def _parse_vhost(raw: dict) -> dict:
         raise ValidationError("listens must be a non-empty list")
     listens = []
     for li in listens_raw:
+        address = str(li.get("address") or li.get("listen_ip") or "").strip()
+        if address:
+            address = validate_ipv4(address)
         listens.append({
+            "address": address,
             "port": validate_port(li.get("port", 80)),
             "ssl": bool(li.get("ssl", False)),
             "http2": bool(li.get("http2", False)),
@@ -1201,8 +1216,12 @@ def _render_vhost(vhost: dict, backends_by_id: dict[str, dict]) -> str:
         if li["default_server"]:
             flags.append("default_server")
         suffix = (" " + " ".join(flags)) if flags else ""
-        lines.append(f"    listen {li['port']}{suffix};")
-        lines.append(f"    listen [::]:{li['port']}{suffix};")
+        address = li.get("address") or ""
+        if address:
+            lines.append(f"    listen {address}:{li['port']}{suffix};")
+        else:
+            lines.append(f"    listen {li['port']}{suffix};")
+            lines.append(f"    listen [::]:{li['port']}{suffix};")
     lines.append(f"    server_name {' '.join(vhost['server_names'])};")
     if vhost.get("ssl"):
         ssl = vhost["ssl"]

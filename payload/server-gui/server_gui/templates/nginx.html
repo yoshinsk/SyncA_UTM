@@ -158,6 +158,7 @@
                 <div class="mb-3">
                     <label class="form-label">Listen 設定</label>
                     <div id="v-listens" class="d-flex flex-column gap-2"></div>
+                    <div class="form-text">待受 IP を空欄にすると全 IP で待ち受けます。複数の公開 IP を使い分ける場合は対象のIPv4を指定してください。</div>
                     <button type="button" class="btn btn-link btn-sm p-0 mt-2" onclick="addListenRow()">
                         <i class="bi bi-plus-circle"></i> listen 追加
                     </button>
@@ -511,7 +512,8 @@ function renderVhosts() {
                 const flags = [];
                 if (l.ssl) flags.push('ssl');
                 if (l.default_server) flags.push('default');
-                return `<span class="badge ${badge} font-monospace me-1">${l.port}${flags.length ? ' ' + flags.join(',') : ''}</span>`;
+                const target = l.address ? `${l.address}:${l.port}` : String(l.port);
+                return `<span class="badge ${badge} font-monospace me-1">${escapeHtml(target)}${flags.length ? ' ' + flags.join(',') : ''}</span>`;
             }).join('');
             const backendId = v.locations[0]?.backend_id;
             const backend = backends.find(b => b.id === backendId);
@@ -612,11 +614,12 @@ async function deleteBackend(id) {
 }
 
 /* ----- vhost modal ----- */
-function addListenRow(port = 443, ssl = true, http2 = true, ds = false) {
+function addListenRow(port = 443, ssl = true, http2 = true, ds = false, address = '') {
     const container = document.getElementById('v-listens');
     const div = document.createElement('div');
     div.className = 'd-flex align-items-center gap-2 flex-wrap';
     div.innerHTML = `
+        <input type="text" value="${escapeHtml(address || '')}" class="form-control form-control-sm listen-address font-monospace" style="width:170px" placeholder="待受IP (任意)">
         <input type="number" value="${port}" min="1" max="65535" class="form-control form-control-sm listen-port" style="width:100px">
         <div class="form-check"><input type="checkbox" class="form-check-input listen-ssl" ${ssl ? 'checked' : ''}><label class="form-check-label small ms-1">ssl</label></div>
         <div class="form-check"><input type="checkbox" class="form-check-input listen-http2" ${http2 ? 'checked' : ''}><label class="form-check-label small ms-1">http2</label></div>
@@ -799,7 +802,7 @@ function editVhost(id) {
     const loc0 = v.locations[0] || {};
     document.getElementById('v-websocket').checked = !!loc0.websocket;
     document.getElementById('v-listens').innerHTML = '';
-    v.listens.forEach(l => addListenRow(l.port, l.ssl, l.http2, l.default_server));
+    v.listens.forEach(l => addListenRow(l.port, l.ssl, l.http2, l.default_server, l.address || ''));
     populateBackendSelect(loc0.backend_id);
     populateCertSelect(v.ssl?.cert_path || null);
     populateWaf(v.waf || null);
@@ -807,6 +810,7 @@ function editVhost(id) {
 }
 function collectListens() {
     return Array.from(document.querySelectorAll('#v-listens > div')).map(row => ({
+        address: row.querySelector('.listen-address').value.trim(),
         port: parseInt(row.querySelector('.listen-port').value, 10),
         ssl: row.querySelector('.listen-ssl').checked,
         http2: row.querySelector('.listen-http2').checked,
