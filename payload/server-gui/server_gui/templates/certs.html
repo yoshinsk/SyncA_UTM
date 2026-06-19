@@ -56,6 +56,7 @@
                         <li>FQDN は外部 DNS でこのサーバーの公開 IP に解決されている必要があります。</li>
                         <li>standalone は nginx を一時停止するため、GUI からの実行時は webroot に自動切替します。</li>
                         <li>webroot は <code>/.well-known/acme-challenge</code> を <code>/var/www/letsencrypt</code> から配信します。</li>
+                        <li>複数の公開 IP がある場合は、DNS が解決する公開 IP を指定できます。</li>
                     </ul>
                 </div>
                 <div class="mb-3">
@@ -67,14 +68,18 @@
                     <input id="iss-email" type="email" class="form-control">
                 </div>
                 <div class="row g-3 mb-3">
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <label class="form-label">取得方式</label>
                         <select id="iss-method" class="form-select">
                             <option value="webroot">webroot</option>
                             <option value="standalone">standalone</option>
                         </select>
                     </div>
-                    <div class="col-md-6" id="iss-webroot-wrap" style="display:none">
+                    <div class="col-md-4">
+                        <label class="form-label">HTTP-01 公開 IP <span class="text-secondary small">(任意)</span></label>
+                        <input id="iss-listen-ip" class="form-control font-monospace" placeholder="例: 122.211.138.47">
+                    </div>
+                    <div class="col-md-4" id="iss-webroot-wrap" style="display:none">
                         <label class="form-label">webroot path</label>
                         <input id="iss-webroot" class="form-control font-monospace" value="/var/www/letsencrypt">
                     </div>
@@ -162,6 +167,7 @@ function openIssueModal() {
     document.getElementById('iss-fqdn').value = '';
     document.getElementById('iss-email').value = '';
     document.getElementById('iss-method').value = 'webroot';
+    document.getElementById('iss-listen-ip').value = '';
     document.getElementById('iss-webroot-wrap').style.display = 'none';
     document.getElementById('iss-staging').checked = false;
     document.getElementById('iss-apply-gui').checked = false;
@@ -175,6 +181,7 @@ async function issueCert() {
         fqdns: document.getElementById('iss-fqdn').value.trim(),
         email: document.getElementById('iss-email').value.trim(),
         method: document.getElementById('iss-method').value,
+        listen_ip: document.getElementById('iss-listen-ip').value.trim(),
         webroot: document.getElementById('iss-webroot').value.trim(),
         staging: document.getElementById('iss-staging').checked,
         apply_to_gui: document.getElementById('iss-apply-gui').checked,
@@ -186,7 +193,7 @@ async function issueCert() {
     if (!res) return;
     document.getElementById('iss-result').classList.remove('d-none');
     document.getElementById('iss-output').textContent =
-        `${res.warning ? res.warning + '\n\n' : ''}$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
+        `${res.warning ? res.warning + '\n\n' : ''}${res.listen_ip ? 'HTTP-01 公開 IP: ' + res.listen_ip + '\n' : ''}$ ${res.command}\n\n--- STDOUT ---\n${res.stdout}\n\n--- STDERR ---\n${res.stderr}`;
     if (res.ok) {
         toast('証明書を取得しました');
         refresh();
@@ -295,11 +302,14 @@ async function applyGuiCert(name) {
 async function reissueProductionCert(name) {
     const email = prompt(`${name} をLet's Encrypt本番証明書として再取得します。\n更新通知用メールアドレスを入力してください。`);
     if (!email) return;
+    const listenIp = prompt('HTTP-01 で待ち受ける公開 IP を指定してください。\n空欄の場合は全公開 IP を一時開放します。', '');
+    if (listenIp === null) return;
     if (!confirm(`${name} を本番証明書で強制再取得しますか?`)) return;
     const res = await api.send('/certs/api/reissue-production', 'POST', {
         name,
         email,
         method: 'webroot',
+        listen_ip: listenIp.trim(),
         webroot: '/var/www/letsencrypt',
         apply_to_gui: false,
     });
