@@ -718,6 +718,10 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
 
     for local_net, remote_net in sorted(local_remote_pairs):
         changed |= _firewalld_add_source_if_unassigned("trusted", remote_net)
+        changed |= _add_direct_rule(
+            "ipv4", "filter", "INPUT", -25,
+            f"-s {remote_net} -d {local_net} -p icmp --icmp-type echo-request -j ACCEPT",
+        )
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {local_net} -d {remote_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {remote_net} -d {local_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "nat", "POSTROUTING", 0, f"-d {remote_net} -j ACCEPT")
