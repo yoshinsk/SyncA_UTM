@@ -1321,6 +1321,11 @@ def _render_vhost(vhost: dict, backends_by_id: dict[str, dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _listen_signature(content: str) -> list[str]:
+    """Extract listen directives that require a restart when they change."""
+    return sorted(re.findall(r"^\s*listen\s+([^;]+);", content, flags=re.M))
+
+
 # ----- apply pipeline ---------------------------------------------------
 
 def _apply_all(data: dict) -> None:
@@ -1347,6 +1352,20 @@ def _apply_all(data: dict) -> None:
     # `vhost-server-gui.conf` (dropped by the installer) match the same
     # filename pattern but are NOT ours — we must never delete them.
     existing = _list_marked_files()
+    existing_listens: dict[Path, list[str]] = {}
+    for p in existing:
+        if p.name == WAF_ZONES_FILE.name:
+            continue
+        try:
+            existing_listens[p] = _listen_signature(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            existing_listens[p] = []
+    desired_listens = {
+        p: _listen_signature(content)
+        for p, content in desired_files.items()
+        if p.name != WAF_ZONES_FILE.name
+    }
+    listener_changed = existing_listens != desired_listens
     backups: list[tuple[Path, Path]] = []
     obsolete = existing - set(desired_files.keys())
 
@@ -1371,9 +1390,10 @@ def _apply_all(data: dict) -> None:
 
         _sync_firewalld_for_vhosts(data["vhosts"])
 
-        reload_res = sudo_run(["systemctl", "reload", "nginx"])
+        action = "restart" if listener_changed else "reload"
+        reload_res = sudo_run(["systemctl", action, "nginx"])
         if not reload_res.ok:
-            raise RuntimeError(f"nginx reload failed:\n{reload_res.stderr}")
+            raise RuntimeError(f"nginx {action} failed:\n{reload_res.stderr}")
 
     except Exception:
         # rollback: restore from backups, drop newly-created files
