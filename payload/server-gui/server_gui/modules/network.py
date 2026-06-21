@@ -13,16 +13,24 @@ The UI shows a banner; no programmatic safeguard yet (Phase 2).
 """
 from __future__ import annotations
 
+import copy
 import ipaddress
 import json
+import shlex
 from pathlib import Path
 from typing import Optional
 
-from flask import Blueprint, Flask, jsonify, render_template, request
+from flask import Blueprint, Flask, current_app, jsonify, render_template, request
 
 import re
 
 from ..auth import csrf_protect, login_required
+from ..config_store import ConfigStore
+from ..dnsmasq_apply import (
+    LEGACY_FIRSTBOOT_CONFIG_PATH,
+    apply as apply_dnsmasq,
+    default as default_dnsmasq_config,
+)
 from ..shell import run, sudo_run
 from ..validators import ValidationError, validate_interface, validate_ipv4, validate_ipv4_cidr
 
@@ -30,6 +38,8 @@ _IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,63}$")
 _SYNCA_DIR = Path("/etc/synca")
 _PPPOE_PARENT_IP_CONFIG = _SYNCA_DIR / "pppoe-parent-ip.json"
 _PPPOE_PARENT_IP_DISPATCHER = Path("/etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip")
+_UPNP_MODULE_NAME = "upnp"
+_SYNCA_UPNP_UNIT = "synca-upnp.service"
 
 bp = Blueprint("network", __name__, url_prefix="/network")
 
@@ -49,7 +59,9 @@ def page():
 @bp.route("/api/devices", methods=["GET"])
 @login_required
 def list_devices():
-    return jsonify({"devices": _list_devices(), "connections": _list_connections()})
+    connections = _list_connections()
+    _mark_lan_bridge_connections(connections)
+    return jsonify({"devices": _list_devices(), "connections": connections})
 
 
 @bp.route("/api/connections/<name>", methods=["GET"])
@@ -146,6 +158,31 @@ def pppoe_mss_clamp_install():
     return jsonify(_ensure_pppoe_mss_clamp())
 
 
+@bp.route("/api/connections/bridge/lan-migration-preview", methods=["POST"])
+@login_required
+@csrf_protect
+def bridge_lan_migration_preview():
+    """Preview which LAN services would move from selected members to a bridge."""
+    payload = request.get_json(force=True, silent=True) or {}
+    bridge_name = (payload.get("name") or "").strip()
+    bridge_ifname = (payload.get("ifname") or bridge_name).strip()
+    try:
+        bridge_ifname = validate_interface(bridge_ifname)
+        members = _validate_bridge_members(payload.get("members") or [])
+        addresses = _normalize_ipv4_addresses(
+            (payload.get("address") or "").strip(),
+            payload.get("secondary_addresses"),
+            payload.get("addresses"),
+        )
+    except ValidationError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    return jsonify({
+        "ok": True,
+        "plan": _build_lan_bridge_migration_plan(bridge_ifname, members, addresses),
+    })
+
+
 @bp.route("/api/connections/bridge", methods=["POST"])
 @login_required
 @csrf_protect
@@ -166,7 +203,8 @@ def create_bridge():
         "forward_delay": 4,                  # seconds, 2-30
         "hello_time":    2,                  # seconds, 1-10
         "autoconnect":   true,
-        "activate":      true
+        "activate":      true,
+        "use_as_lan":    true                # migrate LAN services to bridge
       }
 
     Rolls back (deletes bridge + slaves) on any partial failure.
@@ -186,6 +224,7 @@ def create_bridge():
     hello_time = int(payload.get("hello_time", 2))
     autoconnect = bool(payload.get("autoconnect", True))
     activate = bool(payload.get("activate", True))
+    use_as_lan = bool(payload.get("use_as_lan", False))
 
     # Validate
     if not _IDENT_RE.match(name):
@@ -249,6 +288,20 @@ def create_bridge():
             "error": "refusing to enslave WAN/PPPoE interface(s) into the bridge: "
                      + ", ".join(blocked_members)
         }), 400
+    lan_migration_plan = None
+    if use_as_lan:
+        lan_migration_plan = _build_lan_bridge_migration_plan(ifname, members, addresses)
+        if not lan_migration_plan.get("old_lan_interfaces") and not lan_migration_plan.get("already_lan_bridge"):
+            return jsonify({
+                "error": "旧LANインターフェースを検出できないため、Bridge作成前に中止しました。",
+                "lan_migration_preview": lan_migration_plan,
+            }), 400
+        if not _firewalld_running():
+            return jsonify({
+                "error": "firewalldが動作していないため、Bridge作成前にLANサービス移行を中止しました。",
+                "lan_migration_preview": lan_migration_plan,
+            }), 400
+        addresses = _merge_lan_bridge_addresses(addresses, lan_migration_plan.get("moved_addresses", []))
 
     # ---- create bridge ----
     add_cmd = [
@@ -339,10 +392,24 @@ def create_bridge():
                     "output": output,
                 }), 500
 
+    lan_migration = None
+    if use_as_lan:
+        lan_migration = _apply_bridge_lan_migration(
+            ifname, members, addresses, lan_migration_plan
+        )
+        if not lan_migration.get("ok"):
+            return jsonify({
+                "ok": False, "created": True, "activated": activate,
+                "error": lan_migration.get("error") or "LANサービス移行に失敗しました",
+                "lan_migration": lan_migration,
+                "output": output,
+            }), 500
+
     return jsonify({
         "ok": True, "name": name, "ifname": ifname,
         "members": members, "stp": stp, "address": addresses[0] if addresses else "",
         "addresses": addresses,
+        "lan_migration": lan_migration,
         "output": output,
     }), 201
 
@@ -361,6 +428,7 @@ def get_bridge(name: str):
         **detail,
         "members": sorted(member_profiles),
         "member_profiles": member_profiles,
+        "is_lan_bridge": _is_bridge_lan_interface(detail.get("interface") or name),
     })
 
 
@@ -388,6 +456,7 @@ def update_bridge(name: str):
     hello_time = int(payload.get("hello_time", 2))
     autoconnect = bool(payload.get("autoconnect", True))
     activate = bool(payload.get("activate", True))
+    use_as_lan = bool(payload.get("use_as_lan", False))
 
     try:
         members = _validate_bridge_members(members_raw)
@@ -403,6 +472,21 @@ def update_bridge(name: str):
             "error": "refusing to enslave WAN/PPPoE interface(s) into the bridge: "
                      + ", ".join(blocked_members)
         }), 400
+    bridge_ifname = detail.get("interface") or name
+    lan_migration_plan = None
+    if use_as_lan:
+        lan_migration_plan = _build_lan_bridge_migration_plan(bridge_ifname, members, addresses)
+        if not lan_migration_plan.get("old_lan_interfaces") and not lan_migration_plan.get("already_lan_bridge"):
+            return jsonify({
+                "error": "旧LANインターフェースを検出できないため、Bridge更新前に中止しました。",
+                "lan_migration_preview": lan_migration_plan,
+            }), 400
+        if not _firewalld_running():
+            return jsonify({
+                "error": "firewalldが動作していないため、Bridge更新前にLANサービス移行を中止しました。",
+                "lan_migration_preview": lan_migration_plan,
+            }), 400
+        addresses = _merge_lan_bridge_addresses(addresses, lan_migration_plan.get("moved_addresses", []))
 
     stp_result = _apply_bridge_stp(name, stp, stp_priority, forward_delay, hello_time)
     if not stp_result["ok"]:
@@ -437,12 +521,26 @@ def update_bridge(name: str):
                 "output": "\n".join(output),
             }), 500
 
+    lan_migration = None
+    if use_as_lan:
+        lan_migration = _apply_bridge_lan_migration(
+            bridge_ifname, members, addresses, lan_migration_plan
+        )
+        if not lan_migration.get("ok"):
+            return jsonify({
+                "ok": False, "updated": True, "activated": activate,
+                "error": lan_migration.get("error") or "LANサービス移行に失敗しました",
+                "lan_migration": lan_migration,
+                "output": "\n".join(output),
+            }), 500
+
     return jsonify({
         "ok": True,
         "name": name,
         "members": members,
         "address": addresses[0] if addresses else "",
         "addresses": addresses,
+        "lan_migration": lan_migration,
         "output": "\n".join(output),
     })
 
@@ -1192,6 +1290,636 @@ def _reconcile_bridge_members(bridge_name: str, members: list[str], activate: bo
             if not up.ok:
                 return {"ok": False, "error": text or f"failed to activate {slave_name}", "output": output}
     return {"ok": True, "output": output}
+
+
+def _config_store() -> ConfigStore:
+    """Return the persisted server-gui config store."""
+    return ConfigStore(current_app.config["CONFIG_DIR"])
+
+
+def _mark_lan_bridge_connections(connections: list[dict]) -> None:
+    """Annotate bridge rows that are currently referenced by LAN services."""
+    lan_ifaces = _configured_lan_service_interfaces(include_firewalld=False)
+    for conn in connections:
+        if conn.get("type") != "bridge":
+            continue
+        names = {str(conn.get("name") or ""), str(conn.get("device") or "")}
+        conn["is_lan_bridge"] = bool(lan_ifaces & {name for name in names if name})
+
+
+def _is_bridge_lan_interface(ifname: str) -> bool:
+    """Return True when dnsmasq or UPnP already points at the bridge interface."""
+    return bool(ifname and ifname in _configured_lan_service_interfaces(include_firewalld=False))
+
+
+def _configured_lan_service_interfaces(include_firewalld: bool = True) -> set[str]:
+    """Collect interfaces that SyncA LAN-facing services currently reference."""
+    interfaces = set(_dnsmasq_configured_interfaces())
+    interfaces.update(_legacy_dnsmasq_interfaces())
+    interfaces.update(_upnp_lan_interfaces())
+    if include_firewalld:
+        interfaces.update(_trusted_zone_interfaces())
+    return {iface for iface in interfaces if iface}
+
+
+def _load_config(module: str, default: dict) -> dict:
+    """Load a JSON module config while keeping malformed files non-fatal."""
+    try:
+        data = _config_store().load(module, copy.deepcopy(default))
+    except Exception:
+        return copy.deepcopy(default)
+    return data if isinstance(data, dict) else copy.deepcopy(default)
+
+
+def _dnsmasq_configured_interfaces(data: dict | None = None) -> set[str]:
+    """Return DHCP range interfaces from /etc/server-gui/dnsmasq.json."""
+    if data is None:
+        data = _load_config("dnsmasq", default_dnsmasq_config())
+    ranges = (data.get("dhcp") or {}).get("ranges") or []
+    return {
+        str(item.get("interface", "")).strip()
+        for item in ranges
+        if isinstance(item, dict) and str(item.get("interface", "")).strip()
+    }
+
+
+def _legacy_dnsmasq_interfaces() -> set[str]:
+    """Return interface tokens still present in the firstboot dnsmasq snippet."""
+    try:
+        text = LEGACY_FIRSTBOOT_CONFIG_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    interfaces: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.match(r"interface\s*=\s*([A-Za-z0-9_.:-]+)", stripped)
+        if m:
+            interfaces.add(m.group(1))
+        interfaces.update(re.findall(r"interface:([A-Za-z0-9_.:-]+)", stripped))
+    return interfaces
+
+
+def _default_upnp_config() -> dict:
+    """Return the minimum shape needed to edit /etc/server-gui/upnp.json."""
+    return {
+        "enabled": False,
+        "wan_interface": "",
+        "lan_interfaces": [],
+        "allowed_cidrs": [],
+        "control_port": 5000,
+        "enable_upnp": True,
+        "enable_natpmp": True,
+        "secure_mode": True,
+    }
+
+
+def _upnp_lan_interfaces(data: dict | None = None) -> set[str]:
+    """Return LAN wait interfaces from /etc/server-gui/upnp.json."""
+    if data is None:
+        data = _load_config(_UPNP_MODULE_NAME, _default_upnp_config())
+    return {
+        str(iface).strip()
+        for iface in data.get("lan_interfaces", []) or []
+        if str(iface).strip()
+    }
+
+
+def _trusted_zone_interfaces() -> set[str]:
+    """Return permanent firewalld trusted-zone interfaces when firewalld is reachable."""
+    res = sudo_run(["firewall-cmd", "--permanent", "--zone", "trusted", "--list-interfaces"], timeout=10)
+    if not res.ok:
+        return set()
+    return {item.strip() for item in res.stdout.split() if item.strip()}
+
+
+def _firewalld_direct_rule_lines(permanent: bool = True) -> set[str]:
+    """Return firewalld direct rules as raw lines; failures are treated as no data."""
+    cmd = ["firewall-cmd"]
+    if permanent:
+        cmd.append("--permanent")
+    cmd.extend(["--direct", "--get-all-rules"])
+    res = sudo_run(cmd, timeout=15)
+    if not res.ok:
+        return set()
+    return {line.strip() for line in res.stdout.splitlines() if line.strip()}
+
+
+def _build_lan_bridge_migration_plan(
+    bridge_ifname: str,
+    members: list[str],
+    requested_addresses: list[str] | None = None,
+) -> dict:
+    """Detect old LAN interfaces and describe service changes before applying them."""
+    member_set = set(members)
+    dnsmasq_data = _load_config("dnsmasq", default_dnsmasq_config())
+    upnp_data = _load_config(_UPNP_MODULE_NAME, _default_upnp_config())
+    direct_rules = sorted(_firewalld_direct_rule_lines(permanent=True))
+
+    dnsmasq_ifaces = _dnsmasq_configured_interfaces(dnsmasq_data)
+    legacy_ifaces = _legacy_dnsmasq_interfaces()
+    upnp_ifaces = _upnp_lan_interfaces(upnp_data)
+    trusted_ifaces = _trusted_zone_interfaces()
+    direct_ifaces = _direct_rule_lan_interfaces(direct_rules, member_set)
+    ip_ifaces = {
+        member for member in members
+        if _lan_ipv4_addresses_for_interface(member)
+    }
+
+    detected = {
+        "dnsmasq": sorted(dnsmasq_ifaces),
+        "legacy_dnsmasq": sorted(legacy_ifaces),
+        "upnp": sorted(upnp_ifaces),
+        "firewalld_trusted": sorted(trusted_ifaces),
+        "firewalld_direct": sorted(direct_ifaces),
+        "member_ipv4": sorted(ip_ifaces),
+    }
+    old_ifaces = sorted(
+        ((dnsmasq_ifaces | legacy_ifaces | upnp_ifaces | trusted_ifaces | direct_ifaces | ip_ifaces)
+         & member_set) - {bridge_ifname}
+    )
+    moved_addresses: list[str] = []
+    for iface in old_ifaces:
+        moved_addresses = _merge_lan_bridge_addresses(
+            moved_addresses,
+            _lan_ipv4_addresses_for_interface(iface),
+        )
+
+    direct_replacements = _direct_rule_replacements(direct_rules, old_ifaces, bridge_ifname)
+    warnings: list[str] = []
+    if not old_ifaces and bridge_ifname not in (dnsmasq_ifaces | legacy_ifaces | upnp_ifaces):
+        warnings.append("旧LANインターフェースを検出できませんでした。DHCP/DNS/UPnP/firewalldの移行対象はありません。")
+    if not moved_addresses:
+        warnings.append("旧LANインターフェースのIPv4アドレスを検出できませんでした。BridgeのIPは入力値のみ使用します。")
+
+    return {
+        "bridge_if": bridge_ifname,
+        "old_lan_interfaces": old_ifaces,
+        "already_lan_bridge": bridge_ifname in (dnsmasq_ifaces | legacy_ifaces | upnp_ifaces),
+        "detected": detected,
+        "moved_addresses": moved_addresses,
+        "final_bridge_addresses": _merge_lan_bridge_addresses(requested_addresses or [], moved_addresses),
+        "dnsmasq_range_updates": sum(
+            1 for item in (dnsmasq_data.get("dhcp") or {}).get("ranges") or []
+            if isinstance(item, dict) and str(item.get("interface", "")).strip() in old_ifaces
+        ),
+        "legacy_dnsmasq_updates": sorted(legacy_ifaces & set(old_ifaces)),
+        "upnp_updates": sorted(upnp_ifaces & set(old_ifaces)),
+        "firewalld_direct_replacements": direct_replacements,
+        "firewalld_trusted_add": bridge_ifname,
+        "firewalld_trusted_remove": old_ifaces,
+        "warnings": warnings,
+    }
+
+
+def _lan_ipv4_addresses_for_interface(ifname: str) -> list[str]:
+    """Return stable IPv4 CIDRs from profiles first, then live addresses."""
+    addresses: list[str] = []
+    for profile in _connection_profiles_for_interface(ifname):
+        for address in (profile.get("ipv4") or {}).get("addresses_list") or []:
+            if address and address != "--":
+                addresses = _merge_lan_bridge_addresses(addresses, [address])
+    addresses = _merge_lan_bridge_addresses(addresses, _live_ipv4_addresses(ifname))
+    return addresses
+
+
+def _merge_lan_bridge_addresses(base: list[str], extra: list[str]) -> list[str]:
+    """Merge IPv4 CIDRs while preserving order and ignoring malformed values."""
+    merged: list[str] = []
+    for value in [*base, *extra]:
+        try:
+            address = validate_ipv4_cidr(str(value).strip())
+        except ValidationError:
+            continue
+        if address not in merged:
+            merged.append(address)
+    return merged
+
+
+def _apply_bridge_lan_migration(
+    bridge_ifname: str,
+    members: list[str],
+    bridge_addresses: list[str],
+    plan: dict | None = None,
+) -> dict:
+    """Move SyncA-managed LAN service references from member NICs to a bridge."""
+    plan = plan or _build_lan_bridge_migration_plan(bridge_ifname, members, bridge_addresses)
+    if not plan.get("old_lan_interfaces") and not plan.get("already_lan_bridge"):
+        return {
+            "ok": False,
+            "error": "旧LANインターフェースを検出できないため、LANサービス移行を中止しました。",
+            "plan": plan,
+        }
+
+    if not _firewalld_running():
+        return {
+            "ok": False,
+            "error": "firewalldが動作していないため、dnsmasqを書き換える前にLANサービス移行を中止しました。",
+            "failed_step": "firewalld-preflight",
+            "plan": plan,
+        }
+
+    steps: list[dict] = []
+    for apply_step in (
+        _apply_dnsmasq_lan_migration,
+        _apply_firewalld_lan_migration,
+        _apply_upnp_lan_migration,
+    ):
+        result = apply_step(plan)
+        steps.append(result)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "error": result.get("error") or "LANサービス移行に失敗しました",
+                "failed_step": result.get("step"),
+                "steps": steps,
+                "plan": plan,
+            }
+
+    changed = [item for step in steps for item in step.get("changed", [])]
+    warnings = [item for step in steps for item in step.get("warnings", [])]
+    return {
+        "ok": True,
+        "message": f"LANサービスを {bridge_ifname} へ移行しました。",
+        "changed": changed,
+        "warnings": [*plan.get("warnings", []), *warnings],
+        "steps": steps,
+        "plan": plan,
+    }
+
+
+def _apply_dnsmasq_lan_migration(plan: dict) -> dict:
+    """Update dnsmasq JSON/legacy snippet and run dnsmasq --test before restart."""
+    old_ifaces = set(plan.get("old_lan_interfaces") or [])
+    bridge_ifname = plan["bridge_if"]
+    if not old_ifaces:
+        return {"ok": True, "step": "dnsmasq", "changed": []}
+
+    store = _config_store()
+    before = store.load("dnsmasq", default_dnsmasq_config())
+    if not isinstance(before, dict):
+        before = default_dnsmasq_config()
+    after = copy.deepcopy(before)
+    changed: list[str] = []
+
+    for item in (after.get("dhcp") or {}).get("ranges") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("interface", "")).strip() in old_ifaces:
+            item["interface"] = bridge_ifname
+            changed.append("dnsmasq DHCP range interface")
+
+    legacy_backup = _read_legacy_dnsmasq_backup()
+    legacy_changed = _rewrite_legacy_dnsmasq(old_ifaces, bridge_ifname)
+    if legacy_changed:
+        changed.append(str(LEGACY_FIRSTBOOT_CONFIG_PATH))
+
+    if not changed:
+        return {"ok": True, "step": "dnsmasq", "changed": []}
+
+    try:
+        store.save("dnsmasq", after)
+        apply_dnsmasq(current_app.config["CONFIG_DIR"])
+    except Exception as e:
+        store.save("dnsmasq", before)
+        _restore_legacy_dnsmasq_backup(legacy_backup)
+        return {
+            "ok": False,
+            "step": "dnsmasq",
+            "error": f"dnsmasq --test または再起動に失敗したため移行を中止しました: {e}",
+            "changed": changed,
+        }
+    return {"ok": True, "step": "dnsmasq", "changed": _dedupe_strings(changed)}
+
+
+def _read_legacy_dnsmasq_backup() -> bytes | None:
+    """Read the legacy firstboot dnsmasq snippet for rollback."""
+    try:
+        return LEGACY_FIRSTBOOT_CONFIG_PATH.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_legacy_dnsmasq_backup(backup: bytes | None) -> None:
+    """Restore or remove the legacy firstboot dnsmasq snippet after failure."""
+    try:
+        if backup is None:
+            LEGACY_FIRSTBOOT_CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            LEGACY_FIRSTBOOT_CONFIG_PATH.write_bytes(backup)
+    except OSError:
+        pass
+
+
+def _rewrite_legacy_dnsmasq(old_ifaces: set[str], bridge_ifname: str) -> bool:
+    """Replace old LAN interface tokens in /etc/dnsmasq.d/synca-lan.conf."""
+    try:
+        original = LEGACY_FIRSTBOOT_CONFIG_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    updated = original
+    for old_iface in old_ifaces:
+        updated = re.sub(
+            rf"(?m)^(\s*interface\s*=\s*){re.escape(old_iface)}(\s*(?:#.*)?)$",
+            lambda match: f"{match.group(1)}{bridge_ifname}{match.group(2)}",
+            updated,
+        )
+        updated = updated.replace(f"interface:{old_iface}", f"interface:{bridge_ifname}")
+    if updated == original:
+        return False
+    LEGACY_FIRSTBOOT_CONFIG_PATH.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _apply_upnp_lan_migration(plan: dict) -> dict:
+    """Update UPnP LAN interfaces and restart synca-upnp only when active."""
+    old_ifaces = set(plan.get("old_lan_interfaces") or [])
+    bridge_ifname = plan["bridge_if"]
+    if not old_ifaces:
+        return {"ok": True, "step": "upnp", "changed": []}
+
+    store = _config_store()
+    before = store.load(_UPNP_MODULE_NAME, _default_upnp_config())
+    if not isinstance(before, dict):
+        before = _default_upnp_config()
+    lan_interfaces = [str(iface).strip() for iface in before.get("lan_interfaces", []) if str(iface).strip()]
+    if not any(iface in old_ifaces for iface in lan_interfaces):
+        return {"ok": True, "step": "upnp", "changed": []}
+
+    after = copy.deepcopy(before)
+    migrated: list[str] = []
+    for iface in lan_interfaces:
+        migrated.append(bridge_ifname if iface in old_ifaces else iface)
+    after["lan_interfaces"] = _dedupe_strings(migrated)
+
+    was_active = _systemd_unit_active(_SYNCA_UPNP_UNIT)
+    try:
+        store.save(_UPNP_MODULE_NAME, after)
+        changed = ["/etc/server-gui/upnp.json"]
+        if was_active:
+            restart = sudo_run(["systemctl", "restart", _SYNCA_UPNP_UNIT], timeout=20)
+            if not restart.ok:
+                raise RuntimeError((restart.stderr or restart.stdout).strip())
+            changed.append(f"systemctl restart {_SYNCA_UPNP_UNIT}")
+    except Exception as e:
+        store.save(_UPNP_MODULE_NAME, before)
+        if was_active:
+            sudo_run(["systemctl", "restart", _SYNCA_UPNP_UNIT], timeout=20)
+        return {"ok": False, "step": "upnp", "error": f"UPnP設定の移行に失敗しました: {e}"}
+    return {"ok": True, "step": "upnp", "changed": changed}
+
+
+def _apply_firewalld_lan_migration(plan: dict) -> dict:
+    """Move trusted-zone and direct FORWARD rules to the bridge interface."""
+    if not _firewalld_running():
+        return {
+            "ok": False,
+            "step": "firewalld",
+            "error": "firewalldが動作していないため、LAN向けfirewalld設定を移行できません。",
+        }
+
+    bridge_ifname = plan["bridge_if"]
+    changed: list[str] = []
+    errors: list[str] = []
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--zone", "trusted", "--add-interface", bridge_ifname],
+        changed, errors,
+    )
+    for service in ("dhcp", "dns"):
+        _collect_firewalld_change(
+            ["firewall-cmd", "--permanent", "--zone", "trusted", "--add-service", service],
+            changed, errors,
+        )
+    for old_iface in plan.get("firewalld_trusted_remove") or []:
+        _collect_firewalld_change(
+            ["firewall-cmd", "--permanent", "--zone", "trusted", "--remove-interface", old_iface],
+            changed, errors,
+            ignore_missing=True,
+        )
+
+    existing = _firewalld_direct_rule_lines(permanent=True)
+    for item in plan.get("firewalld_direct_replacements") or []:
+        raw = item["raw"]
+        replacement = item["replacement"]
+        if replacement not in existing:
+            new_rule = _parse_direct_rule_line(replacement)
+            if new_rule:
+                before_errors = len(errors)
+                _collect_firewalld_change(
+                    ["firewall-cmd", "--permanent", "--direct", "--add-rule",
+                     new_rule["ipv"], new_rule["table"], new_rule["chain"],
+                     str(new_rule["priority"]), *new_rule["args"]],
+                    changed, errors,
+                )
+                if len(errors) != before_errors:
+                    continue
+                existing.add(replacement)
+        if raw in existing:
+            old_rule = _parse_direct_rule_line(raw)
+            if old_rule:
+                _collect_firewalld_change(
+                    ["firewall-cmd", "--permanent", "--direct", "--remove-rule",
+                     old_rule["ipv"], old_rule["table"], old_rule["chain"],
+                     str(old_rule["priority"]), *old_rule["args"]],
+                    changed, errors,
+                    ignore_missing=True,
+                )
+                existing.discard(raw)
+
+    if errors:
+        return {"ok": False, "step": "firewalld", "error": "\n".join(errors), "changed": changed}
+    if changed:
+        reload_res = sudo_run(["firewall-cmd", "--reload"], timeout=30)
+        if not reload_res.ok:
+            return {
+                "ok": False,
+                "step": "firewalld",
+                "error": (reload_res.stderr or reload_res.stdout).strip() or "firewalld reloadに失敗しました",
+                "changed": changed,
+            }
+        changed.append("firewall-cmd --reload")
+    return {"ok": True, "step": "firewalld", "changed": _dedupe_strings(changed)}
+
+
+def _firewalld_running() -> bool:
+    """Return True when firewalld is available for permanent changes."""
+    return sudo_run(["firewall-cmd", "--state"], timeout=10).ok
+
+
+def _collect_firewalld_change(
+    cmd: list[str],
+    changed: list[str],
+    errors: list[str],
+    ignore_missing: bool = False,
+) -> None:
+    """Run a firewalld command and treat idempotent messages as success."""
+    res = sudo_run(cmd, timeout=30)
+    output = (res.stderr or res.stdout).strip()
+    if res.ok:
+        changed.append(" ".join(shlex.quote(part) for part in cmd))
+        return
+    if "ALREADY_ENABLED" in output:
+        return
+    if ignore_missing and (
+        "NOT_ENABLED" in output or "not enabled" in output or "not in list" in output
+    ):
+        return
+    errors.append(output or "firewalld command failed: " + " ".join(cmd))
+
+
+def _direct_rule_lan_interfaces(direct_rules: list[str], members: set[str]) -> set[str]:
+    """Return member interfaces that appear in replaceable LAN direct rules."""
+    interfaces: set[str] = set()
+    for raw in direct_rules:
+        for member in members:
+            if _rewrite_direct_rule_for_lan_bridge(raw, member, "br-synca-preview"):
+                interfaces.add(member)
+    return interfaces
+
+
+def _direct_rule_replacements(direct_rules: list[str], old_ifaces: list[str], bridge_ifname: str) -> list[dict]:
+    """Build direct-rule replacement rows without touching firewalld."""
+    replacements: list[dict] = []
+    for raw in direct_rules:
+        new_raw = raw
+        reasons: list[str] = []
+        matched_old: list[str] = []
+        for old_iface in old_ifaces:
+            item = _rewrite_direct_rule_for_lan_bridge(new_raw, old_iface, bridge_ifname)
+            if not item:
+                continue
+            new_raw = item["replacement"]
+            reasons.append(item["reason"])
+            matched_old.append(old_iface)
+        if new_raw != raw:
+            replacements.append({
+                "raw": raw,
+                "replacement": new_raw,
+                "old_interfaces": matched_old,
+                "reason": " / ".join(_dedupe_strings(reasons)),
+            })
+    return replacements
+
+
+def _rewrite_direct_rule_for_lan_bridge(raw: str, old_iface: str, bridge_ifname: str) -> dict | None:
+    """Return a rewritten direct rule when the rule is a LAN-side SyncA pattern."""
+    rule = _parse_direct_rule_line(raw)
+    if not rule or rule["ipv"] != "ipv4":
+        return None
+    args = list(rule["args"])
+    if _has_managed_port_forward_comment(args):
+        return None
+
+    changed = False
+    reason = ""
+    if rule["table"] == "filter" and rule["chain"] == "FORWARD":
+        if _arg_value(args, "-i") == old_iface and _jump_target(args) == "ACCEPT":
+            args = _replace_arg_value(args, "-i", bridge_ifname)
+            changed = True
+            reason = "LAN発信FORWARD"
+        if _arg_value(args, "-o") == old_iface and _jump_target(args) == "ACCEPT" and _has_related_state(args):
+            args = _replace_arg_value(args, "-o", bridge_ifname)
+            changed = True
+            reason = "LAN戻りFORWARD"
+    elif rule["table"] == "nat" and rule["chain"] == "POSTROUTING":
+        if _jump_target(args) in {"MASQUERADE", "SNAT", "ACCEPT"}:
+            if _arg_value(args, "-i") == old_iface:
+                args = _replace_arg_value(args, "-i", bridge_ifname)
+                changed = True
+                reason = "NAT入力IF"
+            if _arg_value(args, "-o") == old_iface:
+                args = _replace_arg_value(args, "-o", bridge_ifname)
+                changed = True
+                reason = "NAT出力IF"
+
+    if not changed:
+        return None
+    replacement = _format_direct_rule({
+        **rule,
+        "args": args,
+    })
+    return {"raw": raw, "replacement": replacement, "reason": reason}
+
+
+def _parse_direct_rule_line(raw: str) -> dict | None:
+    """Parse one `firewall-cmd --direct --get-all-rules` line."""
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return None
+    if len(parts) < 5:
+        return None
+    return {
+        "ipv": parts[0],
+        "table": parts[1],
+        "chain": parts[2],
+        "priority": parts[3],
+        "args": parts[4:],
+    }
+
+
+def _format_direct_rule(rule: dict) -> str:
+    """Render a direct rule to a stable single-line representation."""
+    parts = [rule["ipv"], rule["table"], rule["chain"], str(rule["priority"]), *rule["args"]]
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _arg_value(args: list[str], key: str) -> str:
+    """Return the value after an iptables-style argument key."""
+    try:
+        idx = args.index(key)
+    except ValueError:
+        return ""
+    if idx + 1 >= len(args):
+        return ""
+    return args[idx + 1]
+
+
+def _replace_arg_value(args: list[str], key: str, value: str) -> list[str]:
+    """Replace every value paired with an iptables-style argument key."""
+    replaced = list(args)
+    for idx, item in enumerate(replaced[:-1]):
+        if item == key:
+            replaced[idx + 1] = value
+    return replaced
+
+
+def _jump_target(args: list[str]) -> str:
+    """Return the iptables -j target."""
+    return _arg_value(args, "-j").upper()
+
+
+def _has_related_state(args: list[str]) -> bool:
+    """Detect RELATED,ESTABLISHED state or conntrack matches."""
+    values: list[str] = []
+    for key in ("--state", "--ctstate"):
+        value = _arg_value(args, key)
+        if value:
+            values.extend(part.strip().upper() for part in value.split(","))
+    return "RELATED" in values and "ESTABLISHED" in values
+
+
+def _has_managed_port_forward_comment(args: list[str]) -> bool:
+    """Avoid rewriting scoped port/protocol forward rules owned by firewall.py."""
+    return any(
+        "synca-forward-port:" in arg or "synca-protocol-forward:" in arg
+        for arg in args
+    )
+
+
+def _systemd_unit_active(unit: str) -> bool:
+    """Return True when a systemd unit is currently active."""
+    return sudo_run(["systemctl", "is-active", "--quiet", unit], timeout=10).ok
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    """Return unique strings in input order."""
+    out: list[str] = []
+    for value in values:
+        if value not in out:
+            out.append(value)
+    return out
 
 
 def _device_ip_map() -> dict[str, dict]:

@@ -295,6 +295,16 @@
                             <label class="form-check-label" for="br-activate">作成後すぐにアクティブ化</label>
                         </div>
                     </div>
+                    <div class="col-12">
+                        <div class="form-check form-switch">
+                            <input id="br-use-as-lan" type="checkbox" class="form-check-input" onchange="updateBridgeLanPreview()">
+                            <label class="form-check-label" for="br-use-as-lan">このBridgeをLANとして使用する</label>
+                        </div>
+                        <div class="form-text">
+                            ONにすると、旧LAN IFのIPとDHCP/DNS/firewalld/UPnP設定をBridge IFへ移行します。
+                        </div>
+                        <div id="br-lan-preview" class="alert alert-light border small mt-2 d-none"></div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -569,6 +579,9 @@ document.addEventListener('DOMContentLoaded', () => {
     pppoeEditModal = new bootstrap.Modal(document.getElementById('pppoe-edit-modal'));
     bridgeModal = new bootstrap.Modal(document.getElementById('bridge-modal'));
     vlanModal = new bootstrap.Modal(document.getElementById('vlan-modal'));
+    ['br-name', 'br-ifname', 'br-address', 'br-secondary-addresses'].forEach(id => {
+        document.getElementById(id).addEventListener('input', updateBridgeLanPreview);
+    });
 });
 
 async function refresh() {
@@ -713,6 +726,8 @@ function openBridgeModal() {
     document.getElementById('br-hello-time').value = '2';
     document.getElementById('br-autoconnect').checked = true;
     document.getElementById('br-activate').checked = true;
+    document.getElementById('br-use-as-lan').checked = false;
+    setBridgeLanPreview(null);
     document.getElementById('br-routes-section').classList.add('d-none');
     renderBridgeRoutes([]);
     clearBridgeRouteInputs();
@@ -731,7 +746,7 @@ function populateBridgeMembers(selectedMembers) {
     } else {
         wrap.innerHTML = candidates.map(d => `
             <div class="form-check">
-                <input class="form-check-input br-member" type="checkbox" value="${escapeHtml(d.device)}" id="br-m-${escapeHtml(d.device)}" ${selectedMembers.has(d.device) ? 'checked' : ''}>
+                <input class="form-check-input br-member" type="checkbox" value="${escapeHtml(d.device)}" id="br-m-${escapeHtml(d.device)}" ${selectedMembers.has(d.device) ? 'checked' : ''} onchange="updateBridgeLanPreview()">
                 <label class="form-check-label font-monospace" for="br-m-${escapeHtml(d.device)}">
                     ${escapeHtml(d.device)} <span class="text-secondary small">(${(d.ipv4 || []).join(', ') || 'no IP'}, ${escapeHtml(d.state)})</span>
                 </label>
@@ -761,11 +776,14 @@ async function openBridgeEdit(name) {
     document.getElementById('br-hello-time').value = bridge.hello_time || '2';
     document.getElementById('br-autoconnect').checked = detail.autoconnect !== false;
     document.getElementById('br-activate').checked = true;
+    document.getElementById('br-use-as-lan').checked = !!detail.is_lan_bridge;
+    setBridgeLanPreview(null);
     document.getElementById('br-routes-section').classList.remove('d-none');
     renderBridgeRoutes(detail.routes || []);
     clearBridgeRouteInputs();
     document.getElementById('bridge-submit-btn').innerHTML = '<i class="bi bi-check2"></i> Bridge 更新';
     populateBridgeMembers(new Set(detail.members || []));
+    updateBridgeLanPreview();
     bridgeModal.show();
 }
 
@@ -814,11 +832,10 @@ async function submitVlan() {
     }
 }
 
-async function submitBridge() {
+function collectBridgePayload() {
     const members = Array.from(document.querySelectorAll('.br-member:checked')).map(c => c.value);
-    if (members.length === 0) return toast('メンバーを 1 つ以上選択してください', true);
     const bridgeName = bridgeMode === 'edit' ? editingBridgeName : document.getElementById('br-name').value.trim();
-    const payload = {
+    return {
         name: bridgeName,
         ifname: document.getElementById('br-ifname').value.trim() || undefined,
         members,
@@ -834,10 +851,95 @@ async function submitBridge() {
         hello_time: parseInt(document.getElementById('br-hello-time').value, 10) || 2,
         autoconnect: document.getElementById('br-autoconnect').checked,
         activate: document.getElementById('br-activate').checked,
+        use_as_lan: document.getElementById('br-use-as-lan').checked,
     };
+}
+
+function setBridgeLanPreview(html, isError = false) {
+    const box = document.getElementById('br-lan-preview');
+    if (!html) {
+        box.classList.add('d-none');
+        box.innerHTML = '';
+        return;
+    }
+    box.classList.remove('d-none', 'alert-light', 'alert-warning', 'alert-danger');
+    box.classList.add(isError ? 'alert-danger' : 'alert-light');
+    box.innerHTML = html;
+}
+
+async function updateBridgeLanPreview() {
+    const enabled = document.getElementById('br-use-as-lan').checked;
+    if (!enabled) {
+        setBridgeLanPreview(null);
+        return;
+    }
+    const payload = collectBridgePayload();
+    if (!payload.name || payload.members.length === 0) {
+        setBridgeLanPreview('Bridge名とメンバーを選択すると、LAN移行対象を確認できます。');
+        return;
+    }
+    const res = await api.send('/network/api/connections/bridge/lan-migration-preview', 'POST', payload);
+    if (!res) return;
+    if (!res.ok) {
+        setBridgeLanPreview(escapeHtml(res.error || 'LAN移行previewの取得に失敗しました'), true);
+        return;
+    }
+    setBridgeLanPreview(renderBridgeLanPreview(res.plan || {}), false);
+}
+
+function renderBridgeLanPreview(plan) {
+    const oldIfs = plan.old_lan_interfaces || [];
+    const bridgeIf = plan.bridge_if || '(未指定)';
+    const finalAddresses = plan.final_bridge_addresses || [];
+    const directCount = (plan.firewalld_direct_replacements || []).length;
+    const dnsCount = plan.dnsmasq_range_updates || 0;
+    const upnpCount = (plan.upnp_updates || []).length;
+    const legacyCount = (plan.legacy_dnsmasq_updates || []).length;
+    const warnings = plan.warnings || [];
+    const oldText = oldIfs.length
+        ? oldIfs.map(v => `<code>${escapeHtml(v)}</code>`).join(' ')
+        : '<span class="text-danger">検出なし</span>';
+    const warningHtml = warnings.length
+        ? `<div class="text-warning mt-1">${warnings.map(escapeHtml).join('<br>')}</div>`
+        : '';
+    return `
+        <div><strong>LAN移行:</strong> ${oldText} → <code>${escapeHtml(bridgeIf)}</code></div>
+        <div>Bridge IPv4: ${finalAddresses.length ? finalAddresses.map(v => `<code>${escapeHtml(v)}</code>`).join(' ') : '<span class="text-secondary">入力値なし</span>'}</div>
+        <div>対象: dnsmasq ${dnsCount}件 / legacy ${legacyCount}件 / firewalld direct ${directCount}件 / UPnP ${upnpCount}件</div>
+        ${warningHtml}`;
+}
+
+function bridgeLanConfirmText(plan) {
+    if (!plan) return '';
+    const oldIfs = (plan.old_lan_interfaces || []).join(', ') || '検出なし';
+    const bridgeIf = plan.bridge_if || '';
+    const finalAddresses = (plan.final_bridge_addresses || []).join(', ') || '入力値なし';
+    const directCount = (plan.firewalld_direct_replacements || []).length;
+    return `\nLAN移行: ${oldIfs} -> ${bridgeIf}\nBridge IPv4: ${finalAddresses}\ndnsmasq: ${plan.dnsmasq_range_updates || 0}件 / firewalld direct: ${directCount}件 / UPnP: ${(plan.upnp_updates || []).length}件`;
+}
+
+async function submitBridge() {
+    const payload = collectBridgePayload();
+    const members = payload.members;
+    if (members.length === 0) return toast('メンバーを 1 つ以上選択してください', true);
     if (!payload.name) return toast('Bridge 名は必須', true);
     const action = bridgeMode === 'edit' ? '更新' : '作成';
-    if (!confirm(`Bridge "${payload.name}" を${action}しますか?\n\nメンバー: ${members.join(', ')}\nLAN IP: ${payload.address || '(無し)'}\nSTP: ${payload.stp ? 'ON (priority=' + payload.stp_priority + ')' : 'OFF'}`)) return;
+    let lanPreview = null;
+    if (payload.use_as_lan) {
+        const previewRes = await api.send('/network/api/connections/bridge/lan-migration-preview', 'POST', payload);
+        if (!previewRes) return;
+        if (!previewRes.ok) {
+            setBridgeLanPreview(escapeHtml(previewRes.error || 'LAN移行previewの取得に失敗しました'), true);
+            return toast(previewRes.error || 'LAN移行previewの取得に失敗しました', true);
+        }
+        lanPreview = previewRes.plan || {};
+        setBridgeLanPreview(renderBridgeLanPreview(lanPreview), false);
+        if (!(lanPreview.old_lan_interfaces || []).length && !lanPreview.already_lan_bridge) {
+            return toast('旧LANインターフェースを検出できないため、LAN移行ONでは適用できません。', true);
+        }
+    }
+    const lanText = payload.use_as_lan ? bridgeLanConfirmText(lanPreview) : '';
+    if (!confirm(`Bridge "${payload.name}" を${action}しますか?\n\nメンバー: ${members.join(', ')}\nLAN IP: ${payload.address || '(無し)'}\nSTP: ${payload.stp ? 'ON (priority=' + payload.stp_priority + ')' : 'OFF'}${lanText}`)) return;
     const url = bridgeMode === 'edit'
         ? `/network/api/connections/${encodeURIComponent(payload.name)}/bridge`
         : '/network/api/connections/bridge';
@@ -845,11 +947,17 @@ async function submitBridge() {
     const res = await api.send(url, method, payload);
     if (!res) return;
     if (res.ok) {
-        toast(`Bridge "${payload.name}" を${action}しました`);
+        const lanMessage = res.lan_migration && res.lan_migration.message
+            ? ` / ${res.lan_migration.message}`
+            : '';
+        toast(`Bridge "${payload.name}" を${action}しました${lanMessage}`);
         bridgeModal.hide();
         refresh();
     } else {
-        toast('失敗: ' + (res.error || ''), true);
+        const migrationError = res.lan_migration && res.lan_migration.error
+            ? ` / ${res.lan_migration.error}`
+            : '';
+        toast('失敗: ' + (res.error || '') + migrationError, true);
     }
 }
 
@@ -947,6 +1055,9 @@ function renderConnections() {
     tbody.innerHTML = connections.length === 0
         ? '<tr><td colspan="4" class="text-center text-secondary py-4">接続未登録</td></tr>'
         : connections.map(c => {
+            const lanBadge = c.is_lan_bridge
+                ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">LAN使用中</span>'
+                : '';
             const editBtn = c.type === 'pppoe'
                 ? `<button class="btn btn-sm btn-outline-primary" onclick="openPppoeEdit('${escapeJs(c.name)}')">
                        <i class="bi bi-pencil"></i> 編集
@@ -960,7 +1071,7 @@ function renderConnections() {
                        </button>`;
             return `<tr>
                 <td class="fw-semibold">${escapeHtml(c.name)}</td>
-                <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${escapeHtml(c.type)}</span></td>
+                <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${escapeHtml(c.type)}</span>${lanBadge}</td>
                 <td class="font-monospace small">${c.device ? escapeHtml(c.device) : '<span class="text-secondary">未接続</span>'}</td>
                 <td class="d-flex gap-1">
                     ${editBtn}
