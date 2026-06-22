@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ipaddress
 import re
 import shlex
@@ -81,6 +82,33 @@ _AUTH_TYPES = {"psk", "eap", "cert"}
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    _sync_firewalld_for_site_to_site_on_startup(app)
+
+
+def _sync_firewalld_for_site_to_site_on_startup(app: Flask) -> None:
+    """Repair managed IPsec firewalld rules when a self-update restarts GUI."""
+    if os.environ.get("SYNCA_SKIP_IPSEC_FIREWALL_STARTUP_SYNC") == "1":
+        return
+    if os.name != "posix":
+        return
+    try:
+        import fcntl
+
+        lock_path = Path("/run/server-gui-ipsec-firewall-sync.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            with app.app_context():
+                _migrate_in_place()
+                data = _store().load(MODULE_NAME, _default())
+                conns = data.get("connections", [])
+                if conns:
+                    _sync_firewalld_for_site_to_site(conns)
+    except Exception as e:
+        logger.warning("startup IPsec firewalld sync failed: %s", e)
 
 
 # ---- views -------------------------------------------------------------
@@ -724,6 +752,10 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
     for local_net, remote_net in sorted(local_remote_pairs):
         changed |= _firewalld_add_source_if_unassigned("trusted", remote_net)
         changed |= _add_direct_rule(
+            "ipv4", "filter", "INPUT", -26,
+            f"-m policy --pol ipsec --dir in -s {remote_net} -d {local_net} -j ACCEPT",
+        )
+        changed |= _remove_direct_rule(
             "ipv4", "filter", "INPUT", -25,
             f"-s {remote_net} -d {local_net} -p icmp --icmp-type echo-request -j ACCEPT",
         )
@@ -874,6 +906,21 @@ def _add_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str)
         return False
     res = sudo_run([
         "firewall-cmd", "--permanent", "--direct", "--add-rule",
+        ipv, table, chain, str(priority), *shlex.split(args),
+    ], timeout=30)
+    if not res.ok:
+        raise RuntimeError(_strip_noise(res.stderr or res.stdout))
+    return True
+
+
+def _remove_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> bool:
+    """Remove an obsolete SyncA-managed firewalld direct rule when present."""
+    line = f"{ipv} {table} {chain} {priority} {args}"
+    existing = sudo_run(["firewall-cmd", "--permanent", "--direct", "--get-all-rules"], timeout=30)
+    if not existing.ok or line not in {ln.strip() for ln in existing.stdout.splitlines()}:
+        return False
+    res = sudo_run([
+        "firewall-cmd", "--permanent", "--direct", "--remove-rule",
         ipv, table, chain, str(priority), *shlex.split(args),
     ], timeout=30)
     if not res.ok:
