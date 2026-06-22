@@ -39,6 +39,7 @@ import io
 import ipaddress
 import json
 import logging
+import os
 import re
 import shlex
 import zipfile
@@ -75,6 +76,34 @@ _MAX_POST_CMDS = 8
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    _sync_firewalld_for_interfaces_on_startup(app)
+
+
+def _sync_firewalld_for_interfaces_on_startup(app: Flask) -> None:
+    """Repair managed WireGuard firewalld rules when server-gui starts."""
+    if os.environ.get("SYNCA_SKIP_WIREGUARD_FIREWALL_STARTUP_SYNC") == "1":
+        return
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    try:
+        import fcntl
+
+        lock_path = Path("/run/server-gui-wireguard-firewall-sync.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            with app.app_context():
+                if not WG_DIR.exists():
+                    return
+                for path in sorted(WG_DIR.glob("*.conf")):
+                    iface = path.stem
+                    if INTERFACE_RE.match(iface) and _interface_is_active(iface):
+                        _sync_firewalld_for_interface(iface, _parse_wg_conf(path))
+    except Exception as e:
+        logger.warning("startup WireGuard firewalld sync failed: %s", e)
 
 
 # ---- storage ------------------------------------------------------------
@@ -2050,11 +2079,13 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
     lan_ifaces = _detect_lan_interfaces(exclude_ifaces={iface})
     for lan_iface in lan_ifaces:
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-i {iface} -o {lan_iface} -j ACCEPT")
-        changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-i {lan_iface} -o {iface} -m state --state RELATED,ESTABLISHED -j ACCEPT")
+        changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-i {lan_iface} -o {iface} -j ACCEPT")
+        changed |= _remove_direct_rule("ipv4", "filter", "FORWARD", 0, f"-i {lan_iface} -o {iface} -m state --state RELATED,ESTABLISHED -j ACCEPT")
     for wg_net in wg_nets:
         for lan_net in lan_nets:
             changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {wg_net} -d {lan_net} -j ACCEPT")
-            changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -m state --state RELATED,ESTABLISHED -j ACCEPT")
+            changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -j ACCEPT")
+            changed |= _remove_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -m state --state RELATED,ESTABLISHED -j ACCEPT")
 
     if changed:
         reload_res = sudo_run(["firewall-cmd", "--reload"], timeout=30)
@@ -2145,6 +2176,20 @@ def _add_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str)
         return False
     res = sudo_run([
         "firewall-cmd", "--permanent", "--direct", "--add-rule",
+        ipv, table, chain, str(priority), *shlex.split(args),
+    ], timeout=30)
+    if not res.ok:
+        raise RuntimeError((res.stderr or res.stdout).strip())
+    return True
+
+
+def _remove_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> bool:
+    line = f"{ipv} {table} {chain} {priority} {args}"
+    existing = sudo_run(["firewall-cmd", "--permanent", "--direct", "--get-all-rules"], timeout=30)
+    if not existing.ok or line not in {ln.strip() for ln in existing.stdout.splitlines()}:
+        return False
+    res = sudo_run([
+        "firewall-cmd", "--permanent", "--direct", "--remove-rule",
         ipv, table, chain, str(priority), *shlex.split(args),
     ], timeout=30)
     if not res.ok:
