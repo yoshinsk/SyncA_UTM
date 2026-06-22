@@ -359,7 +359,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
-                <button class="btn btn-primary" onclick="saveVhost()">
+                <button id="vhost-save-button" class="btn btn-primary" onclick="saveVhost()">
                     <i class="bi bi-check2"></i> 保存して適用
                 </button>
             </div>
@@ -376,6 +376,7 @@ let availableCerts = [];
 let wafStatus = { bot_categories: [], available_countries: [], modsecurity_available: false };
 let editingBackendId = null;
 let editingVhostId = null;
+let vhostSaveInFlight = false;
 let backendModal, vhostModal;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -818,6 +819,10 @@ function collectListens() {
     }));
 }
 async function saveVhost() {
+    if (vhostSaveInFlight) return;
+    vhostSaveInFlight = true;
+    const saveButton = document.getElementById('vhost-save-button');
+    if (saveButton) saveButton.disabled = true;
     const listens = collectListens();
     const anySsl = listens.some(l => l.ssl);
     // Resolve cert/key paths: dropdown selection (hidden) OR custom inputs
@@ -848,11 +853,16 @@ async function saveVhost() {
     };
     const url = editingVhostId ? `/nginx/api/vhosts/${editingVhostId}` : '/nginx/api/vhosts';
     const method = editingVhostId ? 'PUT' : 'POST';
-    const data = await api.send(url, method, payload);
-    if (data) {
-        toast(editingVhostId ? '更新・適用しました' : '追加・適用しました');
-        vhostModal.hide();
-        refresh();
+    try {
+        const data = await api.send(url, method, payload);
+        if (data) {
+            toast(editingVhostId ? '更新・適用しました' : '追加・適用しました');
+            vhostModal.hide();
+            refresh();
+        }
+    } finally {
+        vhostSaveInFlight = false;
+        if (saveButton) saveButton.disabled = false;
     }
 }
 async function deleteVhost(id) {
