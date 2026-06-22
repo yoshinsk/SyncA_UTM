@@ -262,8 +262,11 @@ def create_vhost():
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
     with _store().transaction(MODULE_NAME, _default()) as data:
-        if any(v["name"] == new["name"] for v in data["vhosts"]):
-            return jsonify({"error": f"vhost name {new['name']!r} already exists"}), 409
+        for vhost in data["vhosts"]:
+            if vhost["name"] == new["name"]:
+                if _same_vhost_payload(vhost, new):
+                    return jsonify({"vhost": vhost, "already_exists": True}), 200
+                return jsonify({"error": f"vhost name {new['name']!r} already exists"}), 409
         try:
             _check_backend_refs(new, data["backends"])
         except ValidationError as e:
@@ -1189,6 +1192,11 @@ def _check_backend_refs(vhost: dict, backends: list) -> None:
         bid = loc.get("backend_id")
         if bid and bid not in ids:
             raise ValidationError(f"backend_id {bid!r} does not exist")
+
+
+def _same_vhost_payload(existing: dict, requested: dict) -> bool:
+    """Treat a repeated create request as successful when it already applied."""
+    return {k: v for k, v in existing.items() if k != "id"} == requested
 
 
 # ----- rendering --------------------------------------------------------
