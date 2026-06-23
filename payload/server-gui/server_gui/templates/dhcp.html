@@ -225,15 +225,29 @@
             <strong>現在のリース</strong>
             <span id="lease-source-label" class="text-secondary small">lease file auto-detected</span>
         </div>
-        <button class="btn btn-outline-secondary btn-sm" onclick="loadLeases()">
-            <i class="bi bi-arrow-clockwise"></i> 更新
-        </button>
+        <div class="d-flex flex-wrap gap-2 justify-content-end">
+            <button id="release-selected-btn" class="btn btn-outline-danger btn-sm" onclick="releaseSelectedLeases()" disabled>
+                <i class="bi bi-unlock"></i> 選択を解放
+            </button>
+            <button id="release-all-btn" class="btn btn-danger btn-sm" onclick="releaseAllLeases()" disabled>
+                <i class="bi bi-exclamation-triangle"></i> 全件解放
+            </button>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadLeases()">
+                <i class="bi bi-arrow-clockwise"></i> 更新
+            </button>
+        </div>
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-sm table-hover align-middle mb-0">
                 <thead class="table-light">
-                    <tr><th>失効 (epoch)</th><th>MAC</th><th>IP</th><th>ホスト名</th><th>client-id</th></tr>
+                    <tr>
+                        <th style="width:40px">
+                            <input id="lease-select-all" class="form-check-input" type="checkbox"
+                                   aria-label="全リースを選択" onchange="toggleAllLeases(this.checked)" disabled>
+                        </th>
+                        <th>失効 (epoch)</th><th>MAC</th><th>IP</th><th>ホスト名</th><th>client-id</th><th style="width:90px"></th>
+                    </tr>
                 </thead>
                 <tbody id="lease-tbody"></tbody>
             </table>
@@ -246,6 +260,8 @@
 <script>
 let dhcp = { ranges: [], static_hosts: [], options: [] };
 let dhcpInterfaces = [];
+let activeLeases = [];
+let selectedLeaseKeys = new Set();
 
 async function refresh() {
     const data = await api.get('/dhcp/api/config');
@@ -371,6 +387,9 @@ async function loadLeases() {
     const data = await api.get('/dhcp/api/leases');
     if (!data) return;
     const leases = data.leases || [];
+    activeLeases = leases;
+    const currentKeys = new Set(activeLeases.map(leaseKey));
+    selectedLeaseKeys = new Set([...selectedLeaseKeys].filter(key => currentKeys.has(key)));
     const sourceLabel = document.getElementById('lease-source-label');
     if (sourceLabel) {
         const sources = data.sources || [];
@@ -378,15 +397,113 @@ async function loadLeases() {
     }
     const tbody = document.getElementById('lease-tbody');
     tbody.innerHTML = leases.length === 0
-        ? `<tr><td colspan="5" class="text-center text-secondary py-3">${escapeHtml(data.note || data.error || 'リースなし')}</td></tr>`
+        ? `<tr><td colspan="7" class="text-center text-secondary py-3">${escapeHtml(data.note || data.error || 'リースなし')}</td></tr>`
         : leases.map(l => `
             <tr>
+                <td>
+                    <input class="form-check-input lease-check" type="checkbox"
+                           data-lease-key="${escapeHtml(leaseKey(l))}"
+                           ${selectedLeaseKeys.has(leaseKey(l)) ? 'checked' : ''}
+                           aria-label="${escapeHtml(l.ip)} を選択"
+                           onchange="toggleLeaseSelection(this)">
+                </td>
                 <td class="font-monospace small">${escapeHtml(l.expires)}</td>
                 <td class="font-monospace">${escapeHtml(l.mac)}</td>
                 <td class="font-monospace">${escapeHtml(l.ip)}</td>
                 <td class="font-monospace">${escapeHtml(l.hostname)}</td>
                 <td class="font-monospace small text-secondary">${escapeHtml(l.client_id)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-danger" onclick="releaseSingleLease('${escapeJs(leaseKey(l))}')">
+                        <i class="bi bi-unlock"></i>
+                    </button>
+                </td>
             </tr>`).join('');
+    updateLeaseActionButtons();
+}
+
+function leaseKey(lease) {
+    return JSON.stringify([
+        lease.source || '',
+        lease.mac || '',
+        lease.ip || '',
+        lease.client_id || '',
+    ]);
+}
+
+function leasePayload(lease) {
+    return {
+        source: lease.source || '',
+        mac: lease.mac || '',
+        ip: lease.ip || '',
+        client_id: lease.client_id || '',
+    };
+}
+
+function toggleLeaseSelection(input) {
+    const key = input.dataset.leaseKey;
+    if (!key) return;
+    if (input.checked) selectedLeaseKeys.add(key);
+    else selectedLeaseKeys.delete(key);
+    updateLeaseActionButtons();
+}
+
+function toggleAllLeases(checked) {
+    selectedLeaseKeys = checked ? new Set(activeLeases.map(leaseKey)) : new Set();
+    document.querySelectorAll('.lease-check').forEach(input => { input.checked = checked; });
+    updateLeaseActionButtons();
+}
+
+function selectedLeases() {
+    return activeLeases.filter(lease => selectedLeaseKeys.has(leaseKey(lease)));
+}
+
+function updateLeaseActionButtons() {
+    const selected = selectedLeases().length;
+    const hasLeases = activeLeases.length > 0;
+    const selectedBtn = document.getElementById('release-selected-btn');
+    const allBtn = document.getElementById('release-all-btn');
+    const selectAll = document.getElementById('lease-select-all');
+    if (selectedBtn) selectedBtn.disabled = selected === 0;
+    if (allBtn) allBtn.disabled = !hasLeases;
+    if (selectAll) {
+        selectAll.disabled = !hasLeases;
+        selectAll.checked = hasLeases && selected === activeLeases.length;
+        selectAll.indeterminate = selected > 0 && selected < activeLeases.length;
+    }
+}
+
+async function releaseSingleLease(key) {
+    const lease = activeLeases.find(item => leaseKey(item) === key);
+    if (!lease) return toast('対象リースが見つかりません', true);
+    await releaseLeases([lease], false);
+}
+
+async function releaseSelectedLeases() {
+    const leases = selectedLeases();
+    if (leases.length === 0) return toast('解放対象のリースを選択してください', true);
+    await releaseLeases(leases, false);
+}
+
+async function releaseAllLeases() {
+    if (activeLeases.length === 0) return toast('解放対象のリースがありません', true);
+    await releaseLeases(activeLeases, true);
+}
+
+async function releaseLeases(leases, all) {
+    const count = all ? activeLeases.length : leases.length;
+    const label = all ? '全ての DHCP リース' : `${count} 件の DHCP リース`;
+    if (!confirm(`${label}を解放しますか?\n\n対象端末は次回更新時に DHCP で再取得します。`)) return;
+    const res = await api.send('/dhcp/api/leases/release', 'POST', {
+        all: !!all,
+        leases: all ? [] : leases.map(leasePayload),
+    });
+    if (res && res.ok) {
+        selectedLeaseKeys.clear();
+        toast(`${res.released_count || 0} 件のリースを解放しました`);
+        await loadLeases();
+    } else if (res) {
+        toast(res.error || 'リース解放に失敗しました', true);
+    }
 }
 
 async function addRange() {
