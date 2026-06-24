@@ -630,14 +630,13 @@ def _render(conns: list[dict]) -> str:
         auth_type = c.get("auth_type", "psk")
         if auth_type == "psk":
             if c.get("psk"):
-                lines.append(f"    ike-{c['name']} {{")
-                if c.get("remote_id"):
-                    lines.append(f"        id = {c['remote_id']}")
-                elif c.get("remote_addrs") and c["remote_addrs"] not in ("%any", ""):
-                    lines.append(f"        id = {c['remote_addrs']}")
-                secret = c["psk"].replace("\\", "\\\\")
-                lines.append(f'        secret = "{secret}"')
-                lines.append("    }")
+                secret_ids = _psk_secret_ids(c)
+                _append_ike_secret(lines, c["name"], c["psk"], secret_ids)
+                # IKEv1 Main ModeではID payloadを受け取る前にPSK検索が走る。
+                # ID付きsecretだけだとDDNS拠点の実IPに一致せず初期交換で失敗するため、
+                # IKEv1に限って同じPSKのMain Mode用フォールバックを追加する。
+                if c.get("version") == 1 and secret_ids:
+                    _append_ike_secret(lines, f"{c['name']}-mainmode", c["psk"])
         elif auth_type == "eap":
             if c.get("server_key"):
                 lines.append(f"    rsa-{c['name']} {{")
@@ -658,6 +657,31 @@ def _render(conns: list[dict]) -> str:
                 lines.append("    }")
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def _psk_secret_ids(c: dict) -> list[str]:
+    """Return identity selectors used for an IKE PSK secret."""
+    values: list[str] = []
+
+    def add(value: str | None) -> None:
+        value = (value or "").strip()
+        if value and value not in values:
+            values.append(value)
+
+    add(c.get("local_id"))
+    add(c.get("remote_id"))
+    if not c.get("remote_id") and c.get("remote_addrs") not in ("%any", ""):
+        add(c.get("remote_addrs"))
+    return values
+
+
+def _append_ike_secret(lines: list[str], name: str, psk: str, ids: list[str] | None = None) -> None:
+    lines.append(f"    ike-{name} {{")
+    for index, identity in enumerate(ids or [], 1):
+        lines.append(f"        id-{index} = {identity}")
+    secret = psk.replace("\\", "\\\\")
+    lines.append(f'        secret = "{secret}"')
+    lines.append("    }")
 
 
 def _apply(conns: list[dict]) -> None:
