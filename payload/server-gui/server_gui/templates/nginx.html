@@ -1,3 +1,8 @@
+{#
+File: payload/server-gui/server_gui/templates/nginx.html
+Summary: Renders the Nginx reverse proxy management UI and sends vhost/backend
+configuration changes to the server-gui API.
+#}
 {% extends "base.html" %}
 {% block title %}Nginx — SyncA UTM{% endblock %}
 {% block content %}
@@ -195,7 +200,58 @@
                 </div>
                 <div class="mb-3">
                     <label class="form-label">バックエンド (location /)</label>
-                    <select id="v-backend" class="form-select"></select>
+                    <select id="v-backend" class="form-select" onchange="updateAppHint()"></select>
+                </div>
+                <hr>
+                <h6 class="text-secondary small mb-2">
+                    <i class="bi bi-signpost-split"></i> リバースプロキシ詳細
+                </h6>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="v-preserve-host" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="v-preserve-host">Hostヘッダを維持</label>
+                        </div>
+                        <div class="form-text">バックエンドへ <code>Host: $http_host</code> を渡し、非標準ポートも維持します。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="v-forwarded-headers" type="checkbox" class="form-check-input" checked>
+                            <label class="form-check-label" for="v-forwarded-headers">HTTPS終端プロキシ用ヘッダ</label>
+                        </div>
+                        <div class="form-text"><code>X-Forwarded-Proto</code> / <code>Host</code> / <code>Port</code> 等を渡します。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="v-redirect-http" type="checkbox" class="form-check-input">
+                            <label class="form-check-label" for="v-redirect-http">HTTPをHTTPSへリダイレクト</label>
+                        </div>
+                        <div class="form-text">HTTP listenを同じvhostに含める場合、HTTPS側へ301転送します。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch">
+                            <input id="v-redirect-497" type="checkbox" class="form-check-input">
+                            <label class="form-check-label" for="v-redirect-497">HTTPSポートへの平文HTTPを救済</label>
+                        </div>
+                        <div class="form-text">HTTPS専用ポートへHTTPで来た場合、同じポートのHTTPS URLへ転送します。</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">アプリ別ヒント</label>
+                        <select id="v-app-hint" class="form-select form-select-sm" onchange="updateAppHint()">
+                            <option value="generic">汎用</option>
+                            <option value="nextcloud">Nextcloud</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <div id="v-nextcloud-hint" class="alert alert-info small mb-0 d-none">
+                            <i class="bi bi-info-circle"></i>
+                            NextcloudはNginx側のヘッダだけでは不十分な場合があります。
+                            Nextcloudの <code>config.php</code> に
+                            <code>trusted_proxies</code>、<code>overwritehost</code>、
+                            <code>overwriteprotocol</code>、<code>overwritewebroot</code>、
+                            <code>overwrite.cli.url</code> を設定してください。
+                        </div>
+                    </div>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-md-6 d-flex align-items-end">
@@ -525,8 +581,11 @@ function renderVhosts() {
             const statusBadge = v.enabled
                 ? '<span class="badge bg-success-subtle text-success-emphasis ms-1">有効</span>'
                 : '<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">無効</span>';
+            const optionBadges = proxyOptionBadges(v);
             return `<tr class="${dimmed}">
-                <td class="fw-semibold">${escapeHtml(v.name)}${statusBadge}</td>
+                <td class="fw-semibold">${escapeHtml(v.name)}${statusBadge}
+                    ${optionBadges ? `<div class="mt-1">${optionBadges}</div>` : ''}
+                </td>
                 <td>${listen}</td>
                 <td class="font-monospace small">${escapeHtml(v.server_names.join(' '))}</td>
                 <td>${backendStr}</td>
@@ -559,6 +618,32 @@ function renderUnmanaged(items) {
 }
 
 function escapeJsLocal(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+function effectiveProxyOptions(v, loc0 = null) {
+    const opts = (v && v.proxy_options) || {};
+    const loc = loc0 || (v && v.locations && v.locations[0]) || {};
+    const headers = loc.proxy_headers || null;
+    const hasHeaders = headers && Object.keys(headers).length > 0;
+    const hasForwarded = hasHeaders && Object.keys(headers).some(k => k.startsWith('X-Forwarded-') || k === 'X-Real-IP');
+    return {
+        preserve_host: opts.preserve_host !== undefined ? !!opts.preserve_host : (hasHeaders ? headers.Host !== undefined : true),
+        forwarded_headers: opts.forwarded_headers !== undefined ? !!opts.forwarded_headers : (hasHeaders ? !!hasForwarded : true),
+        redirect_http_to_https: !!opts.redirect_http_to_https,
+        redirect_plain_http_on_https_port: !!opts.redirect_plain_http_on_https_port,
+        app_hint: opts.app_hint || 'generic',
+    };
+}
+
+function proxyOptionBadges(v) {
+    const opts = effectiveProxyOptions(v);
+    const badges = [];
+    if (opts.preserve_host) badges.push('<span class="badge bg-primary-subtle text-primary-emphasis me-1">Host</span>');
+    if (opts.forwarded_headers) badges.push('<span class="badge bg-info-subtle text-info-emphasis me-1">X-Forwarded</span>');
+    if (opts.redirect_http_to_https) badges.push('<span class="badge bg-success-subtle text-success-emphasis me-1">HTTP→HTTPS</span>');
+    if (opts.redirect_plain_http_on_https_port) badges.push('<span class="badge bg-warning-subtle text-warning-emphasis me-1">497救済</span>');
+    if (opts.app_hint === 'nextcloud') badges.push('<span class="badge bg-secondary-subtle text-secondary-emphasis me-1">Nextcloud</span>');
+    return badges.join('');
+}
 
 async function importVhost(filename) {
     if (!confirm(`${filename} を GUI 管理に取り込みますか?\n\n動作:\n  1. 設定をパース\n  2. proxy_pass からバックエンドを自動作成/再利用\n  3. ${filename} を ${filename}.imported にリネーム (nginx は読込まなくなる)\n  4. vhost-*.conf を再生成 + nginx -t + reload\n  5. 失敗時は全て元に戻す`)) return;
@@ -778,6 +863,7 @@ function openVhostModal() {
     addListenRow(443, true, true, false);
     populateBackendSelect();
     populateCertSelect(null);
+    populateProxyOptions(null);
     populateWaf(null);
     vhostModal.show();
 }
@@ -788,6 +874,34 @@ function populateBackendSelect(selectedId) {
             `<option value="${b.id}" ${b.id === selectedId ? 'selected' : ''}>${escapeHtml(b.name)} (${escapeHtml(b.scheme)}://${escapeHtml(b.host)}:${b.port})</option>`
         ).join('');
 }
+
+function populateProxyOptions(v, loc0 = null) {
+    const opts = effectiveProxyOptions(v || {}, loc0);
+    document.getElementById('v-preserve-host').checked = opts.preserve_host;
+    document.getElementById('v-forwarded-headers').checked = opts.forwarded_headers;
+    document.getElementById('v-redirect-http').checked = opts.redirect_http_to_https;
+    document.getElementById('v-redirect-497').checked = opts.redirect_plain_http_on_https_port;
+    document.getElementById('v-app-hint').value = opts.app_hint || 'generic';
+    updateAppHint();
+}
+
+function collectProxyOptions() {
+    return {
+        preserve_host: document.getElementById('v-preserve-host').checked,
+        forwarded_headers: document.getElementById('v-forwarded-headers').checked,
+        redirect_http_to_https: document.getElementById('v-redirect-http').checked,
+        redirect_plain_http_on_https_port: document.getElementById('v-redirect-497').checked,
+        app_hint: document.getElementById('v-app-hint').value || 'generic',
+    };
+}
+
+function updateAppHint() {
+    const hint = document.getElementById('v-nextcloud-hint');
+    if (!hint) return;
+    const app = document.getElementById('v-app-hint').value;
+    hint.classList.toggle('d-none', app !== 'nextcloud');
+}
+
 function editVhost(id) {
     const v = vhosts.find(x => x.id === id);
     if (!v) return;
@@ -806,6 +920,7 @@ function editVhost(id) {
     v.listens.forEach(l => addListenRow(l.port, l.ssl, l.http2, l.default_server, l.address || ''));
     populateBackendSelect(loc0.backend_id);
     populateCertSelect(v.ssl?.cert_path || null);
+    populateProxyOptions(v, loc0);
     populateWaf(v.waf || null);
     vhostModal.show();
 }
@@ -841,6 +956,7 @@ async function saveVhost() {
         server_names: document.getElementById('v-server-names').value.trim().split(/\s+/).filter(Boolean),
         listens,
         ssl: anySsl ? { cert_path: certPath, key_path: keyPath } : null,
+        proxy_options: collectProxyOptions(),
         waf: collectWaf(),
         client_max_body_size: document.getElementById('v-body-size').value.trim() || '1m',
         set_real_ip_from: document.getElementById('v-real-ip').value.split(',').map(s => s.trim()).filter(Boolean),

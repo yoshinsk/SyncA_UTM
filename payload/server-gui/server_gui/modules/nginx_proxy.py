@@ -1,5 +1,9 @@
 """Nginx reverse proxy management.
 
+File: payload/server-gui/server_gui/modules/nginx_proxy.py
+Summary: Stores GUI-managed Nginx reverse proxy definitions, renders vhost
+configuration, validates nginx, and reloads the service safely.
+
 Owns vhost config files under /etc/nginx/conf.d/vhost-*.conf, generated from
 a JSON model stored in CONFIG_DIR/nginx.json. Files NOT matching vhost-*.conf
 are left untouched (existing handwritten vhosts are visible as 'unmanaged').
@@ -154,6 +158,18 @@ GENERATED_MARKER = "# server-gui:auto-generated"
 # Names we will not let the user create / import — they collide with
 # files dropped by the installer.
 RESERVED_VHOST_NAMES = {"server-gui"}
+PROXY_APP_HINTS = {"generic", "nextcloud"}
+GENERATED_PROXY_HEADER_NAMES = {
+    "Host",
+    "X-Real-IP",
+    "X-Forwarded-For",
+    "X-Forwarded-Proto",
+    "X-Forwarded-Host",
+    "X-Forwarded-Port",
+    "X-Forwarded-Scheme",
+    "X-Forwarded-Ssl",
+    "X-Forwarded-SSL",
+}
 
 
 def register(app: Flask) -> None:
@@ -546,7 +562,7 @@ def _parse_location_body(path: str, body: str) -> dict:
             "X-Real-IP": "$remote_addr",
             "X-Forwarded-For": "$proxy_add_x_forwarded_for",
             "X-Forwarded-Proto": "$scheme",
-            "X-Forwarded-Host": "$host",
+            "X-Forwarded-Host": "$http_host",
             "X-Forwarded-Port": "$server_port",
             "Host": "$http_host",
         },
@@ -655,6 +671,7 @@ def _parse_server_body(body: str) -> dict | None:
         "access_log": None,
         "error_log": None,
         "locations": locations,
+        "proxy_options": _infer_proxy_options(locations),
     }
 
 
@@ -779,6 +796,8 @@ def _parse_vhost(raw: dict) -> dict:
     else:
         ssl_cfg = None
 
+    proxy_options = _parse_proxy_options(raw.get("proxy_options") or {})
+
     locs_raw = raw.get("locations")
     if not isinstance(locs_raw, list) or not locs_raw:
         raise ValidationError("locations must be a non-empty list")
@@ -792,14 +811,7 @@ def _parse_vhost(raw: dict) -> dict:
             raise ValidationError(f"unsupported location type: {ltype!r}")
         headers = loc.get("proxy_headers")
         if not isinstance(headers, dict):
-            headers = {
-                "X-Real-IP": "$remote_addr",
-                "X-Forwarded-For": "$proxy_add_x_forwarded_for",
-                "X-Forwarded-Proto": "$scheme",
-                "X-Forwarded-Host": "$host",
-                "X-Forwarded-Port": "$server_port",
-                "Host": "$http_host",
-            }
+            headers = _generated_proxy_headers(proxy_options)
         timeouts = loc.get("timeouts") or {}
         locations.append({
             "path": path,
@@ -833,8 +845,89 @@ def _parse_vhost(raw: dict) -> dict:
         "access_log": raw.get("access_log") or None,
         "error_log": raw.get("error_log") or None,
         "locations": locations,
+        "proxy_options": proxy_options,
         "waf": waf,
     }
+
+
+def _default_proxy_options() -> dict:
+    return {
+        "preserve_host": True,
+        "forwarded_headers": True,
+        "redirect_http_to_https": False,
+        "redirect_plain_http_on_https_port": False,
+        "app_hint": "generic",
+    }
+
+
+def _parse_proxy_options(raw: dict) -> dict:
+    """Validate reverse-proxy behavior toggles stored per vhost."""
+    out = _default_proxy_options()
+    if not isinstance(raw, dict):
+        return out
+    for key in (
+        "preserve_host",
+        "forwarded_headers",
+        "redirect_http_to_https",
+        "redirect_plain_http_on_https_port",
+    ):
+        if key in raw:
+            out[key] = bool(raw.get(key))
+    app_hint = str(raw.get("app_hint") or "generic").strip().lower()
+    if app_hint not in PROXY_APP_HINTS:
+        raise ValidationError(f"unsupported proxy_options.app_hint: {app_hint!r}")
+    out["app_hint"] = app_hint
+    return out
+
+
+def _infer_proxy_options(locations: list[dict]) -> dict:
+    """Infer GUI toggles when importing an existing handwritten vhost."""
+    out = _default_proxy_options()
+    if not locations:
+        return out
+    headers = locations[0].get("proxy_headers") or {}
+    if headers:
+        out["preserve_host"] = "Host" in headers
+        out["forwarded_headers"] = any(k.startswith("X-Forwarded-") for k in headers) or "X-Real-IP" in headers
+    return out
+
+
+def _generated_proxy_headers(options: dict) -> dict[str, str]:
+    """Build the standard proxy headers controlled by the GUI toggles."""
+    opts = _parse_proxy_options(options)
+    headers: dict[str, str] = {}
+    if opts["forwarded_headers"]:
+        headers.update({
+            "X-Real-IP": "$remote_addr",
+            "X-Forwarded-For": "$proxy_add_x_forwarded_for",
+            "X-Forwarded-Proto": "$scheme",
+            "X-Forwarded-Host": "$http_host",
+            "X-Forwarded-Port": "$server_port",
+        })
+    if opts["preserve_host"]:
+        headers["Host"] = "$http_host"
+    return headers
+
+
+def _render_proxy_headers(loc: dict, options: dict) -> dict[str, str]:
+    """Merge operator custom headers with GUI-managed standard headers."""
+    custom = {
+        str(k): str(v)
+        for k, v in (loc.get("proxy_headers") or {}).items()
+        if str(k) not in GENERATED_PROXY_HEADER_NAMES
+    }
+    headers = _generated_proxy_headers(options)
+    headers.update(custom)
+    return headers
+
+
+def _https_redirect_target(vhost: dict) -> str | None:
+    ssl_ports = [li["port"] for li in vhost.get("listens") or [] if li.get("ssl")]
+    if not ssl_ports:
+        return None
+    port = ssl_ports[0]
+    suffix = "" if port == 443 else f":{port}"
+    return f"https://$host{suffix}$request_uri"
 
 
 def _parse_waf(raw: dict) -> dict:
@@ -1242,6 +1335,14 @@ def _render_vhost(vhost: dict, backends_by_id: dict[str, dict]) -> str:
         # Use a per-vhost zone name so multiple SSL vhosts don't collide on size
         lines.append(f"    ssl_session_cache shared:ssl-{vhost['name']}:1m;")
         lines.append("    ssl_session_timeout 10m;")
+    proxy_options = _parse_proxy_options(vhost.get("proxy_options") or {})
+    https_redirect_target = _https_redirect_target(vhost)
+    if proxy_options["redirect_http_to_https"] and https_redirect_target:
+        lines.append("    if ($scheme = http) {")
+        lines.append(f"        return 301 {https_redirect_target};")
+        lines.append("    }")
+    if proxy_options["redirect_plain_http_on_https_port"] and vhost.get("ssl"):
+        lines.append("    error_page 497 =301 https://$host:$server_port$request_uri;")
     if vhost.get("client_max_body_size"):
         lines.append(f"    client_max_body_size {vhost['client_max_body_size']};")
     for cidr in vhost.get("set_real_ip_from") or []:
@@ -1310,7 +1411,7 @@ def _render_vhost(vhost: dict, backends_by_id: dict[str, dict]) -> str:
                 )
         if backend:
             lines.append(f"        proxy_pass {backend['scheme']}://{backend['host']}:{backend['port']};")
-        for hk, hv in (loc.get("proxy_headers") or {}).items():
+        for hk, hv in _render_proxy_headers(loc, proxy_options).items():
             lines.append(f"        proxy_set_header {hk} {hv};")
         if loc.get("websocket"):
             lines.append("        proxy_http_version 1.1;")
