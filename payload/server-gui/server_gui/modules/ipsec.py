@@ -900,6 +900,12 @@ def _firewalld_add_ipsec_endpoint_rule(zone: str, endpoint: str) -> bool:
 
 def _firewalld_add(args: list[str]) -> bool:
     """Run a permanent firewalld add operation and report whether reload is needed."""
+    query_args = _firewalld_query_args_for_add(args)
+    if query_args:
+        query = sudo_run(["firewall-cmd", "--permanent", *query_args], timeout=30)
+        if query.ok and query.stdout.strip() == "yes":
+            return False
+
     res = sudo_run(["firewall-cmd", "--permanent", *args], timeout=30)
     text = _strip_noise(res.stderr or res.stdout)
     if res.ok:
@@ -912,6 +918,12 @@ def _firewalld_add(args: list[str]) -> bool:
 
 def _firewalld_remove(args: list[str]) -> bool:
     """Run a permanent firewalld remove operation and report whether reload is needed."""
+    query_args = _firewalld_query_args_for_remove(args)
+    if query_args:
+        query = sudo_run(["firewall-cmd", "--permanent", *query_args], timeout=30)
+        if query.stdout.strip().lower() == "no":
+            return False
+
     res = sudo_run(["firewall-cmd", "--permanent", *args], timeout=30)
     text = _strip_noise(res.stderr or res.stdout)
     if res.ok:
@@ -920,6 +932,56 @@ def _firewalld_remove(args: list[str]) -> bool:
     if already_disabled:
         return False
     raise RuntimeError(text)
+
+
+def _firewalld_query_args_for_remove(args: list[str]) -> list[str] | None:
+    """削除対象が未設定なら、firewalld reload不要として扱う。"""
+    if "--zone" not in args:
+        return None
+    zone_index = args.index("--zone")
+    if zone_index + 1 >= len(args):
+        return None
+    zone = args[zone_index + 1]
+    if "--remove-masquerade" in args:
+        return ["--zone", zone, "--query-masquerade"]
+    checks = {
+        "--remove-service": "--query-service",
+        "--remove-port": "--query-port",
+        "--remove-interface": "--query-interface",
+        "--remove-source": "--query-source",
+        "--remove-rich-rule": "--query-rich-rule",
+    }
+    for remove_arg, query_arg in checks.items():
+        if remove_arg in args:
+            value_index = args.index(remove_arg) + 1
+            if value_index >= len(args):
+                return None
+            return ["--zone", zone, query_arg, args[value_index]]
+    return None
+
+
+def _firewalld_query_args_for_add(args: list[str]) -> list[str] | None:
+    """既存firewalld設定をqueryし、不要な定期reloadを避ける。"""
+    if "--zone" not in args:
+        return None
+    zone_index = args.index("--zone")
+    if zone_index + 1 >= len(args):
+        return None
+    zone = args[zone_index + 1]
+    checks = {
+        "--add-service": "--query-service",
+        "--add-port": "--query-port",
+        "--add-interface": "--query-interface",
+        "--add-source": "--query-source",
+        "--add-rich-rule": "--query-rich-rule",
+    }
+    for add_arg, query_arg in checks.items():
+        if add_arg in args:
+            value_index = args.index(add_arg) + 1
+            if value_index >= len(args):
+                return None
+            return ["--zone", zone, query_arg, args[value_index]]
+    return None
 
 
 def _add_direct_rule(ipv: str, table: str, chain: str, priority: int, args: str) -> bool:
