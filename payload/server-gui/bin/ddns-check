@@ -22,6 +22,11 @@ def _log(msg: str) -> None:
 
 def main() -> int:
     os.environ.setdefault("SERVER_GUI_CONFIG_DIR", "/etc/server-gui")
+    # The DDNS timer only needs the DDNS module, but create_app() registers all
+    # modules. Suppress startup firewalld sync here so a periodic IP check
+    # cannot trigger a management-access-impacting firewall reload.
+    os.environ["SYNCA_SKIP_IPSEC_FIREWALL_STARTUP_SYNC"] = "1"
+    os.environ["SYNCA_SKIP_WIREGUARD_FIREWALL_STARTUP_SYNC"] = "1"
     # Need a Flask application context for the modules' current_app references
     sys.path.insert(0, "/opt/server-gui")
     try:
