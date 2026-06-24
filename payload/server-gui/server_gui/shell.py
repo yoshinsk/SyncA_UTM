@@ -72,4 +72,10 @@ def run(argv: Sequence[str], *, timeout: float = 30.0, check: bool = False, stdi
 
 def sudo_run(argv: Sequence[str], **kw) -> CommandResult:
     """Run with `sudo -n` prefix. Required when the service is not root."""
+    if list(argv) == ["firewall-cmd", "--reload"]:
+        from .firewalld_safety import ensure_before_firewalld_reload
+
+        guard = ensure_before_firewalld_reload()
+        if not guard.ok:
+            return CommandResult(1, "", guard.output, argv)
     return run(["sudo", "-n", *argv], **kw)
