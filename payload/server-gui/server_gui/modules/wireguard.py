@@ -72,6 +72,7 @@ _TABLE_RE = re.compile(r"^(off|auto|\d{1,5})$")
 # and reject control characters that could break the conf-file format.
 _POST_CMD_MAX_LEN = 512
 _MAX_POST_CMDS = 8
+_WIREGUARD_LAN_TCP_MSS = 1360
 
 
 def register(app: Flask) -> None:
@@ -2086,6 +2087,19 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
         for lan_net in lan_nets:
             changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {wg_net} -d {lan_net} -j ACCEPT")
             changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -j ACCEPT")
+            # Mobile WireGuard paths often have a smaller effective MTU than the
+            # LAN. Clamp SMB and other TCP sessions before packet loss causes
+            # retransmission-heavy transfers.
+            changed |= _add_direct_rule(
+                "ipv4", "mangle", "FORWARD", 0,
+                f"-s {wg_net} -d {lan_net} -p tcp --tcp-flags SYN,RST SYN "
+                f"-m comment --comment synca-wg-mss -j TCPMSS --set-mss {_WIREGUARD_LAN_TCP_MSS}",
+            )
+            changed |= _add_direct_rule(
+                "ipv4", "mangle", "FORWARD", 0,
+                f"-s {lan_net} -d {wg_net} -p tcp --tcp-flags SYN,RST SYN "
+                f"-m comment --comment synca-wg-mss -j TCPMSS --set-mss {_WIREGUARD_LAN_TCP_MSS}",
+            )
             changed |= _remove_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -m state --state RELATED,ESTABLISHED -j ACCEPT")
 
     if changed:
