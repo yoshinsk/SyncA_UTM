@@ -274,8 +274,8 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Client MTU</label>
-                        <input id="pf-mtu" type="number" class="form-control font-monospace" value="1450">
-                        <div class="form-text">標準は 1450 (Ethernet 1500 − 50 byte overhead)。</div>
+                        <input id="pf-mtu" type="number" class="form-control font-monospace" value="1380">
+                        <div class="form-text">モバイル回線やSMB利用を考慮した推奨値は 1380。</div>
                     </div>
                     <div class="col-12">
                         <label class="form-label">Client Allowed IPs <span class="text-secondary small">(クライアントが VPN 経由で送るあて先)</span></label>
@@ -366,7 +366,7 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Client MTU</label>
-                        <input id="bf-mtu" type="number" class="form-control font-monospace" value="1450">
+                        <input id="bf-mtu" type="number" class="form-control font-monospace" value="1380">
                     </div>
                     <div class="col-12">
                         <label class="form-label">Client Allowed IPs</label>
@@ -979,7 +979,7 @@ function openBulkPeerModal() {
     document.getElementById('bf-start').value = '';
     document.getElementById('bf-display-names').value = '';
     document.getElementById('bf-dns').value = '';
-    document.getElementById('bf-mtu').value = sug.client_mtu || 1450;
+    document.getElementById('bf-mtu').value = sug.client_mtu || 1380;
     document.getElementById('bf-client-aips').value = (sug.client_allowed_ips || ['0.0.0.0/0', '::/0']).join(', ');
     document.getElementById('bf-endpoint').value = sug.endpoint || wanEndpoint;
     document.getElementById('bf-keepalive').value = 25;
@@ -1107,7 +1107,7 @@ function openPeerModal(peer) {
         document.getElementById('pf-dns-use').checked = dnsList.length > 0;
         document.getElementById('pf-dns').value = dnsList.join(', ');
         document.getElementById('pf-dns').disabled = dnsList.length === 0;
-        document.getElementById('pf-mtu').value = peer.client_mtu || 1450;
+        document.getElementById('pf-mtu').value = peer.client_mtu || 1380;
         document.getElementById('pf-client-aips').value =
             (peer.client_allowed_ips || []).join(', ') || (sug.client_allowed_ips || []).join(', ');
         document.getElementById('pf-endpoint').value = peer.endpoint || sug.endpoint || wanEndpoint;
@@ -1129,7 +1129,7 @@ function openPeerModal(peer) {
         document.getElementById('pf-dns-use').checked = false;
         document.getElementById('pf-dns').value = '';
         document.getElementById('pf-dns').disabled = true;
-        document.getElementById('pf-mtu').value = 1450;
+        document.getElementById('pf-mtu').value = 1380;
         document.getElementById('pf-client-aips').value = (sug.client_allowed_ips || ['0.0.0.0/0', '::/0']).join(', ');
         document.getElementById('pf-endpoint').value = sug.endpoint || wanEndpoint;
         document.getElementById('pf-keepalive').value = 25;

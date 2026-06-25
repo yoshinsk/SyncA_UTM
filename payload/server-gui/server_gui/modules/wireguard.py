@@ -72,7 +72,8 @@ _TABLE_RE = re.compile(r"^(off|auto|\d{1,5})$")
 # and reject control characters that could break the conf-file format.
 _POST_CMD_MAX_LEN = 512
 _MAX_POST_CMDS = 8
-_WIREGUARD_LAN_TCP_MSS = 1360
+_WIREGUARD_CLIENT_MTU = 1380
+_WIREGUARD_LAN_TCP_MSS = 1340
 
 
 def register(app: Flask) -> None:
@@ -312,7 +313,7 @@ def _compute_suggestions(iface: str, parsed: dict, peers_meta: dict, live: dict 
         "available_peer_count": _free_peer_address_count(iface, parsed, peers_meta, live),
         "next_account_name": _generate_account_names("User", 1, _existing_account_names(peers_meta))[0],
         "client_allowed_ips": aips,
-        "client_mtu": parsed["interface"].get("mtu") or 1450,
+        "client_mtu": parsed["interface"].get("mtu") or _WIREGUARD_CLIENT_MTU,
         "endpoint": _detect_wan_endpoint(parsed["interface"].get("listen_port")),
         "endpoint_candidates": _detect_endpoint_candidates(parsed["interface"].get("listen_port")),
     }
@@ -1098,7 +1099,7 @@ def adopt_with_existing_key(iface: str, pubkey: str | None = None, pubkey_token:
         "peer_address": peer_address,
         "extra_allowed_ips": extra,
         "client_dns": existing_meta.get("client_dns", []),
-        "client_mtu": existing_meta.get("client_mtu", 1450),
+        "client_mtu": existing_meta.get("client_mtu", _WIREGUARD_CLIENT_MTU),
         "client_allowed_ips": existing_meta.get("client_allowed_ips", ["0.0.0.0/0", "::/0"]),
         "endpoint": existing_meta.get("endpoint") or _detect_wan_endpoint(parsed["interface"].get("listen_port")),
         "persistent_keepalive": existing_meta.get("persistent_keepalive", 25),
