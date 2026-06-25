@@ -78,6 +78,7 @@ _EAP_USER_RE = re.compile(r"^[A-Za-z0-9_\-.@]{1,128}$")
 _START_ACTIONS = {"", "none", "trap", "start"}
 _DPD_ACTIONS = {"", "none", "clear", "hold", "restart"}
 _AUTH_TYPES = {"psk", "eap", "cert"}
+_SITE_TO_SITE_TCP_MSS = 1340
 
 
 def register(app: Flask) -> None:
@@ -800,6 +801,16 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {local_net} -d {remote_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {remote_net} -d {local_net} -j ACCEPT")
         changed |= _add_direct_rule("ipv4", "nat", "POSTROUTING", 0, f"-d {remote_net} -j ACCEPT")
+        changed |= _add_direct_rule(
+            "ipv4", "mangle", "FORWARD", 0,
+            f"-s {local_net} -d {remote_net} -p tcp --tcp-flags SYN,RST SYN "
+            f"-m comment --comment synca-ipsec-mss -j TCPMSS --set-mss {_SITE_TO_SITE_TCP_MSS}",
+        )
+        changed |= _add_direct_rule(
+            "ipv4", "mangle", "FORWARD", 0,
+            f"-s {remote_net} -d {local_net} -p tcp --tcp-flags SYN,RST SYN "
+            f"-m comment --comment synca-ipsec-mss -j TCPMSS --set-mss {_SITE_TO_SITE_TCP_MSS}",
+        )
 
     if changed:
         reload_res = sudo_run(["firewall-cmd", "--reload"], timeout=30)
