@@ -852,6 +852,7 @@ def _list_devices() -> list[dict]:
         if pppoe_parent and name == pppoe_parent:
             state = "connected"
             connection = (pppoe_conn or {}).get("name") or connection
+        link_info = _device_link_info(name)
         devices.append({
             "device": name,
             "type": r[1],
@@ -863,8 +864,27 @@ def _list_devices() -> list[dict]:
             "ipv6": info.get("ipv6", []),
             "mac": info.get("mac"),
             "mtu": info.get("mtu"),
+            "carrier": link_info.get("carrier"),
+            "operstate": link_info.get("operstate"),
         })
     return devices
+
+
+def _device_link_info(name: str) -> dict:
+    """Read kernel link state so carrier loss is visible even when NM says connected."""
+    base = Path("/sys/class/net") / name
+    info: dict = {"carrier": None, "operstate": ""}
+    try:
+        carrier = (base / "carrier").read_text(encoding="ascii").strip()
+        if carrier in {"0", "1"}:
+            info["carrier"] = carrier == "1"
+    except OSError:
+        pass
+    try:
+        info["operstate"] = (base / "operstate").read_text(encoding="ascii").strip()
+    except OSError:
+        pass
+    return info
 
 
 def _default_route_device() -> str:
