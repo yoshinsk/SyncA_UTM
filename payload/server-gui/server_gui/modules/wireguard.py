@@ -2073,6 +2073,7 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
         changed |= _firewalld_add(["--zone", endpoint_zone, "--add-port", f"{listen_port}/udp"])
 
     changed |= _firewalld_add(["--zone", "trusted", "--add-interface", iface])
+    changed |= _firewalld_add(["--zone", "trusted", "--add-forward"])
 
     wg_nets = _interface_ipv4_networks(parsed.get("interface", {}).get("address", []))
     lan_nets = _detect_lan_subnets(exclude=parsed.get("interface", {}).get("address", []))
@@ -2178,6 +2179,8 @@ def _firewalld_query_args_for_add(args: list[str]) -> list[str] | None:
     if zone_index + 1 >= len(args):
         return None
     zone = args[zone_index + 1]
+    if "--add-forward" in args:
+        return ["--zone", zone, "--query-forward"]
     checks = {
         "--add-service": "--query-service",
         "--add-port": "--query-port",

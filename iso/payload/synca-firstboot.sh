@@ -927,6 +927,7 @@ CONF
     fi
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         firewall-cmd --permanent --zone=trusted --add-interface="$LAN_IF" || true
+        firewall-cmd --permanent --zone=trusted --add-forward || true
     fi
     if [[ "$ADMIN_CIDR" != "0.0.0.0/0" ]]; then
         firewall-cmd --permanent --zone=trusted --add-source="$ADMIN_CIDR" || true

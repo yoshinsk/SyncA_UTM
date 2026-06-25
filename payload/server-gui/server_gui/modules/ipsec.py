@@ -771,6 +771,7 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
             changed |= _firewalld_add(["--zone", endpoint_zone, "--add-source", endpoint])
 
     if local_remote_pairs:
+        changed |= _firewalld_add(["--zone", "trusted", "--add-forward"])
         changed |= _firewalld_remove(["--zone", "public", "--remove-masquerade"])
 
     for local_net, remote_net in sorted(local_remote_pairs):
@@ -968,6 +969,8 @@ def _firewalld_query_args_for_add(args: list[str]) -> list[str] | None:
     if zone_index + 1 >= len(args):
         return None
     zone = args[zone_index + 1]
+    if "--add-forward" in args:
+        return ["--zone", zone, "--query-forward"]
     checks = {
         "--add-service": "--query-service",
         "--add-port": "--query-port",
