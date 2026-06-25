@@ -1686,6 +1686,10 @@ def _apply_firewalld_lan_migration(plan: dict) -> dict:
         ["firewall-cmd", "--permanent", "--zone", "trusted", "--add-interface", bridge_ifname],
         changed, errors,
     )
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--zone", "trusted", "--add-forward"],
+        changed, errors,
+    )
     for service in ("dhcp", "dns"):
         _collect_firewalld_change(
             ["firewall-cmd", "--permanent", "--zone", "trusted", "--add-service", service],
