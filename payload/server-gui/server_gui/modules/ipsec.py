@@ -300,6 +300,11 @@ def add_managed():
     with _store().transaction(MODULE_NAME, _default()) as data:
         if any(c["name"] == conn["name"] for c in data["connections"]):
             return jsonify({"error": f"connection name {conn['name']!r} already exists"}), 409
+        candidate = [*data["connections"], conn]
+        try:
+            _validate_unique_child_names(candidate)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 409
         data["connections"].append(conn)
         refreshed = list(data["connections"])
     try:
@@ -338,8 +343,14 @@ def update_managed(cid: str):
         if any(c["name"] == new["name"] and c["id"] != cid for c in data["connections"]):
             return jsonify({"error": "name collision"}), 409
         new["id"] = cid
-        data["connections"][idx] = new
-        refreshed = list(data["connections"])
+        candidate = list(data["connections"])
+        candidate[idx] = new
+        try:
+            _validate_unique_child_names(candidate)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 409
+        data["connections"] = candidate
+        refreshed = list(candidate)
     try:
         _apply(refreshed)
     except RuntimeError as e:
@@ -511,7 +522,7 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
             "local_ts": default_ts,
             "remote_ts": "",
             "esp_proposals": "aes128-sha1",
-            "start_action": "" if auth_type == "eap" else "trap",
+            "start_action": "" if auth_type == "eap" else "start",
             "dpd_action": "clear" if auth_type == "eap" else "restart",
         }]
 
@@ -688,6 +699,10 @@ def _apply(conns: list[dict]) -> None:
     """Write the managed file and trigger `swanctl --load-all`. On failure
     restore the previous file from .bak so the daemon keeps the old config.
     """
+    try:
+        _validate_unique_child_names(conns)
+    except ValidationError as e:
+        raise RuntimeError(str(e)) from e
     content = _render(conns) if conns else ""
     backup: bytes | None = None
     if MANAGED_FILE.exists():
@@ -731,6 +746,7 @@ def _apply(conns: list[dict]) -> None:
         _sync_firewalld_for_site_to_site(conns)
     except RuntimeError as e:
         raise RuntimeError(f"firewalld auto configuration failed:\n{e}") from e
+    _initiate_start_children(conns)
 
 
 def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
@@ -789,6 +805,48 @@ def _sync_firewalld_for_site_to_site(conns: list[dict]) -> None:
         reload_res = sudo_run(["firewall-cmd", "--reload"], timeout=30)
         if not reload_res.ok:
             raise RuntimeError(_strip_noise(reload_res.stderr or reload_res.stdout))
+
+
+def _initiate_start_children(conns: list[dict]) -> None:
+    """Actively bring up CHILD_SAs that operators configured for immediate start."""
+    child_names: list[str] = []
+    seen: set[str] = set()
+    for c in conns:
+        if c.get("auth_type") == "eap":
+            continue
+        for ch in c.get("children", []) or []:
+            if ch.get("start_action") != "start":
+                continue
+            name = ch.get("name")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            child_names.append(name)
+
+    for child in child_names:
+        res = sudo_run(["swanctl", "--initiate", "--child", child], timeout=20)
+        if not res.ok:
+            message = _swanctl_error(res.stderr or res.stdout)
+            logger.warning("IPsec child auto-initiate failed for %s: %s", child, message)
+
+
+def _validate_unique_child_names(conns: list[dict]) -> None:
+    """Reject duplicate CHILD_SA names because swanctl operates on child name only."""
+    owners: dict[str, str] = {}
+    for c in conns:
+        conn_name = str(c.get("name") or "").strip()
+        for ch in c.get("children", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            child_name = str(ch.get("name") or "").strip()
+            if not child_name:
+                continue
+            owner = owners.get(child_name)
+            if owner is not None:
+                raise ValidationError(
+                    f"duplicate child SA name {child_name!r} in {owner!r} and {conn_name!r}"
+                )
+            owners[child_name] = conn_name
 
 
 def _extract_ipv4_networks(value: str) -> list[str]:

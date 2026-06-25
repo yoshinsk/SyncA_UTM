@@ -1038,10 +1038,13 @@ function renderDevices(devices) {
             const v4 = (d.ipv4 || []).length
                 ? (d.ipv4 || []).map(a => `<span class="badge bg-primary-subtle text-primary-emphasis font-monospace me-1">${escapeHtml(a)}</span>`).join('')
                 : '<span class="text-secondary small">—</span>';
+            const linkBadge = d.carrier === false
+                ? '<span class="badge bg-danger-subtle text-danger-emphasis ms-1">NO-CARRIER</span>'
+                : (d.operstate ? `<span class="badge bg-light text-secondary ms-1">${escapeHtml(d.operstate)}</span>` : '');
             return `<tr>
                 <td class="fw-semibold font-monospace">${escapeHtml(d.device)}</td>
                 <td>${escapeHtml(d.type)}</td>
-                <td>${stateBadge(d.state)} ${d.pppoe_parent ? '<span class="badge bg-info-subtle text-info-emphasis ms-1">PPPoE parent</span>' : ''}</td>
+                <td>${stateBadge(d.state)}${linkBadge} ${d.pppoe_parent ? '<span class="badge bg-info-subtle text-info-emphasis ms-1">PPPoE parent</span>' : ''}</td>
                 <td>${v4}</td>
                 <td class="font-monospace small text-secondary">${d.mac ? escapeHtml(d.mac) : '—'}</td>
                 <td class="font-monospace small text-secondary">${d.mtu || '—'}</td>

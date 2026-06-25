@@ -442,7 +442,7 @@ function addChildRow(child) {
     wrap.appendChild(div);
     div.querySelector('.ch-name').value = c.name || '';
     div.querySelector('.ch-esp').value = c.esp_proposals || 'aes128-sha1';
-    div.querySelector('.ch-start').value = c.start_action || (idx === 0 ? 'trap' : '');
+    div.querySelector('.ch-start').value = c.start_action || (idx === 0 ? 'start' : '');
     div.querySelector('.ch-dpd').value = c.dpd_action || 'restart';
     div.querySelector('.ch-lts').value = c.local_ts || '';
     div.querySelector('.ch-rts').value = c.remote_ts || '';

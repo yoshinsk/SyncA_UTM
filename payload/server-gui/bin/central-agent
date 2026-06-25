@@ -40,7 +40,7 @@ UPLOAD_STATE_PATH = os.path.join(AGENT_STATE_DIR, "upload-state.json")
 LOG_PATH = "/var/log/synca-central-agent.log"
 DEFAULT_PUBLIC_IP_CHECK_URL = "https://update.ddnsft.com/checkip.php"
 SERVER_GUI_ADMIN_STATE_PATH = "/etc/server-gui/admin.json"
-AGENT_VERSION = "0.1.3"
+AGENT_VERSION = "0.1.4"
 AGENT_USER_AGENT = "SyncA-UTM-Central-Agent/{0}".format(AGENT_VERSION)
 
 SERVICES = [
@@ -344,6 +344,75 @@ def certificate_state():
     return certs
 
 
+def link_inventory():
+    links = []
+    root = "/sys/class/net"
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return links
+    for name in names:
+        base = os.path.join(root, name)
+        item = {"name": name, "carrier": None, "operstate": "", "address": ""}
+        carrier = read_text(os.path.join(base, "carrier")).strip()
+        if carrier in ("0", "1"):
+            item["carrier"] = carrier == "1"
+        item["operstate"] = read_text(os.path.join(base, "operstate")).strip()
+        item["address"] = read_text(os.path.join(base, "address")).strip()
+        links.append(item)
+    return links
+
+
+def configured_lan_interfaces():
+    interfaces = set()
+    dnsmasq = read_json("/etc/server-gui/dnsmasq.json", {})
+    for item in dnsmasq_ranges(dnsmasq):
+        if not isinstance(item, dict):
+            continue
+        iface = str(item.get("interface") or "").strip()
+        if iface:
+            interfaces.add(iface)
+    upnp = read_json("/etc/server-gui/upnp.json", {})
+    for iface in upnp.get("lan_interfaces", []) if isinstance(upnp, dict) else []:
+        iface = str(iface).strip()
+        if iface:
+            interfaces.add(iface)
+    for line in read_text("/etc/dnsmasq.d/server-gui.conf").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("interface="):
+            iface = stripped.split("=", 1)[1].strip()
+            if iface:
+                interfaces.add(iface)
+    return sorted(interfaces)
+
+
+def dnsmasq_ranges(data):
+    if not isinstance(data, dict):
+        return []
+    ranges = list(data.get("ranges", []))
+    dhcp = data.get("dhcp")
+    if isinstance(dhcp, dict):
+        ranges.extend(dhcp.get("ranges", []))
+    return ranges
+
+
+def lan_link_warnings():
+    links = dict((item["name"], item) for item in link_inventory())
+    warnings = []
+    for iface in configured_lan_interfaces():
+        link = links.get(iface)
+        if not link:
+            warnings.append({"interface": iface, "reason": "missing"})
+            continue
+        if link.get("carrier") is False:
+            warnings.append({
+                "interface": iface,
+                "reason": "no_carrier",
+                "operstate": link.get("operstate", ""),
+            })
+    return warnings
+
+
 def network_state():
     public_ip = ddns_state().get("current_ip")
     routes = run(["ip", "-4", "route"], timeout=8)
@@ -352,6 +421,8 @@ def network_state():
         "public_ip": public_ip,
         "routes": routes["stdout"].strip().splitlines() if routes["ok"] else [],
         "addresses": addresses["stdout"].strip().splitlines() if addresses["ok"] else [],
+        "links": link_inventory(),
+        "lan_link_warnings": lan_link_warnings(),
     }
 
 

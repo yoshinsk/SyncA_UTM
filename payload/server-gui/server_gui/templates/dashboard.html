@@ -11,6 +11,8 @@
     </button>
 </div>
 
+<div id="d-lan-warnings" class="alert alert-danger d-none" role="alert"></div>
+
 <div class="row g-3 mb-3">
     <div class="col-sm-6 col-xl-3">
         <div class="card border-0 shadow-sm h-100">
@@ -101,7 +103,31 @@ async function loadStatus() {
     document.getElementById('d-disk').textContent = data.disk || '—';
     const m = (data.uptime || '').match(/up\s+([^,]+(?:,[^,]+)?),/);
     document.getElementById('d-uptime-short').textContent = m ? m[1].trim() : '—';
+    renderLanWarnings(data.lan_link_warnings || []);
 }
+
+function renderLanWarnings(warnings) {
+    const box = document.getElementById('d-lan-warnings');
+    if (!warnings.length) {
+        box.classList.add('d-none');
+        box.textContent = '';
+        return;
+    }
+    box.classList.remove('d-none');
+    box.innerHTML = warnings.map(w => {
+        const iface = escapeHtml(w.interface || '-');
+        const reason = escapeHtml(w.reason || 'unknown');
+        const state = w.operstate ? ` (${escapeHtml(w.operstate)})` : '';
+        return `<div><strong>LAN link warning:</strong> ${iface} ${reason}${state}</div>`;
+    }).join('');
+}
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+}
+
 loadStatus();
 </script>
 {% endblock %}
