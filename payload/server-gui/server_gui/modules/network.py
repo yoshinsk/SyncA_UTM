@@ -174,12 +174,21 @@ def bridge_lan_migration_preview():
             payload.get("secondary_addresses"),
             payload.get("addresses"),
         )
+        preserve_moved_addresses = _should_preserve_moved_addresses_for_bridge_edit(
+            bridge_name,
+            bridge_ifname,
+        )
     except ValidationError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
     return jsonify({
         "ok": True,
-        "plan": _build_lan_bridge_migration_plan(bridge_ifname, members, addresses),
+        "plan": _build_lan_bridge_migration_plan(
+            bridge_ifname,
+            members,
+            addresses,
+            preserve_moved_addresses=preserve_moved_addresses,
+        ),
     })
 
 
@@ -474,19 +483,34 @@ def update_bridge(name: str):
         }), 400
     bridge_ifname = detail.get("interface") or name
     lan_migration_plan = None
+    preserve_moved_addresses = True
     if use_as_lan:
-        lan_migration_plan = _build_lan_bridge_migration_plan(bridge_ifname, members, addresses)
-        if not lan_migration_plan.get("old_lan_interfaces") and not lan_migration_plan.get("already_lan_bridge"):
+        preserve_moved_addresses = _should_preserve_moved_addresses_for_bridge_edit(
+            name,
+            bridge_ifname,
+        )
+        lan_migration_plan = _build_lan_bridge_migration_plan(
+            bridge_ifname,
+            members,
+            addresses,
+            preserve_moved_addresses=preserve_moved_addresses,
+        )
+        if (
+            preserve_moved_addresses
+            and not lan_migration_plan.get("old_lan_interfaces")
+            and not lan_migration_plan.get("already_lan_bridge")
+        ):
             return jsonify({
                 "error": "旧LANインターフェースを検出できないため、Bridge更新前に中止しました。",
                 "lan_migration_preview": lan_migration_plan,
             }), 400
-        if not _firewalld_running():
+        if preserve_moved_addresses and not _firewalld_running():
             return jsonify({
                 "error": "firewalldが動作していないため、Bridge更新前にLANサービス移行を中止しました。",
                 "lan_migration_preview": lan_migration_plan,
             }), 400
-        addresses = _merge_lan_bridge_addresses(addresses, lan_migration_plan.get("moved_addresses", []))
+        if preserve_moved_addresses:
+            addresses = _merge_lan_bridge_addresses(addresses, lan_migration_plan.get("moved_addresses", []))
 
     stp_result = _apply_bridge_stp(name, stp, stp_priority, forward_delay, hello_time)
     if not stp_result["ok"]:
@@ -522,7 +546,7 @@ def update_bridge(name: str):
             }), 500
 
     lan_migration = None
-    if use_as_lan:
+    if use_as_lan and preserve_moved_addresses:
         lan_migration = _apply_bridge_lan_migration(
             bridge_ifname, members, addresses, lan_migration_plan
         )
@@ -533,6 +557,15 @@ def update_bridge(name: str):
                 "lan_migration": lan_migration,
                 "output": "\n".join(output),
             }), 500
+    elif use_as_lan:
+        lan_migration = {
+            "ok": True,
+            "message": f"LANサービスは既に {bridge_ifname} を参照しています。",
+            "changed": [],
+            "warnings": lan_migration_plan.get("warnings", []) if lan_migration_plan else [],
+            "steps": [],
+            "plan": lan_migration_plan,
+        }
 
     return jsonify({
         "ok": True,
@@ -1430,6 +1463,7 @@ def _build_lan_bridge_migration_plan(
     bridge_ifname: str,
     members: list[str],
     requested_addresses: list[str] | None = None,
+    preserve_moved_addresses: bool = True,
 ) -> dict:
     """Detect old LAN interfaces and describe service changes before applying them."""
     member_set = set(members)
@@ -1479,7 +1513,10 @@ def _build_lan_bridge_migration_plan(
         "already_lan_bridge": bridge_ifname in (dnsmasq_ifaces | legacy_ifaces | upnp_ifaces),
         "detected": detected,
         "moved_addresses": moved_addresses,
-        "final_bridge_addresses": _merge_lan_bridge_addresses(requested_addresses or [], moved_addresses),
+        "final_bridge_addresses": _merge_lan_bridge_addresses(
+            requested_addresses or [],
+            moved_addresses if preserve_moved_addresses else [],
+        ),
         "dnsmasq_range_updates": sum(
             1 for item in (dnsmasq_data.get("dhcp") or {}).get("ranges") or []
             if isinstance(item, dict) and str(item.get("interface", "")).strip() in old_ifaces
@@ -1491,6 +1528,17 @@ def _build_lan_bridge_migration_plan(
         "firewalld_trusted_remove": old_ifaces,
         "warnings": warnings,
     }
+
+
+def _should_preserve_moved_addresses_for_bridge_edit(name: str, bridge_ifname: str) -> bool:
+    """Keep old member IPs only while a bridge is becoming the LAN endpoint."""
+    detail = _describe_connection(name)
+    if detail.get("type") != "bridge":
+        return True
+    existing_ifname = detail.get("interface") or name
+    if existing_ifname != bridge_ifname:
+        return True
+    return not _is_bridge_lan_interface(bridge_ifname)
 
 
 def _lan_ipv4_addresses_for_interface(ifname: str) -> list[str]:
