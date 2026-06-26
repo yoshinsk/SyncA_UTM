@@ -9,6 +9,7 @@
     ],
     "optional_lan_interfaces": [],
     "wireguard_interface": "wg0",
+    "wireguard_cidr": "10.252.1.0/24",
     "lan_cidr": "192.168.100.0/24",
     "admin_lan_cidr": "192.168.100.0/24",
     "ipsec_remote_cidr": "192.168.200.0/24",
@@ -155,6 +156,14 @@
       "chain": "POSTROUTING",
       "priority": 0,
       "args": "-d ${ipsec_remote_cidr} -j ACCEPT"
+    },
+    {
+      "ipv": "ipv4",
+      "table": "nat",
+      "chain": "POSTROUTING",
+      "priority": 1,
+      "args": "-s ${wireguard_cidr} -d ${lan_cidr} -o ${lan_interface} -j MASQUERADE",
+      "expand_for": "lan_interfaces"
     },
     {
       "ipv": "ipv4",
