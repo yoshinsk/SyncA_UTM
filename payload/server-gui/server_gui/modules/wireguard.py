@@ -2088,6 +2088,14 @@ def _sync_firewalld_for_interface(iface: str, parsed: dict) -> None:
         for lan_net in lan_nets:
             changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {wg_net} -d {lan_net} -j ACCEPT")
             changed |= _add_direct_rule("ipv4", "filter", "FORWARD", 0, f"-s {lan_net} -d {wg_net} -j ACCEPT")
+            # Most LAN devices do not have an explicit return route to the
+            # WireGuard subnet. SNAT keeps GUI-created client accounts usable
+            # without requiring route changes on every LAN endpoint.
+            for lan_iface in lan_ifaces:
+                changed |= _add_direct_rule(
+                    "ipv4", "nat", "POSTROUTING", 1,
+                    f"-s {wg_net} -d {lan_net} -o {lan_iface} -j MASQUERADE",
+                )
             # Mobile WireGuard paths often have a smaller effective MTU than the
             # LAN. Clamp SMB and other TCP sessions before packet loss causes
             # retransmission-heavy transfers.
