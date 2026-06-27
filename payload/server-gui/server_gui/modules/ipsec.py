@@ -75,10 +75,17 @@ _TS_RE = re.compile(r"^[a-zA-Z0-9_\-./:,\s]{1,256}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-@.:%/]{1,128}$")
 _PATH_RE = re.compile(r"^/[A-Za-z0-9_\-./]{1,255}$")
 _EAP_USER_RE = re.compile(r"^[A-Za-z0-9_\-.@]{1,128}$")
+_TIME_RE = re.compile(r"^(0|[1-9][0-9]*)(s|m|h|d)?$")
+_KEYINGTRIES_RE = re.compile(r"^[0-9]{1,3}$")
 _START_ACTIONS = {"", "none", "trap", "start"}
 _DPD_ACTIONS = {"", "none", "clear", "hold", "restart"}
+_CLOSE_ACTIONS = {"", "none", "trap", "start"}
 _AUTH_TYPES = {"psk", "eap", "cert"}
 _SITE_TO_SITE_TCP_MSS = 1340
+_SITE_TO_SITE_DPD_DELAY = "30s"
+_SITE_TO_SITE_DPD_TIMEOUT = "120s"
+_SITE_TO_SITE_KEYINGTRIES = "0"
+_SITE_TO_SITE_CLOSE_ACTION = "start"
 
 
 def register(app: Flask) -> None:
@@ -403,6 +410,20 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
     if not _PROPOSAL_RE.match(proposals):
         raise ValidationError("invalid proposals string")
 
+    resilience_enabled = _bool_value(raw.get("resilience_enabled"), auth_type != "eap")
+    keyingtries = str(raw.get("keyingtries") or _SITE_TO_SITE_KEYINGTRIES).strip()
+    if not _KEYINGTRIES_RE.match(keyingtries):
+        raise ValidationError("keyingtries must be 0-999")
+    dpd_delay = str(raw.get("dpd_delay") or _SITE_TO_SITE_DPD_DELAY).strip()
+    if not _TIME_RE.match(dpd_delay):
+        raise ValidationError("dpd_delay must be a time value such as 30s or 1m")
+    dpd_timeout = str(raw.get("dpd_timeout") or _SITE_TO_SITE_DPD_TIMEOUT).strip()
+    if not _TIME_RE.match(dpd_timeout):
+        raise ValidationError("dpd_timeout must be a time value such as 120s or 2m")
+    close_action = str(raw.get("close_action") or _SITE_TO_SITE_CLOSE_ACTION).strip()
+    if close_action not in _CLOSE_ACTIONS:
+        raise ValidationError(f"close_action must be one of {sorted(_CLOSE_ACTIONS)}")
+
     # ---- auth-specific fields ----
     local_id = (raw.get("local_id") or "").strip()
     remote_id = (raw.get("remote_id") or "").strip()
@@ -545,7 +566,25 @@ def _parse_connection_payload(raw: dict, is_edit: bool = False) -> dict:
         "pool_dns": pool_dns,
         "eap_users": eap_users,
         "children": children,
+        "resilience_enabled": resilience_enabled,
+        "keyingtries": keyingtries,
+        "dpd_delay": dpd_delay,
+        "dpd_timeout": dpd_timeout,
+        "close_action": close_action,
     }
+
+
+def _bool_value(value, default: bool) -> bool:
+    """Normalize UI booleans while preserving sane defaults for old configs."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 # ---- rendering + apply --------------------------------------------------
@@ -574,11 +613,16 @@ def _render(conns: list[dict]) -> str:
     lines.append("connections {")
     for c in conns:
         auth_type = c.get("auth_type", "psk")
+        resilience_enabled = _resilience_enabled(c)
         lines.append(f"    {c['name']} {{")
         lines.append(f"        local_addrs = {c['local_addrs']}")
         lines.append(f"        remote_addrs = {c['remote_addrs']}")
         lines.append(f"        version = {c['version']}")
         lines.append(f"        proposals = {c['proposals']}")
+        if resilience_enabled:
+            lines.append(f"        keyingtries = {_resilience_value(c, 'keyingtries', _SITE_TO_SITE_KEYINGTRIES)}")
+            lines.append(f"        dpd_delay = {_resilience_value(c, 'dpd_delay', _SITE_TO_SITE_DPD_DELAY)}")
+            lines.append(f"        dpd_timeout = {_resilience_value(c, 'dpd_timeout', _SITE_TO_SITE_DPD_TIMEOUT)}")
         if auth_type == "eap":
             lines.append(f"        pools = {c['name']}-pool")
             lines.append("        send_certreq = no")
@@ -630,6 +674,8 @@ def _render(conns: list[dict]) -> str:
                 lines.append(f"                start_action = {ch['start_action']}")
             if ch.get("dpd_action"):
                 lines.append(f"                dpd_action = {ch['dpd_action']}")
+            if resilience_enabled:
+                lines.append(f"                close_action = {_resilience_value(c, 'close_action', _SITE_TO_SITE_CLOSE_ACTION)}")
             lines.append("            }")
         lines.append("        }")
         lines.append("    }")
@@ -669,6 +715,16 @@ def _render(conns: list[dict]) -> str:
                 lines.append("    }")
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def _resilience_enabled(conn: dict) -> bool:
+    """Enable auto-recovery by default only for site-to-site legacy configs."""
+    return _bool_value(conn.get("resilience_enabled"), conn.get("auth_type", "psk") != "eap")
+
+
+def _resilience_value(conn: dict, key: str, default: str) -> str:
+    value = str(conn.get(key) or default).strip()
+    return value or default
 
 
 def _psk_secret_ids(c: dict) -> list[str]:

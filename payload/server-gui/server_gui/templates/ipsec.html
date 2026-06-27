@@ -91,6 +91,41 @@
                     </div>
                 </div>
 
+                <hr>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="text-secondary small mb-0">自動復旧</h6>
+                    <div class="form-check form-switch mb-0">
+                        <input id="cf-resilience-enabled" class="form-check-input" type="checkbox" onchange="updateResilienceControls()">
+                        <label class="form-check-label small" for="cf-resilience-enabled">適用</label>
+                    </div>
+                </div>
+                <div class="form-text small mb-2">
+                    常時接続のSite-to-SiteはON推奨。EAP/リモートアクセス、オンデマンド接続ではOFFにしてください。
+                </div>
+                <div class="row g-3" id="cf-resilience-fields">
+                    <div class="col-md-3">
+                        <label class="form-label">keyingtries</label>
+                        <input id="cf-keyingtries" class="form-control font-monospace" value="0" inputmode="numeric">
+                        <div class="form-text small">0: 継続再試行</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">dpd_delay</label>
+                        <input id="cf-dpd-delay" class="form-control font-monospace" value="30s">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">dpd_timeout</label>
+                        <input id="cf-dpd-timeout" class="form-control font-monospace" value="120s">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">close_action</label>
+                        <select id="cf-close-action" class="form-select">
+                            <option value="none">none</option>
+                            <option value="trap">trap</option>
+                            <option value="start" selected>start</option>
+                        </select>
+                    </div>
+                </div>
+
                 <!-- PSK fields -->
                 <div id="cf-psk-section">
                     <hr>
@@ -349,13 +384,16 @@ async function loadManaged() {
                 : c.auth_type === 'cert'
                     ? '<span class="badge bg-primary-subtle text-primary-emphasis ms-1">CERT</span>'
                     : '<span class="badge bg-success-subtle text-success-emphasis ms-1">PSK</span>';
+            const resilienceBadge = resilienceEnabled(c)
+                ? '<span class="badge bg-warning-subtle text-warning-emphasis ms-1">自動復旧</span>'
+                : '';
             const childCount = children.length > 1
                 ? `<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${children.length} children</span>`
                 : '';
             return `<tr>
                 <td>
                     <span class="fw-semibold font-monospace">${escapeHtml(c.name)}</span>
-                    ${authBadge}${childCount}
+                    ${authBadge}${resilienceBadge}${childCount}
                 </td>
                 <td class="font-monospace small">${escapeHtml(c.local_addrs)}</td>
                 <td class="font-monospace small">${escapeHtml(c.remote_addrs)}</td>
@@ -378,6 +416,10 @@ function onAuthTypeChange() {
     document.getElementById('cf-psk-section').classList.toggle('d-none', t !== 'psk');
     document.getElementById('cf-eap-section').classList.toggle('d-none', t !== 'eap');
     document.getElementById('cf-cert-section').classList.toggle('d-none', t !== 'cert');
+    if (!editingConnId) {
+        document.getElementById('cf-resilience-enabled').checked = defaultResilienceEnabled(t);
+    }
+    updateResilienceControls();
     if (t === 'eap') {
         // EAP requires IKEv2
         document.getElementById('cf-version').value = '2';
@@ -386,6 +428,24 @@ function onAuthTypeChange() {
         // PSK + cert support both IKEv1 and IKEv2
         document.getElementById('cf-version').disabled = false;
     }
+}
+
+function defaultResilienceEnabled(authType) {
+    return authType !== 'eap';
+}
+
+function resilienceEnabled(conn) {
+    if (!conn) return defaultResilienceEnabled(document.getElementById('cf-auth-type').value);
+    return conn.resilience_enabled === undefined
+        ? defaultResilienceEnabled(conn.auth_type || 'psk')
+        : !!conn.resilience_enabled;
+}
+
+function updateResilienceControls() {
+    const enabled = document.getElementById('cf-resilience-enabled').checked;
+    document.querySelectorAll('#cf-resilience-fields input, #cf-resilience-fields select').forEach(el => {
+        el.disabled = !enabled;
+    });
 }
 
 function addChildRow(child) {
@@ -497,6 +557,11 @@ function openConnModal(c) {
     document.getElementById('cf-psk').value = '';
     document.getElementById('cf-psk').placeholder = c ? '(変更しない場合は空欄)' : '新規時は必須';
     document.getElementById('cf-proposals').value = (c && c.proposals) || 'aes128-sha1-modp1024';
+    document.getElementById('cf-resilience-enabled').checked = resilienceEnabled(c);
+    document.getElementById('cf-keyingtries').value = (c && c.keyingtries) || '0';
+    document.getElementById('cf-dpd-delay').value = (c && c.dpd_delay) || '30s';
+    document.getElementById('cf-dpd-timeout').value = (c && c.dpd_timeout) || '120s';
+    document.getElementById('cf-close-action').value = (c && c.close_action) || 'start';
     // EAP fields
     document.getElementById('cf-server-cert').value = c ? (c.server_cert || '') : '';
     document.getElementById('cf-server-key').value = c ? (c.server_key || '') : '';
@@ -534,6 +599,11 @@ async function submitConn() {
         remote_addrs: document.getElementById('cf-remote').value.trim(),
         proposals: document.getElementById('cf-proposals').value.trim(),
         children: collectChildren(),
+        resilience_enabled: document.getElementById('cf-resilience-enabled').checked,
+        keyingtries: document.getElementById('cf-keyingtries').value.trim(),
+        dpd_delay: document.getElementById('cf-dpd-delay').value.trim(),
+        dpd_timeout: document.getElementById('cf-dpd-timeout').value.trim(),
+        close_action: document.getElementById('cf-close-action').value,
     };
     if (authType === 'psk') {
         payload.local_id = document.getElementById('cf-local-id').value.trim();
