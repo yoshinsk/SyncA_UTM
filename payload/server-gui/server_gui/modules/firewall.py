@@ -37,6 +37,27 @@ bp = Blueprint("firewall", __name__, url_prefix="/firewall")
 PORT_RE = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?/(tcp|udp|sctp|dccp)$")
 PORT_RANGE_RE = re.compile(r"^\d{1,5}(?:-\d{1,5})?$")
 FORWARD_PROTO_RE = re.compile(r"^(gre|esp|ah)$")
+VPN_CLIENT_DEFAULT_INGRESS_ZONE = "trusted"
+VPN_CLIENT_PROFILES = {
+    "pptp": {
+        "label": "PPTP",
+        "policy": "synca-pptp-client",
+        "service": "synca-pptp-client",
+        "ports": ["1723/tcp"],
+        "protocols": [],
+        "helpers": ["pptp"],
+        "conflict_protocols": ["gre"],
+    },
+    "l2tp-ipsec": {
+        "label": "L2TP/IPsec",
+        "policy": "synca-l2tp-ipsec-client",
+        "service": "synca-l2tp-ipsec-client",
+        "ports": ["500/udp", "4500/udp", "1701/udp"],
+        "protocols": ["esp", "ah"],
+        "helpers": [],
+        "conflict_protocols": ["esp", "ah"],
+    },
+}
 FORWARD_PORT_COMMENT_RE = re.compile(
     r"synca-forward-port:"
     r"([A-Za-z0-9_-]{1,63}):"
@@ -274,6 +295,31 @@ def manage_protocol_forward(zone: str):
         return jsonify({"ok": False, "error": str(e)}), 400
 
     result = _apply_protocol_forward_change(zone, proto, toaddr, request.method == "POST")
+    return jsonify(result), (200 if result.get("ok") else 500)
+
+
+@bp.route("/api/vpn-client-passthrough", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def vpn_client_passthrough():
+    """Manage LAN-side VPN client passthrough policies."""
+    if request.method == "GET":
+        return jsonify(_vpn_client_passthrough_state())
+
+    payload = request.get_json(force=True, silent=True) or {}
+    profile = str(payload.get("profile", "")).strip().lower()
+    enabled = bool(payload.get("enabled"))
+    ingress_zone = str(payload.get("ingress_zone") or VPN_CLIENT_DEFAULT_INGRESS_ZONE).strip()
+    if profile not in VPN_CLIENT_PROFILES:
+        return jsonify({"ok": False, "error": "unsupported profile"}), 400
+    try:
+        ingress_zone = validate_identifier(ingress_zone)
+    except ValidationError:
+        return jsonify({"ok": False, "error": "invalid ingress zone name"}), 400
+    if enabled and ingress_zone not in _zone_names():
+        return jsonify({"ok": False, "error": "ingress zone not found"}), 400
+
+    result = _apply_vpn_client_passthrough(profile, enabled, ingress_zone)
     return jsonify(result), (200 if result.get("ok") else 500)
 
 
@@ -713,6 +759,232 @@ def _protocol_forward_rows(zone: str | None = None, proto: str | None = None) ->
         row = rows.setdefault(key, {"zone": row_zone, "proto": row_proto, "toaddr": toaddr, "rules": []})
         row["rules"].append(raw)
     return sorted(rows.values(), key=lambda item: (item["zone"], item["proto"], item["toaddr"]))
+
+
+def _vpn_client_passthrough_state() -> dict:
+    supported, support_error = _policies_supported()
+    zones = sorted(_zone_names())
+    default_zone = VPN_CLIENT_DEFAULT_INGRESS_ZONE if VPN_CLIENT_DEFAULT_INGRESS_ZONE in zones else (zones[0] if zones else "")
+    profiles: dict[str, dict] = {}
+    helpers = _firewalld_list(["--get-helpers"])
+    for key, cfg in VPN_CLIENT_PROFILES.items():
+        policy = _policy_info(cfg["policy"]) if supported else {"exists": False}
+        service = _service_info(cfg["service"])
+        conflicts = _vpn_client_conflicts(cfg)
+        service_ports = service.get("ports", [])
+        service_protocols = service.get("protocols", [])
+        service_helpers = service.get("helpers", [])
+        policy_services = policy.get("services", [])
+        ingress_zones = policy.get("ingress_zones", [])
+        egress_zones = policy.get("egress_zones", [])
+        required_helpers = cfg.get("helpers", [])
+        enabled = bool(
+            supported
+            and policy.get("exists")
+            and service.get("exists")
+            and cfg["service"] in policy_services
+            and all(port in service_ports for port in cfg.get("ports", []))
+            and all(proto in service_protocols for proto in cfg.get("protocols", []))
+            and all(helper in service_helpers for helper in required_helpers)
+            and ingress_zones
+            and "ANY" in egress_zones
+        )
+        profiles[key] = {
+            "label": cfg["label"],
+            "enabled": enabled,
+            "policy": cfg["policy"],
+            "service": cfg["service"],
+            "service_exists": service.get("exists", False),
+            "policy_exists": policy.get("exists", False),
+            "service_ports": service_ports,
+            "service_protocols": service_protocols,
+            "service_helpers": service_helpers,
+            "required_ports": cfg.get("ports", []),
+            "required_protocols": cfg.get("protocols", []),
+            "required_helpers": required_helpers,
+            "helpers_available": all(helper in helpers for helper in required_helpers),
+            "policy_services": policy_services,
+            "ingress_zones": ingress_zones,
+            "egress_zones": egress_zones,
+            "conflict_protocols": cfg.get("conflict_protocols", []),
+            "protocol_forward_conflicts": conflicts,
+            "conflict_count": len(conflicts),
+        }
+    return {
+        "supported": supported,
+        "error": support_error,
+        "default_ingress_zone": default_zone,
+        "zones": zones,
+        "profiles": profiles,
+        "nf_conntrack_helper": _sysctl_value("net.netfilter.nf_conntrack_helper"),
+    }
+
+
+def _apply_vpn_client_passthrough(profile: str, enabled: bool, ingress_zone: str) -> dict:
+    errors: list[str] = []
+    changed: list[str] = []
+    supported, support_error = _policies_supported()
+    if not supported:
+        return {"ok": False, "error": support_error or "firewalld policies are not supported"}
+    cfg = VPN_CLIENT_PROFILES[profile]
+
+    if enabled:
+        missing_helpers = [helper for helper in cfg.get("helpers", []) if helper not in _firewalld_list(["--get-helpers"])]
+        if missing_helpers:
+            return {"ok": False, "error": "missing firewalld helpers: " + ", ".join(missing_helpers)}
+        _ensure_vpn_client_service(cfg, changed, errors)
+        _ensure_vpn_client_policy(cfg, ingress_zone, changed, errors)
+    else:
+        _remove_vpn_client_policy(cfg, changed, errors)
+        _remove_vpn_client_service(cfg, changed, errors)
+
+    if not errors:
+        reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
+        if not reload_ok:
+            errors.append(reload_output)
+        elif reload_output:
+            changed.append(reload_output)
+    state = _vpn_client_passthrough_state() if not errors else {}
+    return {"ok": not errors, "changed": changed, "errors": errors, "state": state}
+
+
+def _ensure_vpn_client_service(cfg: dict, changed: list[str], errors: list[str]) -> None:
+    service = cfg["service"]
+    if service not in _firewalld_list(["--permanent", "--get-services"]):
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--new-service={service}"],
+            changed, errors,
+        )
+    info = _service_info(service)
+    for port in cfg.get("ports", []):
+        if port not in info.get("ports", []):
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", f"--service={service}", f"--add-port={port}"],
+                changed, errors,
+            )
+    for proto in cfg.get("protocols", []):
+        if proto not in info.get("protocols", []):
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", f"--service={service}", f"--add-protocol={proto}"],
+                changed, errors,
+            )
+    for helper in cfg.get("helpers", []):
+        if helper not in info.get("helpers", []):
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", f"--service={service}", f"--add-helper={helper}"],
+                changed, errors,
+            )
+
+
+def _ensure_vpn_client_policy(cfg: dict, ingress_zone: str, changed: list[str], errors: list[str]) -> None:
+    policy = cfg["policy"]
+    service = cfg["service"]
+    if policy not in _policy_names():
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--new-policy={policy}"],
+            changed, errors,
+        )
+    info = _policy_info(policy)
+    for zone in info.get("ingress_zones", []):
+        if zone != ingress_zone:
+            _collect_firewall_change(
+                ["firewall-cmd", "--permanent", f"--policy={policy}", f"--remove-ingress-zone={zone}"],
+                changed, errors, ignore_missing=True,
+            )
+    if ingress_zone not in info.get("ingress_zones", []):
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--policy={policy}", f"--add-ingress-zone={ingress_zone}"],
+            changed, errors,
+        )
+    if "ANY" not in info.get("egress_zones", []):
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--policy={policy}", "--add-egress-zone=ANY"],
+            changed, errors,
+        )
+    if service not in info.get("services", []):
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--policy={policy}", f"--add-service={service}"],
+            changed, errors,
+        )
+
+
+def _remove_vpn_client_policy(cfg: dict, changed: list[str], errors: list[str]) -> None:
+    policy = cfg["policy"]
+    if policy not in _policy_names():
+        return
+    _collect_firewall_change(
+        ["firewall-cmd", "--permanent", f"--delete-policy={policy}"],
+        changed, errors, ignore_missing=True,
+    )
+
+
+def _remove_vpn_client_service(cfg: dict, changed: list[str], errors: list[str]) -> None:
+    service = cfg["service"]
+    if service not in _firewalld_list(["--permanent", "--get-services"]):
+        return
+    _collect_firewall_change(
+        ["firewall-cmd", "--permanent", f"--delete-service={service}"],
+        changed, errors, ignore_missing=True,
+    )
+
+
+def _vpn_client_conflicts(cfg: dict) -> list[dict]:
+    rows: list[dict] = []
+    for proto in cfg.get("conflict_protocols", []):
+        rows.extend(_protocol_forward_rows(proto=proto))
+    return sorted(rows, key=lambda item: (item["zone"], item["proto"], item["toaddr"]))
+
+
+def _policies_supported() -> tuple[bool, str]:
+    res = sudo_run(["firewall-cmd", "--permanent", "--get-policies"])
+    if res.ok:
+        return True, ""
+    return False, (res.stderr or res.stdout).strip()
+
+
+def _policy_names() -> set[str]:
+    res = sudo_run(["firewall-cmd", "--permanent", "--get-policies"])
+    return set(res.stdout.split()) if res.ok else set()
+
+
+def _firewalld_list(args: list[str]) -> set[str]:
+    res = sudo_run(["firewall-cmd", *args])
+    return set(res.stdout.split()) if res.ok else set()
+
+
+def _service_info(service: str) -> dict:
+    if service not in _firewalld_list(["--permanent", "--get-services"]):
+        return {"exists": False, "ports": [], "protocols": [], "helpers": []}
+    return {
+        "exists": True,
+        "ports": sorted(_firewalld_list(["--permanent", f"--service={service}", "--get-ports"])),
+        "protocols": sorted(_firewalld_list(["--permanent", f"--service={service}", "--get-protocols"])),
+        "helpers": sorted(_firewalld_list(["--permanent", f"--service={service}", "--get-service-helpers"])),
+    }
+
+
+def _policy_info(policy: str) -> dict:
+    if policy not in _policy_names():
+        return {"exists": False, "ingress_zones": [], "egress_zones": [], "services": []}
+    res = sudo_run(["firewall-cmd", "--permanent", f"--policy={policy}", "--list-all"])
+    info = {"exists": True, "ingress_zones": [], "egress_zones": [], "services": []}
+    if not res.ok:
+        info["error"] = (res.stderr or res.stdout).strip()
+        return info
+    for line in res.stdout.splitlines():
+        s = line.strip()
+        if s.startswith("ingress-zones:"):
+            info["ingress_zones"] = s.split(":", 1)[1].split()
+        elif s.startswith("egress-zones:"):
+            info["egress_zones"] = s.split(":", 1)[1].split()
+        elif s.startswith("services:"):
+            info["services"] = s.split(":", 1)[1].split()
+    return info
+
+
+def _sysctl_value(name: str) -> str:
+    res = sudo_run(["sysctl", "-n", name])
+    return res.stdout.strip() if res.ok else ""
 
 
 def _remove_direct_rule(rule: dict, existing: set[str] | None = None) -> tuple[bool, str | None]:
