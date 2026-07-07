@@ -190,6 +190,17 @@
                     <div class="form-text mt-1">
                         PPTPは <code>1723/tcp</code> と <code>gre</code>、IPsec NAT-Tは <code>500/udp</code> / <code>4500/udp</code> と <code>esp</code> を追加します。
                     </div>
+                    <div class="border rounded bg-white p-2 mt-3">
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                            <h6 class="mb-0"><i class="bi bi-pc-display-horizontal"></i> LAN側VPNクライアント通過</h6>
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="text-secondary">送信元zone</span>
+                                <select id="vpn-client-ingress-zone" class="form-select form-select-sm font-monospace" style="width: auto"></select>
+                            </div>
+                        </div>
+                        <div id="vpn-client-passthrough" class="list-group"></div>
+                        <div id="vpn-client-passthrough-alert" class="alert alert-warning small py-2 px-3 mt-2 mb-0 d-none"></div>
+                    </div>
                 </div>
                 <hr>
 
@@ -399,6 +410,7 @@ let allIpsets = [];
 let currentForwardPorts = [];
 let currentRichRules = [];
 let currentProtocolForwards = [];
+let vpnPassthroughState = null;
 let fpEditModal = null;
 let editingFpOld = null;
 const commonServices = ['ssh', 'http', 'https', 'dns', 'dhcp', 'ipsec', 'wireguard', 'sip-custom'];
@@ -446,6 +458,7 @@ async function init() {
     await refreshZones();
     await loadDirectRules();
     await loadWanProtection();
+    await loadVpnPassthrough();
 }
 
 async function loadServiceList() {
@@ -938,6 +951,7 @@ async function addProtocolForward() {
         toast('追加しました');
         await loadProtocolForwards(activeZone);
         await loadDirectRules();
+        await loadVpnPassthrough();
     } else if (res) {
         toast(res.error || (res.errors || []).join('\\n') || '処理に失敗しました', true);
     }
@@ -952,6 +966,103 @@ async function removeProtocolForwardByIndex(i) {
     if (res && res.ok) {
         toast('削除しました');
         await loadProtocolForwards(activeZone);
+        await loadDirectRules();
+        await loadVpnPassthrough();
+    } else if (res) {
+        toast(res.error || (res.errors || []).join('\\n') || '処理に失敗しました', true);
+    }
+}
+
+async function loadVpnPassthrough() {
+    const data = await api.get('/firewall/api/vpn-client-passthrough');
+    if (!data) return;
+    vpnPassthroughState = data;
+    renderVpnPassthrough(data);
+}
+
+function renderVpnPassthrough(data) {
+    const zoneSelect = document.getElementById('vpn-client-ingress-zone');
+    const zonesList = data.zones || [];
+    zoneSelect.innerHTML = zonesList.map(zone =>
+        `<option value="${escapeHtml(zone)}">${escapeHtml(zone)}</option>`
+    ).join('');
+    zoneSelect.value = data.default_ingress_zone || zonesList[0] || '';
+
+    const box = document.getElementById('vpn-client-passthrough');
+    if (!data.supported) {
+        box.innerHTML = `<div class="list-group-item text-danger small">${escapeHtml(data.error || 'firewalld policy 未対応')}</div>`;
+        document.getElementById('vpn-client-passthrough-alert').classList.add('d-none');
+        return;
+    }
+    const profiles = data.profiles || {};
+    box.innerHTML = Object.keys(profiles).map(key => vpnPassthroughRow(key, profiles[key])).join('');
+    renderVpnPassthroughAlert(profiles);
+}
+
+function vpnPassthroughRow(key, profile) {
+    const state = profile.enabled
+        ? '<span class="badge bg-success-subtle text-success-emphasis">有効</span>'
+        : '<span class="badge bg-secondary-subtle text-secondary-emphasis">無効</span>';
+    const ports = [...(profile.required_ports || []), ...(profile.required_protocols || [])].join(' ');
+    const helpers = (profile.required_helpers || []).join(' ') || '-';
+    const conflict = profile.conflict_count
+        ? `<span class="badge bg-warning-subtle text-warning-emphasis">競合 ${profile.conflict_count}</span>`
+        : '';
+    return `<div class="list-group-item d-flex justify-content-between align-items-start gap-2">
+        <div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <strong>${escapeHtml(profile.label)}</strong>
+                ${state}
+                ${conflict}
+            </div>
+            <div class="small text-secondary font-monospace mt-1">
+                ${escapeHtml(ports)} / helper=${escapeHtml(helpers)}
+            </div>
+            <div class="small text-secondary font-monospace">
+                policy=${escapeHtml(profile.policy)} service=${escapeHtml(profile.service)}
+            </div>
+        </div>
+        <div class="btn-group btn-group-sm flex-shrink-0">
+            <button class="btn btn-outline-primary" onclick="setVpnPassthrough('${escapeJs(key)}', true)" title="有効化">
+                <i class="bi bi-toggle-on"></i>
+            </button>
+            <button class="btn btn-outline-danger" onclick="setVpnPassthrough('${escapeJs(key)}', false)" title="無効化">
+                <i class="bi bi-toggle-off"></i>
+            </button>
+        </div>
+    </div>`;
+}
+
+function renderVpnPassthroughAlert(profiles) {
+    const alert = document.getElementById('vpn-client-passthrough-alert');
+    const conflicts = [];
+    for (const profile of Object.values(profiles || {})) {
+        for (const item of profile.protocol_forward_conflicts || []) {
+            conflicts.push(`${item.proto} → ${item.toaddr} (${item.zone})`);
+        }
+    }
+    const unique = [...new Set(conflicts)];
+    if (unique.length === 0) {
+        alert.classList.add('d-none');
+        alert.textContent = '';
+        return;
+    }
+    alert.textContent = `サーバ公開用プロトコル転送が外向きVPNの戻り通信と競合する可能性があります: ${unique.join(', ')}`;
+    alert.classList.remove('d-none');
+}
+
+async function setVpnPassthrough(profile, enabled) {
+    const ingressZone = document.getElementById('vpn-client-ingress-zone').value;
+    const action = enabled ? '有効化' : '無効化';
+    if (!confirm(`${profile} を ${action}しますか?\n送信元zone: ${ingressZone || '-'}`)) return;
+    const res = await api.send('/firewall/api/vpn-client-passthrough', 'POST', {
+        profile,
+        enabled,
+        ingress_zone: ingressZone,
+    });
+    if (res && res.ok) {
+        toast(`${action}しました`);
+        await loadVpnPassthrough();
         await loadDirectRules();
     } else if (res) {
         toast(res.error || (res.errors || []).join('\\n') || '処理に失敗しました', true);
@@ -983,6 +1094,7 @@ async function applyVpnPreset(kind) {
     toast('プリセットを追加しました');
     await reloadActiveZone();
     await loadDirectRules();
+    await loadVpnPassthrough();
 }
 
 function editForwardPortByIndex(i) {
@@ -1054,6 +1166,7 @@ async function reloadFw() {
     const res = await api.send('/firewall/api/reload', 'POST');
     if (res) toast(res.ok ? '再読み込み成功' : '再読み込み失敗', !res.ok);
     await refreshZones();
+    await loadVpnPassthrough();
 }
 
 init();
