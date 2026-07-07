@@ -50,12 +50,13 @@ VPN_CLIENT_PROFILES = {
     },
     "l2tp-ipsec": {
         "label": "L2TP/IPsec",
-        "policy": "synca-l2tp-ipsec-client",
-        "service": "synca-l2tp-ipsec-client",
+        "policy": "synca-l2tp-out",
+        "service": "synca-l2tp-out",
         "ports": ["500/udp", "4500/udp", "1701/udp"],
         "protocols": ["esp", "ah"],
         "helpers": [],
         "conflict_protocols": ["esp", "ah"],
+        "legacy_services": ["synca-l2tp-ipsec-client"],
     },
 }
 FORWARD_PORT_COMMENT_RE = re.compile(
@@ -834,9 +835,11 @@ def _apply_vpn_client_passthrough(profile: str, enabled: bool, ingress_zone: str
             return {"ok": False, "error": "missing firewalld helpers: " + ", ".join(missing_helpers)}
         _ensure_vpn_client_service(cfg, changed, errors)
         _ensure_vpn_client_policy(cfg, ingress_zone, changed, errors)
+        _remove_legacy_vpn_client_services(cfg, changed, errors)
     else:
         _remove_vpn_client_policy(cfg, changed, errors)
         _remove_vpn_client_service(cfg, changed, errors)
+        _remove_legacy_vpn_client_services(cfg, changed, errors)
 
     if not errors:
         reload_ok, reload_output = _reload_firewall_and_refresh_fail2ban()
@@ -926,6 +929,16 @@ def _remove_vpn_client_service(cfg: dict, changed: list[str], errors: list[str])
         ["firewall-cmd", "--permanent", f"--delete-service={service}"],
         changed, errors, ignore_missing=True,
     )
+
+
+def _remove_legacy_vpn_client_services(cfg: dict, changed: list[str], errors: list[str]) -> None:
+    for service in cfg.get("legacy_services", []):
+        if service not in _firewalld_list(["--permanent", "--get-services"]):
+            continue
+        _collect_firewall_change(
+            ["firewall-cmd", "--permanent", f"--delete-service={service}"],
+            changed, errors, ignore_missing=True,
+        )
 
 
 def _vpn_client_conflicts(cfg: dict) -> list[dict]:
