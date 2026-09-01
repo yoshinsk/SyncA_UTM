@@ -59,7 +59,8 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 - ACME HTTP-01 実行中だけ firewalld の `80/tcp` を一時開放し、終了後に元の状態へ戻す renewal hook
 - 証明書更新成功時に Nginx を reload する deploy hook
 - GUI からの手動更新は certbot のランダム待機を無効化し、管理画面のタイムアウトによる中断を避ける
-- 9 系 / 8 系とも、証明書検証に必要な時刻同期は `chronyd` を有効化する
+- GitHub 更新で既存機の `certbot` runtime を自己修復し、hook 更新、timer 有効化、期限到来済み証明書の即時 renew を実行する
+- 9 系 / 8 系とも、証明書検証に必要な時刻同期は `chronyd` を導入または有効化する
 
 ### Nginx リバースプロキシ / WAF
 

@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# payload/server-gui/bin/synca-certbot-runtime
+# Repair the Let's Encrypt renewal runtime on existing SyncA UTM appliances.
+
+set -uo pipefail
+
+LOCK_FILE=/run/synca-certbot-runtime.lock
+STATUS_DIR=/var/lib/server-gui
+STATUS_FILE=${STATUS_DIR}/certbot-runtime.status
+RENEW_LOG_DIR=/var/log/server-gui
+RENEW_LOG=${RENEW_LOG_DIR}/certbot-runtime-renew.log
+WARNINGS=0
+
+log() {
+    local msg="$*"
+    echo "$msg"
+    if command -v logger >/dev/null 2>&1; then
+        logger -t synca-certbot-runtime -- "$msg" || true
+    fi
+}
+
+warn() {
+    WARNINGS=$((WARNINGS + 1))
+    log "warning: $*"
+}
+
+have_unit() {
+    local unit="$1"
+    systemctl list-unit-files --no-legend "$unit" 2>/dev/null \
+        | awk '{print $1}' | grep -Fxq "$unit"
+}
+
+run_quiet() {
+    "$@" >/dev/null 2>&1 || warn "command failed: $*"
+}
+
+install_chrony_if_missing() {
+    # Existing AlmaLinux 8 appliances may have certbot but no NTP service.
+    if have_unit chronyd.service || have_unit systemd-timesyncd.service; then
+        return
+    fi
+    local mgr=""
+    if command -v dnf >/dev/null 2>&1; then
+        mgr=dnf
+    elif command -v yum >/dev/null 2>&1; then
+        mgr=yum
+    else
+        warn "no package manager found for chrony installation"
+        return
+    fi
+    log "installing chrony for certificate time validation"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 180 "$mgr" -y install chrony >/dev/null 2>&1 \
+            || warn "chrony installation failed or timed out"
+    else
+        "$mgr" -y install chrony >/dev/null 2>&1 \
+            || warn "chrony installation failed"
+    fi
+    run_quiet systemctl daemon-reload
+}
+
+enable_time_sync() {
+    install_chrony_if_missing
+    if have_unit chronyd.service; then
+        run_quiet systemctl enable --now chronyd
+        timedatectl set-ntp true >/dev/null 2>&1 || true
+    elif have_unit systemd-timesyncd.service; then
+        run_quiet systemctl enable --now systemd-timesyncd
+        timedatectl set-ntp true >/dev/null 2>&1 || true
+    else
+        warn "no time-sync unit is available"
+    fi
+}
+
+wait_for_time_sync() {
+    local synced=""
+    for _ in $(seq 1 45); do
+        synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+        [[ "$synced" == "yes" ]] && return
+        sleep 1
+    done
+    warn "time synchronization has not been confirmed yet"
+}
+
+write_renewal_hooks() {
+    # Hooks are intentionally quiet; certbot treats hook output and slow hooks as
+    # part of the renew command that the GUI may be waiting on.
+    local pre=/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh
+    local post=/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh
+    local deploy=/etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh
+    install -d -m 0755 "$(dirname "$pre")" "$(dirname "$post")" "$(dirname "$deploy")" \
+        || { warn "failed to create renewal hook directories"; return; }
+
+    cat > "$pre" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR=/run/synca-acme
+install -d -m 0755 "$STATE_DIR"
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+: > "$STATE_DIR/ip80-added"
+if systemctl is-active --quiet firewalld; then
+    if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
+        touch "$STATE_DIR/http-was-open"
+    else
+        firewall-cmd --zone=public --add-service=http >/dev/null 2>&1 || true
+    fi
+    ppp_rule='ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'
+    if firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$ppp_rule"; then
+        touch "$STATE_DIR/ppp80-was-open"
+    else
+        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+    fi
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        rule="ipv4 filter INPUT 0 -d ${ip} -p tcp --dport 80 -j ACCEPT"
+        if ! firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$rule"; then
+            firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+            echo "$ip" >> "$STATE_DIR/ip80-added"
+        fi
+    done < <(ip -o -4 addr show scope global | awk '{print $4}' | cut -d/ -f1)
+fi
+HOOK
+
+    cat > "$post" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR=/run/synca-acme
+if systemctl is-active --quiet firewalld; then
+    if [[ -f "$STATE_DIR/ip80-added" ]]; then
+        while read -r ip; do
+            [[ -z "$ip" ]] && continue
+            firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+        done < "$STATE_DIR/ip80-added"
+    fi
+    if [[ ! -f "$STATE_DIR/ppp80-was-open" ]]; then
+        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+    fi
+    if [[ ! -f "$STATE_DIR/http-was-open" ]]; then
+        firewall-cmd --zone=public --remove-service=http >/dev/null 2>&1 || true
+    fi
+fi
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+HOOK
+
+    cat > "$deploy" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+    nginx -t >/dev/null 2>&1 && systemctl reload-or-restart nginx >/dev/null 2>&1 || true
+fi
+if systemctl list-unit-files synca-central-report.service >/dev/null 2>&1; then
+    systemctl start synca-central-report.service >/dev/null 2>&1 || true
+fi
+HOOK
+
+    chmod 0755 "$pre" "$post" "$deploy" \
+        || warn "failed to set renewal hook permissions"
+}
+
+enable_certbot_timer() {
+    if ! command -v certbot >/dev/null 2>&1; then
+        warn "certbot is not installed"
+        return
+    fi
+    local timer=""
+    for candidate in certbot-renew.timer certbot.timer snap.certbot.renew.timer; do
+        if have_unit "$candidate"; then
+            timer="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$timer" ]]; then
+        warn "certbot renewal timer unit not found"
+        return
+    fi
+    run_quiet systemctl enable "$timer"
+    run_quiet systemctl start --no-block "$timer"
+}
+
+renew_due_certificates_now() {
+    # Running renew once after GitHub update prevents near-expiry hosts from
+    # waiting for the next timer slot. Certbot skips certificates not yet due.
+    if ! command -v certbot >/dev/null 2>&1; then
+        return
+    fi
+    install -d -m 0755 "$RENEW_LOG_DIR" || true
+    log "running certbot renew once after runtime repair"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 900 certbot renew --non-interactive --no-random-sleep-on-renew \
+            >"$RENEW_LOG" 2>&1 || warn "certbot renew failed; see $RENEW_LOG"
+    else
+        certbot renew --non-interactive --no-random-sleep-on-renew \
+            >"$RENEW_LOG" 2>&1 || warn "certbot renew failed; see $RENEW_LOG"
+    fi
+}
+
+write_status() {
+    install -d -m 0755 "$STATUS_DIR" || return
+    {
+        echo "last_run=$(date -Is 2>/dev/null || date)"
+        echo "warnings=$WARNINGS"
+        echo "certbot=$(command -v certbot 2>/dev/null || true)"
+        echo "chronyd=$(command -v chronyd 2>/dev/null || true)"
+        timedatectl show -p NTPSynchronized -p NTP 2>/dev/null || true
+        for timer in certbot-renew.timer certbot.timer snap.certbot.renew.timer; do
+            printf '%s_enabled=' "$timer"
+            systemctl is-enabled "$timer" 2>/dev/null || true
+            printf '%s_active=' "$timer"
+            systemctl is-active "$timer" 2>/dev/null || true
+        done
+    } > "$STATUS_FILE" 2>/dev/null || true
+}
+
+main() {
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$LOCK_FILE"
+        flock -n 9 || exit 0
+    fi
+    write_renewal_hooks
+    enable_time_sync
+    wait_for_time_sync
+    enable_certbot_timer
+    renew_due_certificates_now
+    write_status
+    log "runtime repair completed with warnings=$WARNINGS"
+}
+
+main "$@"
