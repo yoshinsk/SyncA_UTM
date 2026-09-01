@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,7 @@ CENTRAL_CONFIG = Path("/etc/server-gui/central.json")
 LE_HOOK_PRE  = Path("/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh")
 LE_HOOK_POST = Path("/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh")
 LE_HOOK_DEPLOY = Path("/etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh")
+CERTBOT_RUNTIME_HELPER = Path("/opt/server-gui/bin/synca-certbot-runtime")
 
 
 def register(app: Flask) -> None:
@@ -424,7 +426,10 @@ deploy.chmod(0o755)
 
 
 def _ensure_certbot_runtime() -> None:
-    """Provision renewal hooks and best-effort timer wiring for updated hosts."""
+    """Provision renewal hooks and timer wiring for updated hosts."""
+    if _schedule_certbot_runtime_helper():
+        return
+
     hook_result = _ensure_letsencrypt_hooks()
     if not hook_result.get("ok"):
         logger.warning("Let's Encrypt hook provisioning failed: %s", hook_result.get("error"))
@@ -432,6 +437,25 @@ def _ensure_certbot_runtime() -> None:
     if not timer_result.get("ok"):
         logger.warning("certbot renewal timer provisioning failed: %s", timer_result.get("error"))
     _enable_time_sync_if_available()
+
+
+def _schedule_certbot_runtime_helper() -> bool:
+    """Run the full runtime repair helper outside the GUI request lifecycle."""
+    if not CERTBOT_RUNTIME_HELPER.exists():
+        return False
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+    unit = f"synca-certbot-runtime-{ts}-{os.getpid()}"
+    res = sudo_run([
+        "systemd-run",
+        f"--unit={unit}",
+        "--no-block",
+        "--",
+        str(CERTBOT_RUNTIME_HELPER),
+    ], timeout=10)
+    if res.ok:
+        return True
+    logger.warning("certbot runtime helper scheduling failed: %s", res.stderr or res.stdout)
+    return False
 
 
 def _enable_certbot_timer() -> dict:
