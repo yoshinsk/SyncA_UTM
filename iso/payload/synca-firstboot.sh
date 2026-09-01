@@ -139,6 +139,21 @@ require_interface() {
     fi
 }
 
+require_existing_interface() {
+    local name="$1"
+    if nmcli -t -f DEVICE device status | grep -Fxq "$name"; then
+        return 0
+    fi
+    if ip link show dev "$name" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Network interface not found: $name" >&2
+    echo "Available interfaces:" >&2
+    nmcli -t -f DEVICE,TYPE,STATE device status >&2 || true
+    ip -o link show >&2 || true
+    exit 1
+}
+
 list_ethernet_interfaces() {
     nmcli -t -f DEVICE,TYPE device status | awk -F: '$2 == "ethernet" {print $1}'
 }
@@ -325,6 +340,36 @@ cidr_netmask() {
     esac
 }
 
+truthy() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_preserved_network() {
+    # VPS installs usually arrive with working NetworkManager profiles. This
+    # mode validates those interfaces and lets the rest of firstboot configure
+    # dnsmasq, firewalld, NAT, DDNS, backup, update checks, and central timers
+    # without deleting or replacing provider-owned IP settings.
+    local lan_ip
+    if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+        require_existing_interface "$LAN_IF"
+        ip link set "$LAN_IF" up >/dev/null 2>&1 || true
+        lan_ip="$(cidr_ip "$LAN_CIDR")"
+        if ! ip -4 addr show dev "$LAN_IF" 2>/dev/null | grep -Fq "inet ${lan_ip}/"; then
+            echo "warning: preserved LAN interface ${LAN_IF} does not currently have ${LAN_CIDR}" >&2
+        fi
+    fi
+    if [[ "${SYNCA_APPLY_WAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
+        require_existing_interface "$WAN_IF"
+        ip link set "$WAN_IF" up >/dev/null 2>&1 || true
+        if ! ip -4 addr show dev "$WAN_IF" scope global >/dev/null 2>&1; then
+            echo "warning: preserved WAN interface ${WAN_IF} has no global IPv4 address" >&2
+        fi
+    fi
+}
+
 dhcp_default_ip() {
     local cidr="$1"
     local offset="$2"
@@ -487,6 +532,11 @@ configure_users() {
 }
 
 configure_network() {
+    if truthy "${SYNCA_PRESERVE_NETWORK:-0}"; then
+        validate_preserved_network
+        return 0
+    fi
+
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         delete_connections_for_interface "$LAN_IF"
         nmcli connection delete synca-lan >/dev/null 2>&1 || true
