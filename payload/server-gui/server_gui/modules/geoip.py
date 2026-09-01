@@ -106,6 +106,13 @@ def _default_ipset_name(code: str) -> str:
     return f"{code.lower()}-ipv4"
 
 
+def _ipset_matches_country_code(code: str, ipset_name: str) -> bool:
+    """Return true when an adopted ipset name is visibly tied to the country."""
+    prefix = code.lower()
+    name = ipset_name.lower()
+    return name == _default_ipset_name(code) or name.startswith((f"{prefix}-", f"{prefix}_"))
+
+
 def _write_ipset_xml(ipset_name: str, cidrs: list[str]) -> None:
     # Firewalld can load ipset XML directly. Replacing the file in one step is
     # much faster and less disruptive than removing thousands of entries via
@@ -290,6 +297,10 @@ def add_country():
     if not IPSET_NAME_RE.match(ipset_name):
         return jsonify({"error": f"invalid ipset name: {ipset_name!r}"}), 400
     adopt = bool(payload.get("adopt", False))
+    if adopt and not _ipset_matches_country_code(code, ipset_name):
+        return jsonify({
+            "error": f"ipset {ipset_name!r} does not match country code {code!r}",
+        }), 400
 
     with _store().transaction(MODULE_NAME, _default()) as data:
         _normalise_data(data)
