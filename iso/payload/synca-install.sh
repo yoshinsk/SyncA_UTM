@@ -130,41 +130,86 @@ install_wireguard_ui() {
 }
 
 install_letsencrypt_hooks() {
-    install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+    install -d -m 0755 /etc/letsencrypt/renewal-hooks/pre \
+        /etc/letsencrypt/renewal-hooks/post \
+        /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
-install -d -m 0755 /run/synca-acme
+STATE_DIR=/run/synca-acme
+install -d -m 0755 "$STATE_DIR"
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+: > "$STATE_DIR/ip80-added"
 if systemctl is-active --quiet firewalld; then
     if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
-        touch /run/synca-acme/http-was-open
+        touch "$STATE_DIR/http-was-open"
     else
-        rm -f /run/synca-acme/http-was-open
-        firewall-cmd --zone=public --add-service=http || true
+        firewall-cmd --zone=public --add-service=http >/dev/null 2>&1 || true
     fi
-    if firewall-cmd --direct --get-all-rules | grep -Fxq 'ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'; then
-        touch /run/synca-acme/ppp80-was-open
+    ppp_rule='ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'
+    if firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$ppp_rule"; then
+        touch "$STATE_DIR/ppp80-was-open"
     else
-        rm -f /run/synca-acme/ppp80-was-open
-        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
     fi
-fi
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        rule="ipv4 filter INPUT 0 -d ${ip} -p tcp --dport 80 -j ACCEPT"
+        if ! firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$rule"; then
+            firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+            echo "$ip" >> "$STATE_DIR/ip80-added"
+        fi
+    done < <(ip -o -4 addr show scope global | awk '{print $4}' | cut -d/ -f1)
+    fi
 HOOK
     cat > /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
+STATE_DIR=/run/synca-acme
 if systemctl is-active --quiet firewalld; then
-    if [[ ! -f /run/synca-acme/ppp80-was-open ]]; then
-        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    if [[ -f "$STATE_DIR/ip80-added" ]]; then
+        while read -r ip; do
+            [[ -z "$ip" ]] && continue
+            firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+        done < "$STATE_DIR/ip80-added"
     fi
-    if [[ ! -f /run/synca-acme/http-was-open ]]; then
-        firewall-cmd --zone=public --remove-service=http || true
+    if [[ ! -f "$STATE_DIR/ppp80-was-open" ]]; then
+        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+    fi
+    if [[ ! -f "$STATE_DIR/http-was-open" ]]; then
+        firewall-cmd --zone=public --remove-service=http >/dev/null 2>&1 || true
     fi
 fi
-rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+HOOK
+    cat > /etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+    nginx -t >/dev/null 2>&1 && systemctl reload-or-restart nginx >/dev/null 2>&1 || true
+fi
+if systemctl list-unit-files synca-central-report.service >/dev/null 2>&1; then
+    systemctl start synca-central-report.service >/dev/null 2>&1 || true
+fi
 HOOK
     chmod 0755 /etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh \
-        /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh
+        /etc/letsencrypt/renewal-hooks/post/00-syncautm.sh \
+        /etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh
+}
+
+enable_certbot_renewal() {
+    # Package names differ between EL8/EL9/EPEL/Snap. Enable the first timer
+    # found so every install path gets automatic renewal.
+    local timer
+    for timer in certbot-renew.timer certbot.timer snap.certbot.renew.timer; do
+        if systemctl list-unit-files --no-legend "$timer" 2>/dev/null | awk '{print $1}' | grep -Fxq "$timer"; then
+            systemctl enable "$timer" >/dev/null 2>&1 || return 1
+            systemctl start --no-block "$timer" >/dev/null 2>&1 || return 1
+            return 0
+        fi
+    done
+    echo "warning: certbot renewal timer unit not found; certificate auto-renew is not enabled" >&2
+    return 0
 }
 
 install_firewalld_profile() {
@@ -543,6 +588,7 @@ main() {
     install_server_gui
     install_wireguard_ui
     install_letsencrypt_hooks
+    enable_certbot_renewal || echo "warning: certbot renewal timer could not be enabled" >&2
     install_firewalld_profile
     install_pppoe_parent_ip_dispatcher
     install_upnp_support

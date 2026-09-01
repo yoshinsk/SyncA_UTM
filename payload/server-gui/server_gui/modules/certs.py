@@ -36,14 +36,19 @@ ACME_WEBROOT = Path("/var/www/letsencrypt")
 CENTRAL_CONFIG = Path("/etc/server-gui/central.json")
 
 # Hook scripts dropped by the SyncA UTM installer. They temporarily open
-# HTTP in firewalld for ACME HTTP-01, but they do not stop nginx. GUI-driven
-# issuance uses webroot so the API connection is not cut mid-request.
+# HTTP in firewalld for ACME HTTP-01, reload nginx after successful renewal,
+# and stay quiet so certbot does not fail when a GUI request times out.
 LE_HOOK_PRE  = Path("/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh")
 LE_HOOK_POST = Path("/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh")
+LE_HOOK_DEPLOY = Path("/etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh")
 
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    try:
+        _ensure_certbot_runtime()
+    except Exception as exc:
+        logger.warning("certbot runtime provisioning failed: %s", exc)
 
 
 # ---- views -------------------------------------------------------------
@@ -174,7 +179,7 @@ def renew_certificate():
     if not acme_result.get("ok"):
         return jsonify({"error": acme_result.get("error", "failed to prepare ACME HTTP vhost")}), 500
 
-    cmd = ["certbot", "renew", "--non-interactive"]
+    cmd = ["certbot", "renew", "--non-interactive", "--no-random-sleep-on-renew"]
     if dry_run:
         cmd.append("--dry-run")
     if force:
@@ -348,60 +353,121 @@ from pathlib import Path
 
 pre = Path("/etc/letsencrypt/renewal-hooks/pre/00-syncautm.sh")
 post = Path("/etc/letsencrypt/renewal-hooks/post/00-syncautm.sh")
+deploy = Path("/etc/letsencrypt/renewal-hooks/deploy/00-syncautm-reload-nginx.sh")
 pre.parent.mkdir(parents=True, exist_ok=True)
 post.parent.mkdir(parents=True, exist_ok=True)
+deploy.parent.mkdir(parents=True, exist_ok=True)
 pre.write_text("""#!/usr/bin/env bash
 set -euo pipefail
-install -d -m 0755 /run/synca-acme
+STATE_DIR=/run/synca-acme
+install -d -m 0755 "$STATE_DIR"
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+: > "$STATE_DIR/ip80-added"
 if systemctl is-active --quiet firewalld; then
-    : > /run/synca-acme/ip80-added
     if firewall-cmd --zone=public --query-service=http >/dev/null 2>&1; then
-        touch /run/synca-acme/http-was-open
+        touch "$STATE_DIR/http-was-open"
     else
-        rm -f /run/synca-acme/http-was-open
-        firewall-cmd --zone=public --add-service=http || true
+        firewall-cmd --zone=public --add-service=http >/dev/null 2>&1 || true
     fi
-    if firewall-cmd --direct --get-all-rules | grep -Fxq 'ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'; then
-        touch /run/synca-acme/ppp80-was-open
+    ppp_rule='ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT'
+    if firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$ppp_rule"; then
+        touch "$STATE_DIR/ppp80-was-open"
     else
-        rm -f /run/synca-acme/ppp80-was-open
-        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+        firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
     fi
     while read -r ip; do
         [[ -z "$ip" ]] && continue
         rule="ipv4 filter INPUT 0 -d ${ip} -p tcp --dport 80 -j ACCEPT"
-        if ! firewall-cmd --direct --get-all-rules | grep -Fxq "$rule"; then
-            firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT || true
-            echo "$ip" >> /run/synca-acme/ip80-added
+        if ! firewall-cmd --direct --get-all-rules 2>/dev/null | grep -Fxq "$rule"; then
+            firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+            echo "$ip" >> "$STATE_DIR/ip80-added"
         fi
     done < <(ip -o -4 addr show scope global | awk '{print $4}' | cut -d/ -f1)
 fi
 """, encoding="utf-8")
 post.write_text("""#!/usr/bin/env bash
 set -euo pipefail
+STATE_DIR=/run/synca-acme
 if systemctl is-active --quiet firewalld; then
-    if [[ -f /run/synca-acme/ip80-added ]]; then
+    if [[ -f "$STATE_DIR/ip80-added" ]]; then
         while read -r ip; do
             [[ -z "$ip" ]] && continue
-            firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT || true
-        done < /run/synca-acme/ip80-added
+            firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -d "$ip" -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+        done < "$STATE_DIR/ip80-added"
     fi
-    if [[ ! -f /run/synca-acme/ppp80-was-open ]]; then
-        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT || true
+    if [[ ! -f "$STATE_DIR/ppp80-was-open" ]]; then
+        firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i ppp+ -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
     fi
-    if [[ ! -f /run/synca-acme/http-was-open ]]; then
-        firewall-cmd --zone=public --remove-service=http || true
+    if [[ ! -f "$STATE_DIR/http-was-open" ]]; then
+        firewall-cmd --zone=public --remove-service=http >/dev/null 2>&1 || true
     fi
 fi
-rm -f /run/synca-acme/http-was-open /run/synca-acme/ppp80-was-open /run/synca-acme/ip80-added
+rm -f "$STATE_DIR/http-was-open" "$STATE_DIR/ppp80-was-open" "$STATE_DIR/ip80-added"
+""", encoding="utf-8")
+deploy.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+    nginx -t >/dev/null 2>&1 && systemctl reload-or-restart nginx >/dev/null 2>&1 || true
+fi
+if systemctl list-unit-files synca-central-report.service >/dev/null 2>&1; then
+    systemctl start synca-central-report.service >/dev/null 2>&1 || true
+fi
 """, encoding="utf-8")
 pre.chmod(0o755)
 post.chmod(0o755)
+deploy.chmod(0o755)
 '''
     res = sudo_run(["python3", "-c", script])
     if not res.ok:
         return {"ok": False, "error": res.stderr or res.stdout}
     return {"ok": True}
+
+
+def _ensure_certbot_runtime() -> None:
+    """Provision renewal hooks and best-effort timer wiring for updated hosts."""
+    hook_result = _ensure_letsencrypt_hooks()
+    if not hook_result.get("ok"):
+        logger.warning("Let's Encrypt hook provisioning failed: %s", hook_result.get("error"))
+    timer_result = _enable_certbot_timer()
+    if not timer_result.get("ok"):
+        logger.warning("certbot renewal timer provisioning failed: %s", timer_result.get("error"))
+    _enable_time_sync_if_available()
+
+
+def _enable_certbot_timer() -> dict:
+    """Enable the distro-specific certbot renewal timer when it exists."""
+    script = r'''
+set -euo pipefail
+for timer in certbot-renew.timer certbot.timer snap.certbot.renew.timer; do
+    if systemctl list-unit-files --no-legend "$timer" 2>/dev/null | awk '{print $1}' | grep -Fxq "$timer"; then
+        systemctl enable "$timer" >/dev/null 2>&1 || exit 1
+        systemctl start --no-block "$timer" >/dev/null 2>&1 || exit 1
+        exit 0
+    fi
+done
+exit 2
+'''
+    res = sudo_run(["bash", "-lc", script], timeout=30)
+    if res.ok:
+        return {"ok": True}
+    if res.returncode == 2:
+        return {"ok": False, "error": "certbot renewal timer unit not found"}
+    return {"ok": False, "error": res.stderr or res.stdout}
+
+
+def _enable_time_sync_if_available() -> None:
+    """Enable installed time-sync services without installing packages."""
+    script = r'''
+set -euo pipefail
+if systemctl list-unit-files --no-legend chronyd.service 2>/dev/null | awk '{print $1}' | grep -Fxq chronyd.service; then
+    systemctl enable --now chronyd >/dev/null 2>&1 || true
+    timedatectl set-ntp true >/dev/null 2>&1 || true
+elif systemctl list-unit-files --no-legend systemd-timesyncd.service 2>/dev/null | awk '{print $1}' | grep -Fxq systemd-timesyncd.service; then
+    systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+    timedatectl set-ntp true >/dev/null 2>&1 || true
+fi
+'''
+    sudo_run(["bash", "-lc", script], timeout=30)
 
 
 def _ensure_acme_http_vhost(domains: list[str] | None = None, listen_ip: str = "") -> dict:

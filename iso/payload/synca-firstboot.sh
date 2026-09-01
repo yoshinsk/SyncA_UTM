@@ -974,8 +974,32 @@ configure_ipv6() {
     rm -f /etc/dnsmasq.d/synca-ipv6.conf
 }
 
+enable_certbot_renewal() {
+    # EL8/EL9 package families expose different certbot timer names. Enabling
+    # the first available timer prevents installed certificates from expiring.
+    local timer
+    for timer in certbot-renew.timer certbot.timer snap.certbot.renew.timer; do
+        if systemctl list-unit-files --no-legend "$timer" 2>/dev/null | awk '{print $1}' | grep -Fxq "$timer"; then
+            systemctl enable "$timer" >/dev/null 2>&1 || return 1
+            systemctl start --no-block "$timer" >/dev/null 2>&1 || return 1
+            return 0
+        fi
+    done
+    echo "warning: certbot renewal timer unit not found; certificate auto-renew is not enabled" >&2
+    return 0
+}
+
+enable_time_sync_service() {
+    if systemctl list-unit-files --no-legend chronyd.service 2>/dev/null | awk '{print $1}' | grep -Fxq chronyd.service; then
+        systemctl enable --now chronyd >/dev/null 2>&1 || true
+        timedatectl set-ntp true >/dev/null 2>&1 || true
+    fi
+}
+
 start_services() {
     systemctl daemon-reload
+    enable_time_sync_service
+    enable_certbot_renewal || echo "warning: certbot renewal timer could not be enabled" >&2
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" == "1" ]]; then
         systemctl enable dnsmasq
         systemctl start --no-block dnsmasq || true
