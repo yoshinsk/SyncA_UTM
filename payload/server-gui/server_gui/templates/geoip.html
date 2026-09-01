@@ -165,6 +165,16 @@ let attachTargetType = 'country';
 
 function escapeJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 
+function countryCodeFromIpsetName(name) {
+    const m = String(name || '').match(/^([a-z]{2})(?:-|_)/i);
+    return m ? m[1].toUpperCase() : null;
+}
+
+function ipsetMatchesCountryCode(code, name) {
+    const normalizedCode = String(code || '').toLowerCase();
+    return new RegExp(`^${normalizedCode}[-_]`, 'i').test(String(name || ''));
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     addModal = new bootstrap.Modal(document.getElementById('add-modal'));
     attachModal = new bootstrap.Modal(document.getElementById('attach-modal'));
@@ -242,12 +252,16 @@ async function refreshDiscovery() {
             const status = s.managed_by
                 ? `<span class="badge bg-success-subtle text-success-emphasis">管理中 (${escapeHtml(s.managed_by)})</span>`
                 : '<span class="badge bg-warning-subtle text-warning-emphasis">未管理</span>';
-            const actions = [
-                s.managed_by
-                    ? ''
-                    : `<button class="btn btn-sm btn-outline-info me-1" onclick="adoptIpset('${escapeJs(s.name)}')">
+            const inferredCode = countryCodeFromIpsetName(s.name);
+            const adoptAction = s.managed_by
+                ? ''
+                : inferredCode
+                    ? `<button class="btn btn-sm btn-outline-info me-1" onclick="adoptIpset('${escapeJs(s.name)}')">
                            <i class="bi bi-arrow-down-left-square"></i> 取り込み
-                       </button>`,
+                       </button>`
+                    : '<span class="text-secondary small me-1">国別形式外</span>';
+            const actions = [
+                adoptAction,
                 `<button class="btn btn-sm btn-outline-danger" onclick="deleteIpset('${escapeJs(s.name)}')">
                      <i class="bi bi-trash"></i> 削除
                  </button>`,
@@ -273,6 +287,9 @@ async function addCountry() {
     if (!/^[A-Z]{2}$/.test(code)) return toast('2 文字の国コードを入力してください', true);
     const ipset = document.getElementById('add-ipset').value.trim() || undefined;
     const adopt = document.getElementById('add-adopt').checked;
+    if (adopt && ipset && !ipsetMatchesCountryCode(code, ipset)) {
+        return toast('国コードと一致する ipset 名を指定してください', true);
+    }
     const res = await api.send('/geoip/api/countries', 'POST', { code, ipset, adopt });
     if (res && res.country) {
         toast(`${code}: ${adopt ? '取り込みました' : `${res.country.entry_count} 件登録`}`);
@@ -282,10 +299,8 @@ async function addCountry() {
 }
 
 async function adoptIpset(name) {
-    // The ipset name is e.g. "jp-ipv4" → infer the country code "JP".
-    const m = name.match(/^([a-z]{2})/i);
-    const code = m ? m[1].toUpperCase() : prompt(`${name} に対応する国コード (例: JP) を入力`);
-    if (!code || !/^[A-Z]{2}$/i.test(code)) return;
+    const code = countryCodeFromIpsetName(name);
+    if (!code) return toast('国別IPSet名ではありません', true);
     const res = await api.send('/geoip/api/countries', 'POST',
         { code: code.toUpperCase(), ipset: name, adopt: true });
     if (res && res.country) {
