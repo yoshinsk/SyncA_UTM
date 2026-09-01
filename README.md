@@ -55,6 +55,11 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 - 4 桁 PIN による既存 DDNS ホスト上書き承認
 - SMTP 設定による PIN メール送信
 - Let's Encrypt 証明書発行と更新
+- `certbot-renew.timer` / `certbot.timer` / `snap.certbot.renew.timer` のうち利用可能な自動更新 timer をインストーラと GUI 起動時に補完
+- ACME HTTP-01 実行中だけ firewalld の `80/tcp` を一時開放し、終了後に元の状態へ戻す renewal hook
+- 証明書更新成功時に Nginx を reload する deploy hook
+- GUI からの手動更新は certbot のランダム待機を無効化し、管理画面のタイムアウトによる中断を避ける
+- 9 系 / 8 系とも、証明書検証に必要な時刻同期は `chronyd` を有効化する
 
 ### Nginx リバースプロキシ / WAF
 
