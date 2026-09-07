@@ -40,6 +40,7 @@ _PPPOE_PARENT_IP_CONFIG = _SYNCA_DIR / "pppoe-parent-ip.json"
 _PPPOE_PARENT_IP_DISPATCHER = Path("/etc/NetworkManager/dispatcher.d/90-synca-pppoe-parent-ip")
 _UPNP_MODULE_NAME = "upnp"
 _SYNCA_UPNP_UNIT = "synca-upnp.service"
+_DHCP_WAN_ROUTE_METRIC = "100"
 
 bp = Blueprint("network", __name__, url_prefix="/network")
 
@@ -89,7 +90,13 @@ def update_connection(name: str):
 @csrf_protect
 def up_connection(name: str):
     res = sudo_run(["nmcli", "connection", "up", name])
-    return jsonify({"ok": res.ok, "output": res.stdout or res.stderr})
+    payload = {"ok": res.ok, "output": res.stdout or res.stderr}
+    if res.ok:
+        sync = _sync_default_wan_firewall()
+        if sync.get("warnings") or not sync.get("ok"):
+            payload["warning"] = sync.get("error") or "; ".join(sync.get("warnings", []))
+        payload["wan_firewall_sync"] = sync
+    return jsonify(payload)
 
 
 @bp.route("/api/connections/<name>/down", methods=["POST"])
@@ -214,6 +221,7 @@ def create_bridge():
         "autoconnect":   true,
         "activate":      true,
         "use_as_lan":    true                # migrate LAN services to bridge
+        "ipv6_default_route": false          # opt in to an RA-derived IPv6 default route
       }
 
     Rolls back (deletes bridge + slaves) on any partial failure.
@@ -234,6 +242,7 @@ def create_bridge():
     autoconnect = bool(payload.get("autoconnect", True))
     activate = bool(payload.get("activate", True))
     use_as_lan = bool(payload.get("use_as_lan", False))
+    ipv6_default_route = bool(payload.get("ipv6_default_route", False))
 
     # Validate
     if not _IDENT_RE.match(name):
@@ -342,22 +351,10 @@ def create_bridge():
         return jsonify({"ok": False, "error": "STP config failed: " + stp_res.stderr.strip()}), 500
 
     # IPv4
-    if addresses:
-        ipv4_cmd = [
-            "nmcli", "connection", "modify", name,
-            "ipv4.method", "manual",
-            "ipv4.addresses", ",".join(addresses),
-        ]
-        if gateway:
-            ipv4_cmd.extend(["ipv4.gateway", gateway])
-        if dns_list:
-            ipv4_cmd.extend(["ipv4.dns", ",".join(dns_list)])
-        ip_res = sudo_run(ipv4_cmd)
-        if not ip_res.ok:
-            _rollback()
-            return jsonify({"ok": False, "error": "IPv4 config failed: " + ip_res.stderr.strip()}), 500
-    else:
-        sudo_run(["nmcli", "connection", "modify", name, "ipv4.method", "disabled"])
+    ip_res = _apply_bridge_ipv4(name, addresses, gateway, dns_list, ipv6_default_route)
+    if not ip_res["ok"]:
+        _rollback()
+        return jsonify({"ok": False, "error": "IPv4 config failed: " + ip_res["error"]}), 500
 
     # Add member ports (bridge-slaves)
     slave_failures = []
@@ -466,6 +463,7 @@ def update_bridge(name: str):
     autoconnect = bool(payload.get("autoconnect", True))
     activate = bool(payload.get("activate", True))
     use_as_lan = bool(payload.get("use_as_lan", False))
+    ipv6_default_route = bool(payload.get("ipv6_default_route", False))
 
     try:
         members = _validate_bridge_members(members_raw)
@@ -516,7 +514,7 @@ def update_bridge(name: str):
     if not stp_result["ok"]:
         return jsonify({"ok": False, "error": "STP config failed: " + stp_result["error"]}), 500
 
-    ipv4_result = _apply_bridge_ipv4(name, addresses, gateway, dns_list)
+    ipv4_result = _apply_bridge_ipv4(name, addresses, gateway, dns_list, ipv6_default_route)
     if not ipv4_result["ok"]:
         return jsonify({"ok": False, "error": "IPv4 config failed: " + ipv4_result["error"]}), 500
 
@@ -573,6 +571,7 @@ def update_bridge(name: str):
         "members": members,
         "address": addresses[0] if addresses else "",
         "addresses": addresses,
+        "ipv6_default_route": ipv6_default_route,
         "lan_migration": lan_migration,
         "output": "\n".join(output),
     })
@@ -649,7 +648,7 @@ def create_vlan():
             "ipv4.method", "manual",
             "ipv4.addresses", address,
             "ipv4.never-default", "no" if gateway else "yes",
-            "ipv6.method", "ignore",
+            "ipv6.method", "disabled",
         ]
         if gateway:
             cmd.extend(["ipv4.gateway", gateway])
@@ -668,7 +667,7 @@ def create_vlan():
             "nmcli", "connection", "modify", name,
             "ipv4.method", "link-local",
             "ipv4.never-default", "yes",
-            "ipv6.method", "ignore",
+            "ipv6.method", "disabled",
         ])
         if not ip_res.ok:
             sudo_run(["nmcli", "connection", "delete", name])
@@ -1271,8 +1270,15 @@ def _apply_bridge_stp(
     return {"ok": res.ok, "error": (res.stderr or res.stdout).strip()}
 
 
-def _apply_bridge_ipv4(name: str, addresses: list[str], gateway: str, dns_list: list[str]) -> dict:
+def _apply_bridge_ipv4(
+    name: str,
+    addresses: list[str],
+    gateway: str,
+    dns_list: list[str],
+    ipv6_default_route: bool = False,
+) -> dict:
     """Apply optional IPv4 settings to a bridge connection."""
+    ipv6_args = _bridge_ipv6_args(ipv6_default_route)
     if addresses:
         cmd = [
             "nmcli", "connection", "modify", name,
@@ -1281,7 +1287,7 @@ def _apply_bridge_ipv4(name: str, addresses: list[str], gateway: str, dns_list: 
             "ipv4.gateway", gateway or "",
             "ipv4.dns", ",".join(dns_list),
             "ipv4.never-default", "no" if gateway else "yes",
-            "ipv6.method", "ignore",
+            *ipv6_args,
         ]
     else:
         cmd = [
@@ -1290,10 +1296,31 @@ def _apply_bridge_ipv4(name: str, addresses: list[str], gateway: str, dns_list: 
             "ipv4.addresses", "",
             "ipv4.gateway", "",
             "ipv4.dns", "",
-            "ipv6.method", "ignore",
+            *ipv6_args,
         ]
     res = sudo_run(cmd)
     return {"ok": res.ok, "error": (res.stderr or res.stdout).strip()}
+
+
+def _bridge_ipv6_args(ipv6_default_route: bool) -> list[str]:
+    """Return Bridge IPv6 NetworkManager settings with default route off by default."""
+    if ipv6_default_route:
+        return [
+            "ipv6.method", "auto",
+            "ipv6.never-default", "no",
+            "ipv6.ignore-auto-dns", "no",
+            "ipv6.ignore-auto-routes", "no",
+        ]
+    return [
+        "ipv6.method", "disabled",
+        "ipv6.never-default", "yes",
+        "ipv6.ignore-auto-dns", "yes",
+        "ipv6.ignore-auto-routes", "yes",
+        "ipv6.addresses", "",
+        "ipv6.gateway", "",
+        "ipv6.dns", "",
+        "ipv6.routes", "",
+    ]
 
 
 def _reconcile_bridge_members(bridge_name: str, members: list[str], activate: bool) -> dict:
@@ -2064,6 +2091,15 @@ def _describe_connection(name: str) -> dict:
         "dns": raw.get("ipv4.dns"),
         "dns_search": raw.get("ipv4.dns-search"),
     }
+    ipv6 = {
+        "method": raw.get("ipv6.method"),
+        "addresses": raw.get("ipv6.addresses"),
+        "gateway": raw.get("ipv6.gateway"),
+        "dns": raw.get("ipv6.dns"),
+        "never_default": raw.get("ipv6.never-default"),
+        "ignore_auto_dns": raw.get("ipv6.ignore-auto-dns"),
+        "ignore_auto_routes": raw.get("ipv6.ignore-auto-routes"),
+    }
     routes = _parse_nm_routes(raw.get("ipv4.routes", ""))
     live = {
         "ip4_address": raw.get("IP4.ADDRESS[1]"),
@@ -2100,6 +2136,7 @@ def _describe_connection(name: str) -> dict:
         "autoconnect": raw.get("connection.autoconnect") == "yes",
         "state": raw.get("GENERAL.STATE"),
         "ipv4": ipv4,
+        "ipv6": ipv6,
         "live": live,
         "pppoe": pppoe,
         "bridge": bridge,
@@ -2368,17 +2405,33 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
             "ipv4.dns", ",".join(dns_list),
             "ipv4.never-default", "no" if gateway else "yes",
             "ipv4.method", "manual",
-            "ipv6.method", "ignore",
+            "ipv6.method", "disabled",
         ]
     else:  # auto / DHCP
+        dns_servers = _configured_default_dns_servers()
         cmd = [
             "nmcli", "connection", "modify", name,
             "ipv4.method", "auto",
             "ipv4.addresses", "",
             "ipv4.gateway", "",
+            "ipv4.dns-search", "",
+            "ipv4.routes", "",
+            "ipv4.ignore-auto-routes", "no",
             "ipv4.never-default", "no",
+            "ipv4.may-fail", "no",
+            "ipv4.route-metric", _DHCP_WAN_ROUTE_METRIC,
+            "ipv6.method", "disabled",
+            "ipv6.never-default", "yes",
         ]
-        # Leave DNS alone (auto can still get DNS from DHCP)
+        if dns_servers:
+            cmd.extend(["ipv4.dns", ",".join(dns_servers), "ipv4.ignore-auto-dns", "yes"])
+        else:
+            cmd.extend(["ipv4.dns", "", "ipv4.ignore-auto-dns", "no"])
+        # DHCP must follow the deployment site's DNS, route, and gateway. Clear
+        # stale static values so an office-test profile cannot poison the site.
+        # DNS is the exception: when default upstream DNS is explicitly
+        # configured for this UTM, keep using it so DDNS/cert checks do not
+        # depend on a deployment site's DHCP resolver.
 
     # NetworkManager validates manual profiles after each modify command. Apply
     # address, gateway, DNS, and method atomically so an auto profile can become
@@ -2398,4 +2451,173 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
                 "stderr": up.stderr.strip(),
             }
 
-    return {"ok": True, "activated": bool(payload.get("activate", True))}
+    result = {"ok": True, "activated": bool(payload.get("activate", True))}
+    if payload.get("activate", True):
+        sync = _sync_default_wan_firewall()
+        result["wan_firewall_sync"] = sync
+        if not sync.get("ok"):
+            result["warning"] = sync.get("error") or "WAN firewalld/NAT同期に失敗しました。"
+        elif sync.get("warnings"):
+            result["warning"] = "; ".join(sync["warnings"])
+    return result
+
+
+def _sync_default_wan_firewall() -> dict:
+    """Ensure current default-route WAN has public zone and LAN NAT rules."""
+    if not _firewalld_running():
+        return {"ok": False, "error": "firewalldが動作していないためWAN NATを同期できません。"}
+
+    wan_if = _default_route_device()
+    if not wan_if:
+        return {"ok": False, "error": "IPv4 default routeがないためWAN NATを同期できません。"}
+
+    lan_ifaces, lan_networks = _lan_firewall_targets(wan_if)
+    if not lan_ifaces or not lan_networks:
+        return {
+            "ok": True,
+            "changed": [],
+            "warnings": ["LANインターフェースまたはLAN CIDRを検出できないためNAT同期をスキップしました。"],
+        }
+
+    changed: list[str] = []
+    errors: list[str] = []
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--zone", "public", "--change-interface", wan_if],
+        changed,
+        errors,
+    )
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--zone", "public", "--add-forward"],
+        changed,
+        errors,
+    )
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--zone", "public", "--add-port", "4444/tcp"],
+        changed,
+        errors,
+    )
+
+    existing = _firewalld_direct_rule_lines(permanent=True)
+    for out_if in _wan_nat_interfaces(wan_if):
+        for lan_if in lan_ifaces:
+            _ensure_firewalld_direct_rule(
+                "ipv4", "filter", "FORWARD", "0",
+                ["-i", lan_if, "-o", out_if, "-j", "ACCEPT"],
+                existing, changed, errors,
+            )
+            _ensure_firewalld_direct_rule(
+                "ipv4", "filter", "FORWARD", "0",
+                ["-i", out_if, "-o", lan_if, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+                existing, changed, errors,
+            )
+        for lan_net in lan_networks:
+            _ensure_firewalld_direct_rule(
+                "ipv4", "nat", "POSTROUTING", "1",
+                ["-s", lan_net, "-o", out_if, "-j", "MASQUERADE"],
+                existing, changed, errors,
+            )
+
+    if errors:
+        return {"ok": False, "error": "\n".join(errors), "changed": _dedupe_strings(changed)}
+    if changed:
+        reload_res = sudo_run(["firewall-cmd", "--reload"], timeout=30)
+        if not reload_res.ok:
+            return {
+                "ok": False,
+                "error": (reload_res.stderr or reload_res.stdout).strip() or "firewalld reloadに失敗しました。",
+                "changed": _dedupe_strings(changed),
+            }
+        changed.append("firewall-cmd --reload")
+    return {
+        "ok": True,
+        "changed": _dedupe_strings(changed),
+        "wan_interface": wan_if,
+        "lan_interfaces": lan_ifaces,
+        "lan_networks": lan_networks,
+    }
+
+
+def _configured_default_dns_servers() -> list[str]:
+    """Return GUI-configured default upstream DNS servers usable by this host."""
+    data = _load_config("dnsmasq", default_dnsmasq_config())
+    upstream = (data.get("dns") or {}).get("upstream")
+    if not isinstance(upstream, list):
+        return []
+    servers: list[str] = []
+    for item in upstream:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("domain", "")).strip():
+            continue
+        server = str(item.get("server", "")).strip()
+        try:
+            server = validate_ipv4(server)
+        except ValidationError:
+            continue
+        if server not in servers:
+            servers.append(server)
+    return servers
+
+
+def _wan_nat_interfaces(wan_if: str) -> list[str]:
+    """Return concrete and wildcard outbound interfaces for WAN NAT rules."""
+    interfaces = [wan_if]
+    if wan_if.startswith("ppp"):
+        interfaces.append("ppp+")
+    return _dedupe_strings([iface for iface in interfaces if iface])
+
+
+def _lan_firewall_targets(wan_if: str) -> tuple[list[str], list[str]]:
+    """Return LAN service interfaces and private IPv4 networks for NAT sync."""
+    candidates = _configured_lan_service_interfaces(include_firewalld=False)
+    if not candidates:
+        candidates = {
+            iface for iface in _trusted_zone_interfaces()
+            if iface not in {wan_if, "lo", "wg0"} and not iface.startswith("ppp")
+        }
+    lan_ifaces: list[str] = []
+    lan_networks: list[str] = []
+    for iface in sorted(candidates):
+        if iface == wan_if or iface == "lo" or iface.startswith("ppp"):
+            continue
+        addresses = _lan_ipv4_addresses_for_interface(iface)
+        networks: list[str] = []
+        for address in addresses:
+            try:
+                network = ipaddress.IPv4Interface(address).network
+            except ValueError:
+                continue
+            if not network.network_address.is_private:
+                continue
+            network_text = str(network)
+            if network_text not in lan_networks:
+                lan_networks.append(network_text)
+            if network_text not in networks:
+                networks.append(network_text)
+        if networks:
+            lan_ifaces.append(iface)
+    return lan_ifaces, lan_networks
+
+
+def _ensure_firewalld_direct_rule(
+    ipv: str,
+    table: str,
+    chain: str,
+    priority: str,
+    args: list[str],
+    existing: set[str],
+    changed: list[str],
+    errors: list[str],
+) -> None:
+    """Add one permanent direct rule when missing."""
+    raw = " ".join([ipv, table, chain, priority, *args])
+    if raw in existing:
+        return
+    before_errors = len(errors)
+    _collect_firewalld_change(
+        ["firewall-cmd", "--permanent", "--direct", "--add-rule", ipv, table, chain, priority, *args],
+        changed,
+        errors,
+    )
+    if len(errors) == before_errors:
+        existing.add(raw)

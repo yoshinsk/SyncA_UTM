@@ -277,7 +277,7 @@ ensure_lan_address() {
     nmcli device set "$LAN_IF" managed yes >/dev/null 2>&1 || true
     nmcli connection modify synca-lan connection.interface-name "$LAN_IF" \
         ipv4.method manual ipv4.addresses "$LAN_CIDR" ipv4.never-default yes \
-        ipv6.method ignore connection.autoconnect yes connection.zone trusted \
+        ipv6.method disabled connection.autoconnect yes connection.zone trusted \
         >/dev/null 2>&1 || true
     nmcli connection up synca-lan ifname "$LAN_IF" >/dev/null 2>&1 || true
     if ip -4 addr show dev "$LAN_IF" 2>/dev/null | grep -Fq "inet ${lan_ip}/"; then
@@ -492,7 +492,7 @@ configure_network() {
         nmcli connection delete synca-lan >/dev/null 2>&1 || true
         nmcli connection add type ethernet ifname "$LAN_IF" con-name synca-lan \
             ipv4.method manual ipv4.addresses "$LAN_CIDR" \
-            ipv4.never-default yes ipv6.method ignore \
+            ipv4.never-default yes ipv6.method disabled \
             connection.autoconnect yes connection.zone trusted
         activate_connection_with_retry synca-lan 2 || true
         ensure_lan_address || true
@@ -508,20 +508,27 @@ configure_network() {
     wait_for_carrier "$WAN_IF" || echo "warning: carrier did not become ready on ${WAN_IF}" >&2
     case "$WAN_MODE" in
         dhcp)
+            local dhcp_dns_args=("ipv4.ignore-auto-dns" "no")
+            if [[ -n "${WAN_DNS//[[:space:],]/}" ]]; then
+                dhcp_dns_args=("ipv4.dns" "$WAN_DNS" "ipv4.ignore-auto-dns" "yes")
+            fi
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
-                ipv4.method auto ipv6.method ignore connection.autoconnect yes connection.zone public
+                ipv4.method auto ipv4.ignore-auto-routes no \
+                ipv4.never-default no ipv4.may-fail no ipv4.route-metric 100 \
+                "${dhcp_dns_args[@]}" \
+                ipv6.method disabled connection.autoconnect yes connection.zone public
             activate_connection_with_retry synca-wan 3 || true
             ;;
         static)
             nmcli connection add type ethernet ifname "$WAN_IF" con-name synca-wan \
                 ipv4.method manual ipv4.addresses "$WAN_ADDRESS" ipv4.gateway "$WAN_GATEWAY" \
-                ipv4.dns "$WAN_DNS" ipv6.method ignore connection.autoconnect yes connection.zone public
+                ipv4.dns "$WAN_DNS" ipv6.method disabled connection.autoconnect yes connection.zone public
             activate_connection_with_retry synca-wan 3 || true
             ;;
         pppoe)
             nmcli connection add type pppoe ifname "$WAN_IF" con-name synca-pppoe \
                 pppoe.username "$PPPOE_USER" pppoe.password "$PPPOE_PASS" \
-                ppp.mtu 1454 ppp.mru 1454 ipv6.method ignore \
+                ppp.mtu 1454 ppp.mru 1454 ipv6.method disabled \
                 connection.autoconnect yes connection.zone public
             activate_connection_with_retry synca-pppoe 4 || true
             ;;
@@ -772,6 +779,10 @@ configure_dnsmasq() {
     local lan_ip netmask
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
+    local wan_mac=""
+    if [[ -r "/sys/class/net/${WAN_IF}/address" ]]; then
+        wan_mac="$(tr '[:upper:]' '[:lower:]' < "/sys/class/net/${WAN_IF}/address")"
+    fi
     configure_dnsmasq_runtime
     install -d -m 0755 /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/synca-lan.conf <<CONF
@@ -786,6 +797,9 @@ server=1.0.0.1
 domain-needed
 bogus-priv
 CONF
+    if [[ "$wan_mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ && "$wan_mac" != "00:00:00:00:00:00" ]]; then
+        echo "dhcp-host=${wan_mac},ignore" >> /etc/dnsmasq.d/synca-lan.conf
+    fi
     systemctl enable dnsmasq
 }
 
