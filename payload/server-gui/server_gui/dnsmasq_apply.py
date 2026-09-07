@@ -62,7 +62,9 @@ def generate(data: dict) -> str:
 
     dns = data.get("dns", {})
     dhcp = data.get("dhcp", {})
-    upstream = dns.get("upstream") or _default_upstream()
+    upstream = dns.get("upstream")
+    if upstream is None:
+        upstream = _default_upstream()
     range_tags = _range_tags(dhcp.get("ranges", []))
     listen_interfaces = _listen_interfaces(data)
     if listen_interfaces:
@@ -77,6 +79,13 @@ def generate(data: dict) -> str:
         lines.append("domain-needed")
         lines.append("bogus-priv")
         lines.append("dhcp-authoritative")
+        lines.append("")
+
+    ignored_macs = _ignored_local_dhcp_client_macs(listen_interfaces) if listen_interfaces else []
+    if ignored_macs:
+        lines.append("# --- DHCP self-protection ---")
+        for mac in ignored_macs:
+            lines.append(f"dhcp-host={mac},ignore")
         lines.append("")
 
     if dns.get("hosts") or dns.get("cnames") or upstream:
@@ -247,6 +256,38 @@ def _listen_interfaces(data: dict) -> list[str]:
         for r in dhcp.get("ranges", [])
         if str(r.get("interface", "")).strip()
     })
+
+
+def _ignored_local_dhcp_client_macs(listen_interfaces: list[str]) -> list[str]:
+    """Prevent this UTM's WAN NIC from taking a LAN DHCP lease during L2 mixups."""
+    wan_if = _default_route_interface()
+    if not wan_if or wan_if in listen_interfaces:
+        return []
+    mac = _interface_mac(wan_if)
+    return [mac] if mac else []
+
+
+def _default_route_interface() -> str:
+    try:
+        for line in Path("/proc/net/route").read_text(encoding="utf-8").splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 2 and fields[1] == "00000000":
+                return fields[0]
+    except OSError:
+        return ""
+    return ""
+
+
+def _interface_mac(ifname: str) -> str:
+    if not re.match(r"^[A-Za-z0-9_.:-]{1,64}$", ifname):
+        return ""
+    try:
+        mac = Path("/sys/class/net").joinpath(ifname, "address").read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return ""
+    if re.match(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$", mac) and mac != "00:00:00:00:00:00":
+        return mac
+    return ""
 
 
 def _ensure_dnsmasq_runtime(needs_dynamic_bind: bool) -> Any:

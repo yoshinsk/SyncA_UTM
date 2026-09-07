@@ -224,6 +224,12 @@
                         <label class="form-label">DNS (任意、カンマ区切り)</label>
                         <input id="br-dns" class="form-control font-monospace" placeholder="例: 8.8.8.8, 1.1.1.1">
                     </div>
+                    <div class="col-12">
+                        <div class="form-check form-switch">
+                            <input id="br-ipv6-default-route" type="checkbox" class="form-check-input">
+                            <label class="form-check-label" for="br-ipv6-default-route">IPv6 既定経路を許可する</label>
+                        </div>
+                    </div>
                 </div>
                 <div id="br-routes-section" class="d-none">
                     <hr>
@@ -720,6 +726,7 @@ function openBridgeModal() {
     document.getElementById('br-address').value = '';
     document.getElementById('br-secondary-addresses').value = '';
     document.getElementById('br-dns').value = '';
+    document.getElementById('br-ipv6-default-route').checked = false;
     document.getElementById('br-stp').checked = true;
     document.getElementById('br-stp-priority').value = '32768';
     document.getElementById('br-forward-delay').value = '4';
@@ -761,6 +768,7 @@ async function openBridgeEdit(name) {
     editingBridgeName = name;
     editingConn = name;
     const ipv4 = detail.ipv4 || {};
+    const ipv6 = detail.ipv6 || {};
     const bridge = detail.bridge || {};
     const addresses = ipv4.addresses_list || (ipv4.addresses ? [ipv4.addresses] : []);
     document.getElementById('br-name').value = detail.name || name;
@@ -770,6 +778,8 @@ async function openBridgeEdit(name) {
     document.getElementById('br-address').value = addresses[0] || '';
     document.getElementById('br-secondary-addresses').value = addresses.slice(1).join('\n');
     document.getElementById('br-dns').value = ipv4.dns || '';
+    document.getElementById('br-ipv6-default-route').checked =
+        ipv6.method !== 'ignore' && ipv6.method !== 'disabled' && ipv6.never_default === 'no';
     document.getElementById('br-stp').checked = bridge.stp !== false;
     document.getElementById('br-stp-priority').value = bridge.priority || '32768';
     document.getElementById('br-forward-delay').value = bridge.forward_delay || '4';
@@ -852,6 +862,7 @@ function collectBridgePayload() {
         autoconnect: document.getElementById('br-autoconnect').checked,
         activate: document.getElementById('br-activate').checked,
         use_as_lan: document.getElementById('br-use-as-lan').checked,
+        ipv6_default_route: document.getElementById('br-ipv6-default-route').checked,
     };
 }
 
