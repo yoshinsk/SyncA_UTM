@@ -567,6 +567,7 @@
 let connections = [];
 let devices = [];
 let editingConn = null;
+let editingWanTransition = null;
 let connModal;
 let pppoeModal;
 let pppoeEditModal;
@@ -609,6 +610,7 @@ async function loadWan() {
     const ifname = currentWanDevice;
     const summary = ifname
         ? `IF: <code>${escapeHtml(ifname)}</code>` +
+          (wan.pppoe_parent ? ` / parent: <code>${escapeHtml(wan.pppoe_parent)}</code>` : '') +
           (wan.ipv4 && wan.ipv4.addresses ? ` / addr: <code>${escapeHtml(wan.ipv4.addresses)}</code>` : '') +
           (wan.wan_gateway ? ` / gw: <code>${escapeHtml(wan.wan_gateway)}</code>` : '')
         : '<em>WAN 不明 (default route なし)</em>';
@@ -623,6 +625,7 @@ async function onWanApply() {
     if (!selected) return toast('WAN 種別を選択してください', true);
     const wan = await api.get('/network/api/wan');
     if (!wan) return;
+    const pppoeParent = wan.pppoe_parent || currentWanParent || wan.interface || '';
 
     if (selected === 'pppoe') {
         if (currentWanType === 'pppoe' && wan.name) {
@@ -640,8 +643,26 @@ async function onWanApply() {
             }
         }
     } else {
-        // static / dhcp: open the standard connection edit modal for current WAN
-        if (wan.name) {
+        // PPPoE -> static / DHCP must edit the physical parent NIC profile,
+        // not the PPPoE profile itself.
+        if (currentWanType === 'pppoe') {
+            if (!pppoeParent) return toast('PPPoE 親インターフェースを特定できません', true);
+            const prepared = await api.send('/network/api/wan/ethernet-profile', 'POST', { ifname: pppoeParent });
+            if (!prepared) return;
+            if (!prepared.ok) return toast(prepared.error || 'WAN Ethernet プロファイルの準備に失敗しました', true);
+            await editConnection(prepared.name, {
+                wanTransition: {
+                    from: wan.name || '',
+                    to: prepared.name,
+                    interface: prepared.ifname,
+                    target_type: selected,
+                    created: Boolean(prepared.created),
+                },
+            });
+            document.getElementById('n-method').value = selected === 'static' ? 'manual' : 'auto';
+            onMethodChange();
+        } else if (wan.name) {
+            // static / dhcp: open the standard connection edit modal for current WAN
             await editConnection(wan.name);
             // Force method to the desired one
             document.getElementById('n-method').value = selected === 'static' ? 'manual' : 'auto';
@@ -1114,10 +1135,11 @@ function escapeJs(s) {
     return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-async function editConnection(name) {
+async function editConnection(name, options = {}) {
     const detail = await api.get(`/network/api/connections/${encodeURIComponent(name)}`);
     if (!detail) return;
     editingConn = name;
+    editingWanTransition = options.wanTransition || null;
     document.getElementById('conn-modal-title').textContent = `接続編集: ${name}`;
     const ipv4 = detail.ipv4 || {};
     document.getElementById('n-method').value = ipv4.method || 'manual';
@@ -1129,7 +1151,15 @@ async function editConnection(name) {
     onMethodChange();
 
     const live = detail.live || {};
+    const transition = editingWanTransition
+        ? `<div class="alert alert-warning py-2 small mb-3">
+               PPPoE <span class="font-monospace">${escapeHtml(editingWanTransition.from || '—')}</span>
+               から <span class="font-monospace">${escapeHtml(editingWanTransition.interface || name)}</span>
+               へWANを切り替えます。適用時は旧PPPoEの自動接続をOFFにし、新WANのdefault route確認後にfirewalld/NATを同期します。
+           </div>`
+        : '';
     document.getElementById('conn-detail-summary').innerHTML = `
+        ${transition}
         <div class="row g-2 small">
             <div class="col-sm-6"><strong>type:</strong> <span class="font-monospace">${escapeHtml(detail.type)}</span></div>
             <div class="col-sm-6"><strong>uuid:</strong> <span class="font-monospace">${escapeHtml(detail.uuid)}</span></div>
@@ -1307,10 +1337,21 @@ async function saveConnection() {
         dns: document.getElementById('n-dns').value.split(',').map(s => s.trim()).filter(Boolean),
         activate: document.getElementById('n-activate').checked,
     };
+    if (editingWanTransition) {
+        payload.wan_transition = editingWanTransition;
+        if (payload.method === 'manual' && !payload.gateway) {
+            return toast('WAN を Static IP へ切り替える場合はデフォルトゲートウェイが必須です', true);
+        }
+        if (payload.activate) {
+            const targetLabel = payload.method === 'auto' ? 'DHCP' : 'Static IP';
+            if (!confirm(`WAN を ${targetLabel} へ切り替えますか?\n旧PPPoE: ${editingWanTransition.from || '(不明)'}\n新WAN IF: ${editingWanTransition.interface || '(不明)'}`)) return;
+        }
+    }
     const res = await api.send(`/network/api/connections/${encodeURIComponent(editingConn)}`, 'PUT', payload);
     if (res && res.ok) {
         toast(res.warning ? `設定は保存しました: ${res.warning}` : '適用しました', Boolean(res.warning));
         connModal.hide();
+        editingWanTransition = null;
         refresh();
     }
 }
