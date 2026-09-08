@@ -17,6 +17,7 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 ### ネットワーク
 
 - WAN の DHCP / 固定 IP / PPPoE
+- PPPoE から DHCP / 固定 IP へ切り替える際の親WAN NICプロファイル自動準備
 - LAN アドレスと DHCP 範囲の設定
 - 静的ルート
 - WAN / LAN のセカンダリ IP
@@ -138,6 +139,14 @@ https://github.com/yoshinsk/SyncA_UTM
 ```
 
 管理 GUI は設定されたブランチを確認し、GitHub アーカイブを取得して `payload/server-gui/` 配下の `server_gui` と `bin` を更新します。
+
+## WAN 接続方式の切替
+
+ネットワーク画面の WAN 設定で PPPoE 接続中に DHCP クライアントまたは Static IP を選択すると、GUI は PPPoE プロファイルではなく、PPPoE 親NICの Ethernet WAN プロファイルを作成または再利用して編集します。
+
+切替を適用すると、新WAN IF向けに firewalld の public zone、`4444/tcp`、LAN から WAN への FORWARD、戻り通信の RELATED/ESTABLISHED、LAN CIDR から新WAN IFへの MASQUERADE を同期してから、旧PPPoEの自動接続をOFFにして新WAN接続を up します。新WANがIPv4 default routeにならない場合、GUIは旧PPPoE接続へ戻すロールバックを試みます。
+
+DHCPへ切り替える場合は、上位側でDHCP OFFER、デフォルトゲートウェイ、DNSが提供されている必要があります。DHCP提供がない回線で実切替を行うと、ロールバックまでは一時的にWANが途切れる可能性があります。
 
 ## セキュリティ
 

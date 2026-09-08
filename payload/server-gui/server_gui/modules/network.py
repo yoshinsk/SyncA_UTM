@@ -116,6 +116,22 @@ def delete_connection(name: str):
     return jsonify({"ok": res.ok, "output": (res.stdout + res.stderr).strip()})
 
 
+@bp.route("/api/wan/ethernet-profile", methods=["POST"])
+@login_required
+@csrf_protect
+def prepare_wan_ethernet_profile():
+    """Create or reuse an Ethernet WAN profile for DHCP/static WAN switching."""
+    payload = request.get_json(force=True, silent=True) or {}
+    ifname = (payload.get("ifname") or "").strip()
+    try:
+        result = _ensure_wan_ethernet_profile(ifname or None)
+    except ValidationError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if not result.get("ok"):
+        return jsonify(result), 500
+    return jsonify(result), 201 if result.get("created") else 200
+
+
 def _ensure_pppoe_mss_clamp() -> dict:
     """Ensure firewalld direct rules are in place to TCP-MSS-clamp ppp+ traffic.
 
@@ -1194,6 +1210,14 @@ def _blocked_bridge_members() -> set[str]:
     return {name for name in blocked if name}
 
 
+def _device_type(ifname: str) -> str:
+    """Return the NetworkManager device type for one interface name."""
+    for device in _list_devices():
+        if device.get("device") == ifname:
+            return str(device.get("type") or "")
+    return ""
+
+
 def _connection_profiles_for_interface(ifname: str) -> list[dict]:
     """Return NetworkManager profiles bound to an interface, active or inactive."""
     profiles: list[dict] = []
@@ -1207,6 +1231,98 @@ def _connection_profiles_for_interface(ifname: str) -> list[dict]:
         if detail.get("interface") == ifname or conn.get("device") == ifname:
             profiles.append(detail)
     return profiles
+
+
+def _wan_ethernet_profile_for_interface(ifname: str) -> Optional[dict]:
+    """Return a reusable non-bridge Ethernet profile for a WAN parent NIC."""
+    candidates: list[dict] = []
+    for profile in _connection_profiles_for_interface(ifname):
+        if profile.get("type") not in {"802-3-ethernet", "ethernet"}:
+            continue
+        if profile.get("master") or profile.get("slave_type"):
+            continue
+        candidates.append(profile)
+    if not candidates:
+        return None
+    active = [item for item in candidates if item.get("state") == "activated"]
+    return (active or candidates)[0]
+
+
+def _wan_ethernet_profile_name(ifname: str) -> str:
+    """Build a stable connection profile name for a physical WAN NIC."""
+    suffix = re.sub(r"[^A-Za-z0-9_-]+", "-", ifname).strip("-") or "wan"
+    return f"synca-wan-{suffix}"
+
+
+def _available_connection_name(base: str) -> str:
+    """Return an unused NetworkManager connection name based on base."""
+    existing = {str(conn.get("name") or "") for conn in _list_connections()}
+    if base not in existing:
+        return base
+    for idx in range(2, 100):
+        name = f"{base}-{idx}"
+        if name not in existing:
+            return name
+    raise ValidationError("利用可能なWAN接続名を生成できません")
+
+
+def _ensure_wan_ethernet_profile(ifname: Optional[str] = None) -> dict:
+    """Create or reuse an Ethernet profile that can replace active PPPoE WAN."""
+    if not ifname:
+        active_pppoe = _active_pppoe_connection()
+        if active_pppoe:
+            ifname = _pppoe_parent(active_pppoe)
+        else:
+            ifname = _default_route_device()
+    ifname = validate_interface(ifname or "")
+    device_type = _device_type(ifname)
+    if device_type != "ethernet":
+        return {"ok": False, "error": f"{ifname} はethernetデバイスではありません。"}
+    if _is_bridge_lan_interface(ifname):
+        return {"ok": False, "error": f"{ifname} はLANサービスで使用中のためWANへ変更できません。"}
+
+    existing = _wan_ethernet_profile_for_interface(ifname)
+    replacing = _active_pppoe_for_parent(ifname)
+    if existing:
+        return {
+            "ok": True,
+            "created": False,
+            "name": existing.get("name"),
+            "ifname": ifname,
+            "replace_pppoe": (replacing or {}).get("name", ""),
+        }
+
+    name = _available_connection_name(_wan_ethernet_profile_name(ifname))
+    res = sudo_run([
+        "nmcli", "connection", "add",
+        "type", "ethernet",
+        "con-name", name,
+        "ifname", ifname,
+        "connection.autoconnect", "no",
+        "connection.zone", "public",
+        "ipv4.method", "disabled",
+        "ipv6.method", "disabled",
+    ], timeout=30)
+    if not res.ok:
+        return {"ok": False, "error": (res.stderr or res.stdout).strip()}
+    return {
+        "ok": True,
+        "created": True,
+        "name": name,
+        "ifname": ifname,
+        "replace_pppoe": (replacing or {}).get("name", ""),
+        "output": (res.stdout + res.stderr).strip(),
+    }
+
+
+def _active_pppoe_for_parent(ifname: str) -> Optional[dict]:
+    """Return an active PPPoE profile that currently uses the given parent NIC."""
+    for conn in _list_connections():
+        if conn.get("type") != "pppoe" or not conn.get("device"):
+            continue
+        if _pppoe_parent(conn) == ifname:
+            return conn
+    return None
 
 
 def _bridge_member_profiles(bridge_name: str) -> dict[str, str]:
@@ -2376,11 +2492,69 @@ def get_wan():
     return jsonify({"wan_type": "unknown", "device": wan_dev, "wan_gateway": wan_gw})
 
 
+def _pppoe_replacement_for_target(target_detail: dict) -> Optional[dict]:
+    """Detect whether an Ethernet profile activation will replace active PPPoE."""
+    if target_detail.get("type") not in {"802-3-ethernet", "ethernet"}:
+        return None
+    if target_detail.get("master") or target_detail.get("slave_type"):
+        return None
+    ifname = str(target_detail.get("interface") or "")
+    if not ifname:
+        return None
+    return _active_pppoe_for_parent(ifname)
+
+
+def _set_connection_autoconnect(name: str, enabled: bool) -> dict:
+    """Set NetworkManager autoconnect and return a structured result."""
+    res = sudo_run([
+        "nmcli", "connection", "modify", name,
+        "connection.autoconnect", "yes" if enabled else "no",
+    ], timeout=15)
+    return {"ok": res.ok, "output": (res.stdout + res.stderr).strip()}
+
+
+def _wait_for_default_route_device(expected_if: str, attempts: int = 10) -> str:
+    """Wait briefly until the IPv4 default route moves to expected_if."""
+    for _ in range(attempts):
+        current = _default_route_device()
+        if current == expected_if:
+            return current
+        sudo_run(["/bin/sleep", "1"], timeout=3)
+    return _default_route_device()
+
+
+def _restore_pppoe_after_failed_replace(
+    pppoe_name: str,
+    target_name: str,
+    pppoe_autoconnect: bool,
+    target_autoconnect: bool,
+) -> dict:
+    """Best-effort rollback to the previous PPPoE WAN after target activation failure."""
+    steps: list[dict] = []
+    down = sudo_run(["nmcli", "connection", "down", target_name], timeout=20)
+    steps.append({"step": "down_target", "ok": down.ok, "output": (down.stdout + down.stderr).strip()})
+    target_auto = _set_connection_autoconnect(target_name, target_autoconnect)
+    steps.append({"step": "restore_target_autoconnect", **target_auto})
+    auto = _set_connection_autoconnect(pppoe_name, pppoe_autoconnect)
+    steps.append({"step": "restore_pppoe_autoconnect", **auto})
+    up = sudo_run(["nmcli", "connection", "up", pppoe_name], timeout=60)
+    steps.append({"step": "up_pppoe", "ok": up.ok, "output": (up.stdout + up.stderr).strip()})
+    sync = _sync_default_wan_firewall()
+    steps.append({"step": "sync_firewall", "ok": bool(sync.get("ok")), "output": sync.get("error") or ""})
+    return {"ok": up.ok and bool(sync.get("ok")), "steps": steps}
+
+
 def _apply_ipv4(name: str, payload: dict) -> dict:
     """Apply an ipv4 mode + (optional) static settings to a connection."""
     mode = payload.get("method")
     if mode not in ("manual", "auto"):
         raise ValidationError("method must be 'manual' or 'auto'")
+
+    target_detail = _describe_connection(name)
+    if target_detail.get("error"):
+        return {"ok": False, "error": target_detail.get("error"), "stderr": target_detail.get("stderr", "")}
+    replacing_pppoe = _pppoe_replacement_for_target(target_detail)
+    target_if = str(target_detail.get("interface") or "")
 
     if mode == "manual":
         addresses_raw = payload.get("addresses")
@@ -2392,6 +2566,8 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
         gateway: Optional[str] = payload.get("gateway") or None
         if gateway:
             validate_ipv4(gateway)
+        elif replacing_pppoe:
+            raise ValidationError("WANをStatic IPへ切り替える場合はデフォルトゲートウェイが必須です。")
         dns_list = payload.get("dns") or []
         if not isinstance(dns_list, list):
             raise ValidationError("dns must be a list")
@@ -2406,6 +2582,13 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
             "ipv4.never-default", "no" if gateway else "yes",
             "ipv4.method", "manual",
             "ipv6.method", "disabled",
+            "ipv6.never-default", "yes",
+            "ipv6.ignore-auto-dns", "yes",
+            "ipv6.ignore-auto-routes", "yes",
+            "ipv6.addresses", "",
+            "ipv6.gateway", "",
+            "ipv6.dns", "",
+            "ipv6.routes", "",
         ]
     else:  # auto / DHCP
         dns_servers = _configured_default_dns_servers()
@@ -2422,6 +2605,12 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
             "ipv4.route-metric", _DHCP_WAN_ROUTE_METRIC,
             "ipv6.method", "disabled",
             "ipv6.never-default", "yes",
+            "ipv6.ignore-auto-dns", "yes",
+            "ipv6.ignore-auto-routes", "yes",
+            "ipv6.addresses", "",
+            "ipv6.gateway", "",
+            "ipv6.dns", "",
+            "ipv6.routes", "",
         ]
         if dns_servers:
             cmd.extend(["ipv4.dns", ",".join(dns_servers), "ipv4.ignore-auto-dns", "yes"])
@@ -2442,18 +2631,82 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
 
     # Bring the connection back up so changes take effect
     if payload.get("activate", True):
-        up = sudo_run(["nmcli", "connection", "up", name])
+        original_pppoe_autoconnect = bool(replacing_pppoe and _describe_connection(replacing_pppoe["name"]).get("autoconnect"))
+        original_target_autoconnect = bool(target_detail.get("autoconnect"))
+        if replacing_pppoe:
+            pre_sync = _sync_wan_firewall_for_interface(target_if)
+            if not pre_sync.get("ok"):
+                return {
+                    "ok": False,
+                    "error": pre_sync.get("error") or "新WAN向けfirewalld/NAT事前同期に失敗しました。",
+                    "wan_firewall_sync": pre_sync,
+                }
+            enable_target = sudo_run([
+                "nmcli", "connection", "modify", name,
+                "connection.autoconnect", "yes",
+                "connection.zone", "public",
+            ], timeout=15)
+            if not enable_target.ok:
+                return {
+                    "ok": False,
+                    "error": "新WAN接続の自動接続設定に失敗しました。",
+                    "stderr": (enable_target.stderr or enable_target.stdout).strip(),
+                }
+            disable = _set_connection_autoconnect(replacing_pppoe["name"], False)
+            if not disable.get("ok"):
+                _set_connection_autoconnect(name, original_target_autoconnect)
+                return {
+                    "ok": False,
+                    "error": "旧PPPoE接続の自動接続解除に失敗しました。",
+                    "stderr": disable.get("output", ""),
+                }
+        up = sudo_run(["nmcli", "connection", "up", name], timeout=90)
         if not up.ok:
+            rollback = {}
+            if replacing_pppoe:
+                rollback = _restore_pppoe_after_failed_replace(
+                    replacing_pppoe["name"], name, original_pppoe_autoconnect, original_target_autoconnect,
+                )
+                return {
+                    "ok": False,
+                    "activated": False,
+                    "error": "新WAN接続をupできなかったため旧PPPoEへ戻しました。",
+                    "stderr": up.stderr.strip(),
+                    "rollback": rollback,
+                }
             return {
                 "ok": True,
                 "activated": False,
                 "warning": "IPv4 設定は保存しましたが、接続を up できませんでした。",
                 "stderr": up.stderr.strip(),
             }
+        if replacing_pppoe:
+            default_if = _wait_for_default_route_device(target_if)
+            if default_if != target_if:
+                rollback = _restore_pppoe_after_failed_replace(
+                    replacing_pppoe["name"], name, original_pppoe_autoconnect, original_target_autoconnect,
+                )
+                return {
+                    "ok": False,
+                    "activated": False,
+                    "error": f"新WAN接続はupしましたがIPv4 default routeが{target_if}へ移動しませんでした。",
+                    "default_route_device": default_if,
+                    "rollback": rollback,
+                }
+            down_old = sudo_run(["nmcli", "connection", "down", replacing_pppoe["name"]], timeout=20)
+            down_text = (down_old.stdout + down_old.stderr).strip()
 
     result = {"ok": True, "activated": bool(payload.get("activate", True))}
+    if replacing_pppoe and payload.get("activate", True):
+        result["wan_replacement"] = {
+            "from": replacing_pppoe["name"],
+            "to": name,
+            "interface": target_if,
+            "down_old_ok": down_old.ok,
+            "down_old_output": down_text,
+        }
     if payload.get("activate", True):
-        sync = _sync_default_wan_firewall()
+        sync = _sync_default_wan_firewall(target_if if replacing_pppoe else "")
         result["wan_firewall_sync"] = sync
         if not sync.get("ok"):
             result["warning"] = sync.get("error") or "WAN firewalld/NAT同期に失敗しました。"
@@ -2462,14 +2715,14 @@ def _apply_ipv4(name: str, payload: dict) -> dict:
     return result
 
 
-def _sync_default_wan_firewall() -> dict:
-    """Ensure current default-route WAN has public zone and LAN NAT rules."""
+def _sync_wan_firewall_for_interface(wan_if: str) -> dict:
+    """Ensure a concrete WAN interface has public zone and LAN NAT rules."""
     if not _firewalld_running():
         return {"ok": False, "error": "firewalldが動作していないためWAN NATを同期できません。"}
-
-    wan_if = _default_route_device()
-    if not wan_if:
-        return {"ok": False, "error": "IPv4 default routeがないためWAN NATを同期できません。"}
+    try:
+        wan_if = validate_interface(wan_if)
+    except ValidationError as e:
+        return {"ok": False, "error": str(e)}
 
     lan_ifaces, lan_networks = _lan_firewall_targets(wan_if)
     if not lan_ifaces or not lan_networks:
@@ -2535,6 +2788,20 @@ def _sync_default_wan_firewall() -> dict:
         "lan_interfaces": lan_ifaces,
         "lan_networks": lan_networks,
     }
+
+
+def _sync_default_wan_firewall(expected_wan_if: str = "") -> dict:
+    """Ensure current default-route WAN has public zone and LAN NAT rules."""
+    wan_if = _default_route_device()
+    if not wan_if:
+        return {"ok": False, "error": "IPv4 default routeがないためWAN NATを同期できません。"}
+    if expected_wan_if and wan_if != expected_wan_if:
+        return {
+            "ok": False,
+            "error": f"IPv4 default routeが想定WAN {expected_wan_if} ではなく {wan_if} です。",
+            "wan_interface": wan_if,
+        }
+    return _sync_wan_firewall_for_interface(wan_if)
 
 
 def _configured_default_dns_servers() -> list[str]:
