@@ -136,6 +136,68 @@ RESTORE_SECTION_PREFIXES = {
     "server_gui_state": ("/var/lib/server-gui/", "/var/log/server-gui/"),
 }
 
+RESTORE_REPLACE_TARGETS = {
+    "system_identity": {"paths": ["/etc/hostname"]},
+    "server_gui_config": {"paths": ["/etc/server-gui"]},
+    "server_gui_app": {"paths": [
+        "/opt/server-gui/bin",
+        "/opt/server-gui/server_gui",
+        "/opt/server-gui/requirements.txt",
+    ]},
+    "wireguard_ui": {"paths": ["/opt/wireguard"]},
+    "systemd": {"globs": [
+        "/etc/systemd/system/server-gui*",
+        "/etc/systemd/system/synca-central*",
+        "/etc/systemd/system/synca-ipv6*",
+        "/etc/systemd/system/synca-upnp*",
+        "/etc/systemd/system/strongswan*",
+        "/etc/systemd/system/wgui*",
+        "/etc/systemd/system/multi-user.target.wants/server-gui*",
+        "/etc/systemd/system/multi-user.target.wants/strongswan*",
+        "/etc/systemd/system/timers.target.wants/synca-central*",
+        "/etc/systemd/system/multi-user.target.wants/synca-ipv6*",
+        "/etc/systemd/system/multi-user.target.wants/synca-upnp*",
+        "/etc/systemd/system/multi-user.target.wants/wgui*",
+        "/etc/systemd/system/timers.target.wants/server-gui*",
+    ]},
+    "nginx": {"paths": ["/etc/nginx"]},
+    "dnsmasq": {"paths": [
+        "/etc/dnsmasq.conf",
+        "/etc/dnsmasq.d",
+        "/var/lib/dnsmasq",
+    ]},
+    "wireguard": {"paths": ["/etc/wireguard"]},
+    "strongswan": {"paths": ["/etc/strongswan/swanctl/conf.d/server-gui.conf"]},
+    "firewalld": {"paths": ["/etc/firewalld"]},
+    "ipv6": {"paths": [
+        "/etc/radvd.conf",
+        "/etc/frr",
+        "/etc/sysctl.d/99-synca-ipv6.conf",
+        "/usr/local/sbin/synca-ipv6-transition",
+    ]},
+    "network": {"paths": [
+        "/etc/NetworkManager/NetworkManager.conf",
+        "/etc/NetworkManager/conf.d",
+        "/etc/NetworkManager/dispatcher.d",
+        "/etc/NetworkManager/system-connections",
+        "/etc/sysconfig/network",
+        "/etc/sysconfig/network-scripts",
+    ]},
+    "fail2ban": {"paths": ["/etc/fail2ban"]},
+    "letsencrypt": {"paths": ["/etc/letsencrypt"]},
+    "server_gui_state": {"paths": [
+        "/var/lib/server-gui",
+        "/var/log/server-gui",
+    ]},
+}
+
+PRESERVE_DURING_REPLACE = {
+    "/var/lib/server-gui": (
+        "/var/lib/server-gui/backups",
+        "/var/lib/server-gui/pre-restore",
+    ),
+}
+
 LEGACY_SECTION_ALIASES = {
     "include_server_gui": ("server_gui_config",),
     "include_nginx": ("nginx",),
@@ -311,6 +373,20 @@ def restore_backup():
         skipped: list[str] = []
         errors: list[str] = []
         post_restore: list[str] = []
+        replaced: list[str] = []
+        try:
+            replaced = _replace_existing_sections(sections, pre)
+        except OSError as e:
+            return jsonify({
+                "ok": False,
+                "manifest": manifest,
+                "applied": applied,
+                "skipped": skipped,
+                "errors": [f"pre-restore replace: {e}"],
+                "pre_restore_dir": str(pre),
+                "replaced": replaced,
+                "post_restore": post_restore,
+            }), 500
         for src in _walk_files(staging / "files"):
             target = Path("/") / src.relative_to(staging / "files")
             if not _restore_section_allowed(target, sections):
@@ -343,6 +419,7 @@ def restore_backup():
             "skipped": skipped,
             "errors": errors,
             "pre_restore_dir": str(pre),
+            "replaced": replaced,
             "post_restore": post_restore,
             "restart_hint": [
                 "systemctl daemon-reload",
@@ -351,6 +428,74 @@ def restore_backup():
                 "systemctl restart wg-quick@wg0 wgui-worker",
             ],
         })
+
+
+def _replace_existing_sections(sections: dict[str, bool], pre: Path) -> list[str]:
+    replaced: list[str] = []
+    targets = _selected_replace_targets(sections)
+    for target in targets:
+        if not target.exists() and not target.is_symlink():
+            continue
+        if _is_preserved_path(target):
+            continue
+        _move_existing_for_replace(target, pre, replaced)
+    return replaced
+
+
+def _selected_replace_targets(sections: dict[str, bool]) -> list[Path]:
+    targets: dict[str, Path] = {}
+    for section, spec in RESTORE_REPLACE_TARGETS.items():
+        if not sections.get(section, True):
+            continue
+        for raw in spec.get("paths", []):
+            p = Path(raw)
+            targets[str(p)] = p
+        for pattern in spec.get("globs", []):
+            for p in sorted(Path("/").glob(pattern.lstrip("/"))):
+                targets[str(p)] = p
+    return sorted(targets.values(), key=lambda p: (len(p.parts), str(p)))
+
+
+def _move_existing_for_replace(target: Path, pre: Path, replaced: list[str]) -> None:
+    preserve = PRESERVE_DURING_REPLACE.get(str(target))
+    if preserve and target.is_dir() and not target.is_symlink():
+        target.mkdir(parents=True, exist_ok=True)
+        for child in sorted(target.iterdir(), key=lambda p: str(p)):
+            if _is_preserved_path(child):
+                continue
+            _move_path_to_pre_restore(child, pre)
+            replaced.append(str(child))
+        return
+    _move_path_to_pre_restore(target, pre)
+    replaced.append(str(target))
+
+
+def _move_path_to_pre_restore(target: Path, pre: Path) -> None:
+    bak = _pre_restore_path(pre, target)
+    bak.parent.mkdir(parents=True, exist_ok=True)
+    if bak.exists() or bak.is_symlink():
+        if bak.is_dir() and not bak.is_symlink():
+            shutil.rmtree(bak)
+        else:
+            bak.unlink()
+    shutil.move(str(target), str(bak))
+
+
+def _is_preserved_path(path: Path) -> bool:
+    s = str(path)
+    for _, prefixes in PRESERVE_DURING_REPLACE.items():
+        for prefix in prefixes:
+            if s == prefix or s.startswith(prefix.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _pre_restore_path(pre: Path, target: Path) -> Path:
+    try:
+        rel = target.relative_to("/")
+    except ValueError:
+        rel = Path(str(target).lstrip("/\\").replace(":", ""))
+    return pre / rel
 
 
 def _schedule_post_restore_apply(sections: dict[str, bool], ts: str) -> dict:
@@ -439,6 +584,7 @@ def _post_restore_apply_script(sections: dict[str, bool], ts: str) -> str:
         lines.append("restart_unit fail2ban.service")
     if sections.get("network", True):
         lines.extend([
+            _render_network_profile_adaptation_script(),
             "nmcli connection reload || true",
             "if nmcli -t -f NAME connection show | grep -Fxq br-lan; then nmcli connection up br-lan || true; fi",
             "for con in $(nmcli -t -f NAME connection show | grep '^br-lan-port-' || true); do nmcli connection up \"$con\" || true; done",
@@ -470,6 +616,252 @@ os.chmod(out, 0o600)
 print(f"rendered strongSwan managed connections={len(conns)}")
 PY
 fi"""
+
+
+def _render_network_profile_adaptation_script() -> str:
+    return r"""PYTHONPATH=/opt/server-gui /opt/server-gui/venv/bin/python - <<'PY' || true
+import configparser
+import os
+import re
+import shutil
+import uuid
+from pathlib import Path
+
+CONN_DIR = Path("/etc/NetworkManager/system-connections")
+
+
+def natural_key(value):
+    return [int(part) if part.isdigit() else part for part in re.split(r"([0-9]+)", value)]
+
+
+def nic_sort_key(name):
+    device = Path("/sys/class/net") / name / "device"
+    try:
+        return (str(device.resolve()), natural_key(name))
+    except OSError:
+        return ("", natural_key(name))
+
+
+def physical_ethernet_names():
+    out = []
+    root = Path("/sys/class/net")
+    for item in root.iterdir() if root.exists() else []:
+        name = item.name
+        if name == "lo" or name.startswith(("br", "wg", "tun", "tap", "veth", "docker", "virbr", "ppp", "bond")):
+            continue
+        if not (item / "device").exists():
+            continue
+        try:
+            if (item / "type").read_text(encoding="ascii").strip() != "1":
+                continue
+        except OSError:
+            continue
+        out.append(name)
+    return sorted(out, key=nic_sort_key)
+
+
+def parser_for(path):
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    cp.read(path, encoding="utf-8")
+    return cp
+
+
+def connection_value(cp, key, default=""):
+    return cp["connection"].get(key, default) if cp.has_section("connection") else default
+
+
+def ipv4_value(cp, key, default=""):
+    return cp["ipv4"].get(key, default) if cp.has_section("ipv4") else default
+
+
+def set_connection_value(cp, key, value):
+    if not cp.has_section("connection"):
+        cp.add_section("connection")
+    cp["connection"][key] = value
+
+
+def remove_hardware_binding(cp):
+    if cp.has_section("ethernet"):
+        for key in ("mac-address", "cloned-mac-address"):
+            cp["ethernet"].pop(key, None)
+
+
+def write_profile(path, cp):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".new")
+    with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+        cp.write(fh, space_around_delimiters=False)
+    os.chmod(tmp, 0o600)
+    try:
+        shutil.chown(tmp, "root", "root")
+    except (LookupError, PermissionError, OSError):
+        pass
+    tmp.replace(path)
+
+
+def profile_filename(conn_id):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", conn_id).strip("-") or "synca-connection"
+    return CONN_DIR / f"{safe}.nmconnection"
+
+
+def is_bridge_port(cp):
+    conn_id = connection_value(cp, "id")
+    return connection_value(cp, "master") == "br-lan" or conn_id.startswith("br-lan-port-")
+
+
+def is_lan_source(cp):
+    conn_id = connection_value(cp, "id")
+    iface = connection_value(cp, "interface-name")
+    return bool(iface) and (is_bridge_port(cp) or conn_id == "synca-lan")
+
+
+def is_wan_source(cp):
+    ctype = connection_value(cp, "type")
+    conn_id = connection_value(cp, "id")
+    iface = connection_value(cp, "interface-name")
+    if not iface:
+        return False
+    if ctype == "pppoe":
+        return True
+    if ctype != "ethernet" or connection_value(cp, "master"):
+        return False
+    method = ipv4_value(cp, "method")
+    gateway = ipv4_value(cp, "gateway") or ipv4_value(cp, "address1")
+    return conn_id.startswith(("synca-wan", "wan", "pppoe-parent")) or (
+        connection_value(cp, "autoconnect", "yes") != "no" and method in {"auto", "manual"} and bool(gateway)
+    )
+
+
+def load_profiles():
+    profiles = []
+    if not CONN_DIR.exists():
+        return profiles
+    for path in sorted(CONN_DIR.glob("*.nmconnection")):
+        try:
+            cp = parser_for(path)
+        except configparser.Error as exc:
+            print(f"skip unreadable profile {path}: {exc}")
+            continue
+        profiles.append({"path": path, "cp": cp})
+    return profiles
+
+
+def ordered_source_interfaces(profiles):
+    roles = {"wan": [], "lan": [], "other": []}
+    for item in profiles:
+        cp = item["cp"]
+        iface = connection_value(cp, "interface-name")
+        if not iface or iface in {"lo", "br-lan", "wg0"}:
+            continue
+        if is_wan_source(cp):
+            bucket = roles["wan"]
+        elif is_lan_source(cp):
+            bucket = roles["lan"]
+        else:
+            bucket = roles["other"]
+        if iface not in roles["wan"] and iface not in roles["lan"] and iface not in roles["other"]:
+            bucket.append(iface)
+    return (
+        sorted(roles["wan"], key=natural_key)
+        + sorted(roles["lan"], key=natural_key)
+        + sorted(roles["other"], key=natural_key)
+    )
+
+
+def build_mapping(profiles, current):
+    source = ordered_source_interfaces(profiles)
+    current = list(current)
+    mapping = {}
+    used = set()
+    for iface in source:
+        if iface in current and iface not in used:
+            mapping[iface] = iface
+            used.add(iface)
+    remaining = [name for name in current if name not in used]
+    for iface in source:
+        if iface in mapping:
+            continue
+        if not remaining:
+            break
+        mapped = remaining.pop(0)
+        mapping[iface] = mapped
+        used.add(mapped)
+    return mapping
+
+
+def add_extra_lan_ports(profiles, current, used_dest):
+    has_bridge = any(connection_value(item["cp"], "type") == "bridge" and connection_value(item["cp"], "interface-name") == "br-lan" for item in profiles)
+    if not has_bridge:
+        return
+    existing_ports = {connection_value(item["cp"], "interface-name") for item in profiles if is_bridge_port(item["cp"])}
+    for iface in current:
+        if iface in used_dest or iface in existing_ports:
+            continue
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.optionxform = str
+        conn_id = f"br-lan-port-{iface}"
+        cp["connection"] = {
+            "id": conn_id,
+            "uuid": str(uuid.uuid4()),
+            "type": "ethernet",
+            "interface-name": iface,
+            "master": "br-lan",
+            "slave-type": "bridge",
+            "autoconnect": "yes",
+        }
+        cp["ethernet"] = {}
+        write_profile(profile_filename(conn_id), cp)
+        print(f"added LAN bridge port for extra NIC {iface}")
+
+
+def adapt_profiles():
+    current = physical_ethernet_names()
+    profiles = load_profiles()
+    if not current or not profiles:
+        print(f"network profile adaptation skipped current={current} profiles={len(profiles)}")
+        return
+    mapping = build_mapping(profiles, current)
+    used_dest = set(mapping.values())
+    print(f"network interface mapping: {mapping}")
+
+    for item in profiles:
+        path = item["path"]
+        cp = item["cp"]
+        ctype = connection_value(cp, "type")
+        iface = connection_value(cp, "interface-name")
+        if ctype not in {"ethernet", "pppoe"} or not iface or iface in {"lo", "br-lan", "wg0"}:
+            continue
+        mapped = mapping.get(iface)
+        if not mapped:
+            if is_bridge_port(cp) or connection_value(cp, "id") == iface:
+                path.unlink(missing_ok=True)
+                print(f"removed profile for missing NIC {iface}: {path}")
+            continue
+        remove_hardware_binding(cp)
+        set_connection_value(cp, "interface-name", mapped)
+        new_path = path
+        if is_bridge_port(cp):
+            conn_id = f"br-lan-port-{mapped}"
+            set_connection_value(cp, "id", conn_id)
+            set_connection_value(cp, "master", "br-lan")
+            set_connection_value(cp, "slave-type", "bridge")
+            set_connection_value(cp, "autoconnect", "yes")
+            new_path = profile_filename(conn_id)
+        elif connection_value(cp, "id") == iface:
+            set_connection_value(cp, "id", mapped)
+            new_path = profile_filename(mapped)
+        write_profile(new_path, cp)
+        if new_path != path:
+            path.unlink(missing_ok=True)
+            print(f"renamed profile {path.name} -> {new_path.name}")
+
+    profiles = load_profiles()
+    add_extra_lan_ports(profiles, current, used_dest)
+
+
+adapt_profiles()
+PY"""
 
 
 def _restore_hostname_from_manifest(manifest: dict, pre: Path, applied: list[str]) -> str | None:
@@ -654,7 +1046,7 @@ def _as_bool(value, default: bool) -> bool:
 def _backup_existing(target: Path, pre: Path) -> None:
     if not target.exists() and not target.is_symlink():
         return
-    bak = pre / target.relative_to("/")
+    bak = _pre_restore_path(pre, target)
     bak.parent.mkdir(parents=True, exist_ok=True)
     if target.is_symlink():
         os.symlink(os.readlink(target), bak)
