@@ -398,6 +398,18 @@ def restore_backup():
                 applied.append(str(target))
             except (OSError, shutil.Error) as e:
                 errors.append(f"{target}: {e}")
+        if not errors and sections.get("letsencrypt", True):
+            try:
+                pruned = _prune_unrestored_directory(
+                    staging / "files/etc/letsencrypt",
+                    Path("/etc/letsencrypt"),
+                    pre,
+                )
+                if pruned:
+                    replaced.extend(pruned)
+                    post_restore.append(f"pruned {len(pruned)} stale letsencrypt paths")
+            except OSError as e:
+                errors.append(f"/etc/letsencrypt prune: {e}")
         if not errors and sections.get("system_identity", True):
             try:
                 restored_hostname = _restore_hostname_from_manifest(manifest, pre, applied)
@@ -496,6 +508,33 @@ def _pre_restore_path(pre: Path, target: Path) -> Path:
     except ValueError:
         rel = Path(str(target).lstrip("/\\").replace(":", ""))
     return pre / rel
+
+
+def _prune_unrestored_directory(source_root: Path, target_root: Path, pre: Path) -> list[str]:
+    """Move paths not present in the restored source tree out of a target tree.
+
+    A full-appliance restore should make certificate state match the archive,
+    not merge it with certificates that happened to exist on the replacement
+    machine. This pass is intentionally generic so future certbot side paths are
+    also removed when they are absent from the selected backup.
+    """
+    if not target_root.exists() and not target_root.is_symlink():
+        return []
+    if not source_root.exists():
+        _move_path_to_pre_restore(target_root, pre)
+        return [str(target_root)]
+
+    allowed = {str(path.relative_to(source_root)) for path in source_root.rglob("*")}
+    pruned: list[str] = []
+    for path in sorted(target_root.rglob("*"), key=lambda p: (len(p.parts), str(p))):
+        if not path.exists() and not path.is_symlink():
+            continue
+        rel = str(path.relative_to(target_root))
+        if rel in allowed:
+            continue
+        _move_path_to_pre_restore(path, pre)
+        pruned.append(str(path))
+    return pruned
 
 
 def _schedule_post_restore_apply(sections: dict[str, bool], ts: str) -> dict:
