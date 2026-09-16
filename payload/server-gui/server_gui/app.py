@@ -47,8 +47,9 @@ def create_app(config_dir: str | None = None) -> Flask:
     # GUI, so the session cookie must be usable on top-level navigation.
     app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SERVER_GUI_SESSION_SAMESITE", "Lax")
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SERVER_GUI_INSECURE_COOKIE", "0") != "1"
-    # Allow up to 50 MiB so the backup restore upload endpoint works.
-    app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
+    # Match the restore endpoint's own archive limit so Flask does not reject
+    # valid appliance backups before the backup module can validate them.
+    app.config["MAX_CONTENT_LENGTH"] = backup_module.MAX_UPLOAD_BYTES
     app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 8  # 8h
 
     logging.basicConfig(
