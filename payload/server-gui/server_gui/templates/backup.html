@@ -57,7 +57,7 @@
             <i class="bi bi-exclamation-octagon-fill"></i>
             リストアは <strong>既存設定ファイルを上書きします</strong>。
             上書き前の元ファイルは <code>/var/lib/server-gui/pre-restore/&lt;日時&gt;/</code> に退避されます。
-            サービスは自動再起動されません — 必要に応じて各タブから個別にリロードしてください。
+            復元後に反映ジョブを起動すると、LAN側IPがバックアップ元の値へ切り替わる場合があります。
         </div>
         <form id="restore-form">
             <div class="mb-3">
@@ -66,6 +66,10 @@
             </div>
             <div class="row g-2 small mb-3">
                 <div class="col-12"><strong class="small">対象セクション:</strong></div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-system-identity" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-system-identity">ホスト名 / 機材識別名</label></div>
+                </div>
                 <div class="col-sm-6 col-md-4">
                     <div class="form-check"><input id="rs-sg" type="checkbox" class="form-check-input" checked>
                         <label class="form-check-label" for="rs-sg">/etc/server-gui/ (管理 JSON / 認証)</label></div>
@@ -81,6 +85,10 @@
                 <div class="col-sm-6 col-md-4">
                     <div class="form-check"><input id="rs-wg" type="checkbox" class="form-check-input" checked>
                         <label class="form-check-label" for="rs-wg">/etc/wireguard/*.conf</label></div>
+                </div>
+                <div class="col-sm-6 col-md-4">
+                    <div class="form-check"><input id="rs-strongswan" type="checkbox" class="form-check-input" checked>
+                        <label class="form-check-label" for="rs-strongswan">strongSwan managed config</label></div>
                 </div>
                 <div class="col-sm-6 col-md-4">
                     <div class="form-check"><input id="rs-fw" type="checkbox" class="form-check-input" checked>
@@ -114,6 +122,10 @@
                     <div class="form-check"><input id="rs-state" type="checkbox" class="form-check-input" checked>
                         <label class="form-check-label" for="rs-state">server-gui runtime state</label></div>
                 </div>
+            </div>
+            <div class="form-check small mb-3">
+                <input id="rs-post-apply" type="checkbox" class="form-check-input" checked>
+                <label class="form-check-label" for="rs-post-apply">復元後にホスト名・LAN側IP・VPN・DDNS/集中管理タイマーを一括反映</label>
             </div>
             <button type="button" class="btn btn-danger" onclick="restoreUpload()">
                 <i class="bi bi-arrow-counterclockwise"></i> リストア実行
@@ -190,10 +202,12 @@ async function deleteBackup(name) {
 
 function _sectionPayload() {
     return {
+        include_system_identity: document.getElementById('rs-system-identity').checked,
         include_server_gui: document.getElementById('rs-sg').checked,
         include_nginx:      document.getElementById('rs-nginx').checked,
         include_dnsmasq:    document.getElementById('rs-dns').checked,
         include_wireguard:  document.getElementById('rs-wg').checked,
+        include_strongswan: document.getElementById('rs-strongswan').checked,
         include_firewalld:  document.getElementById('rs-fw').checked,
         include_network: document.getElementById('rs-network').checked,
         include_fail2ban: document.getElementById('rs-fail2ban').checked,
@@ -202,6 +216,7 @@ function _sectionPayload() {
         include_server_gui_app: document.getElementById('rs-server-app').checked,
         include_wireguard_ui: document.getElementById('rs-wgui').checked,
         include_server_gui_state: document.getElementById('rs-state').checked,
+        post_restore_apply: document.getElementById('rs-post-apply').checked,
     };
 }
 
@@ -212,7 +227,7 @@ function _showRestoreResult(res) {
 }
 
 async function restoreStored(name) {
-    if (!confirm(`バックアップ "${name}" から復元しますか?\n\n既存設定は /var/lib/server-gui/pre-restore/ に退避されます。`)) return;
+    if (!confirm(`バックアップ "${name}" から復元しますか?\n\n既存設定は /var/lib/server-gui/pre-restore/ に退避されます。復元後に反映ジョブを起動すると、LAN側IPがバックアップ元の値へ切り替わる場合があります。`)) return;
     const payload = { name, ..._sectionPayload() };
     const res = await api.send('/backup/api/restore', 'POST', payload);
     if (!res) return;
@@ -223,7 +238,7 @@ async function restoreStored(name) {
 async function restoreUpload() {
     const file = document.getElementById('restore-file').files[0];
     if (!file) return toast('ファイルを選択してください', true);
-    if (!confirm(`${file.name} (${formatBytes(file.size)}) で復元しますか?\n\n既存設定は退避されます。`)) return;
+    if (!confirm(`${file.name} (${formatBytes(file.size)}) で復元しますか?\n\n既存設定は退避されます。復元後に反映ジョブを起動すると、LAN側IPがバックアップ元の値へ切り替わる場合があります。`)) return;
     const form = new FormData();
     form.append('archive', file);
     const sections = _sectionPayload();

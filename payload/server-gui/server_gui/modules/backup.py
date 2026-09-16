@@ -16,15 +16,17 @@ import logging
 import os
 import platform
 import re
+import shlex
 import shutil
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from flask import Blueprint, Flask, jsonify, render_template, request, send_file
 
 from ..auth import csrf_protect, login_required
+from ..shell import sudo_run
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 BACKUP_STORE = Path("/var/lib/server-gui/backups")
+FINALIZE_DIR = Path("/run/server-gui")
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 BACKUP_MAX_COUNT = max(1, _int_env("SYNCA_BACKUP_MAX_COUNT", 10))
 BACKUP_MAX_BYTES = max(512 * 1024 * 1024, _int_env("SYNCA_BACKUP_MAX_BYTES", 2 * 1024 * 1024 * 1024))
@@ -47,6 +50,7 @@ ARCHIVE_VERSION = 2
 SUPPORTED_ARCHIVE_VERSIONS = {1, 2}
 
 BACKUP_SPECS: tuple[dict, ...] = (
+    {"section": "system_identity", "paths": ["/etc/hostname"]},
     {"section": "server_gui_config", "paths": ["/etc/server-gui"]},
     {"section": "server_gui_app", "paths": [
         "/opt/server-gui/bin",
@@ -59,8 +63,10 @@ BACKUP_SPECS: tuple[dict, ...] = (
         "/etc/systemd/system/synca-central*",
         "/etc/systemd/system/synca-ipv6*",
         "/etc/systemd/system/synca-upnp*",
+        "/etc/systemd/system/strongswan*",
         "/etc/systemd/system/wgui*",
         "/etc/systemd/system/multi-user.target.wants/server-gui*",
+        "/etc/systemd/system/multi-user.target.wants/strongswan*",
         "/etc/systemd/system/timers.target.wants/synca-central*",
         "/etc/systemd/system/multi-user.target.wants/synca-ipv6*",
         "/etc/systemd/system/multi-user.target.wants/synca-upnp*",
@@ -74,6 +80,9 @@ BACKUP_SPECS: tuple[dict, ...] = (
         "/var/lib/dnsmasq",
     ]},
     {"section": "wireguard", "paths": ["/etc/wireguard"]},
+    {"section": "strongswan", "paths": [
+        "/etc/strongswan/swanctl/conf.d/server-gui.conf",
+    ]},
     {"section": "firewalld", "paths": ["/etc/firewalld"]},
     {"section": "ipv6", "paths": [
         "/etc/radvd.conf",
@@ -110,6 +119,7 @@ EXCLUDE_NAME_PATTERNS = (
 )
 
 RESTORE_SECTION_PREFIXES = {
+    "system_identity": ("/etc/hostname",),
     "server_gui_config": ("/etc/server-gui/",),
     "server_gui_app": ("/opt/server-gui/bin/", "/opt/server-gui/server_gui/", "/opt/server-gui/requirements.txt"),
     "wireguard_ui": ("/opt/wireguard/",),
@@ -117,6 +127,7 @@ RESTORE_SECTION_PREFIXES = {
     "nginx": ("/etc/nginx/",),
     "dnsmasq": ("/etc/dnsmasq.conf", "/etc/dnsmasq.d/", "/var/lib/dnsmasq/"),
     "wireguard": ("/etc/wireguard/",),
+    "strongswan": ("/etc/strongswan/swanctl/conf.d/server-gui.conf",),
     "firewalld": ("/etc/firewalld/",),
     "ipv6": ("/etc/radvd.conf", "/etc/frr/", "/etc/sysctl.d/99-synca-ipv6.conf", "/usr/local/sbin/synca-ipv6-transition"),
     "network": ("/etc/NetworkManager/", "/etc/sysconfig/network", "/etc/sysconfig/network-scripts/"),
@@ -259,9 +270,11 @@ def restore_backup():
         if len(archive_bytes) > MAX_UPLOAD_BYTES:
             return jsonify({"error": "archive too large"}), 413
         sections = _sections_from_mapping(request.form)
+        post_restore_apply = _as_bool(request.form.get("post_restore_apply"), True)
     else:
         payload = request.get_json(force=True, silent=True) or {}
         sections = _sections_from_mapping(payload)
+        post_restore_apply = _as_bool(payload.get("post_restore_apply"), True)
         name = payload.get("name")
         if not name:
             return jsonify({"error": "name required"}), 400
@@ -297,6 +310,7 @@ def restore_backup():
         applied: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
+        post_restore: list[str] = []
         for src in _walk_files(staging / "files"):
             target = Path("/") / src.relative_to(staging / "files")
             if not _restore_section_allowed(target, sections):
@@ -308,6 +322,19 @@ def restore_backup():
                 applied.append(str(target))
             except (OSError, shutil.Error) as e:
                 errors.append(f"{target}: {e}")
+        if not errors and sections.get("system_identity", True):
+            try:
+                restored_hostname = _restore_hostname_from_manifest(manifest, pre, applied)
+                if restored_hostname:
+                    applied.append(restored_hostname)
+                    post_restore.append(f"restored {restored_hostname} from manifest hostname")
+            except OSError as e:
+                errors.append(f"/etc/hostname: {e}")
+        if not errors and post_restore_apply:
+            result = _schedule_post_restore_apply(sections, ts)
+            post_restore.append(result)
+            if not result.get("ok"):
+                errors.append(f"post-restore apply: {result.get('error') or result.get('output') or 'failed'}")
 
         return jsonify({
             "ok": not errors,
@@ -316,12 +343,152 @@ def restore_backup():
             "skipped": skipped,
             "errors": errors,
             "pre_restore_dir": str(pre),
+            "post_restore": post_restore,
             "restart_hint": [
                 "systemctl daemon-reload",
                 "systemctl restart NetworkManager firewalld dnsmasq nginx fail2ban server-gui",
+                "systemctl enable --now strongswan && swanctl --load-all",
                 "systemctl restart wg-quick@wg0 wgui-worker",
             ],
         })
+
+
+def _schedule_post_restore_apply(sections: dict[str, bool], ts: str) -> dict:
+    script = _post_restore_apply_script(sections, ts)
+    if not script:
+        return {"ok": True, "skipped": True, "reason": "no post-restore actions selected"}
+    FINALIZE_DIR.mkdir(parents=True, exist_ok=True)
+    unit = f"server-gui-restore-finalize-{ts}"
+    script_path = FINALIZE_DIR / f"{unit}.sh"
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o700)
+    res = sudo_run([
+        "systemd-run",
+        "--unit", unit,
+        "--collect",
+        "--on-active=3s",
+        "/bin/bash",
+        str(script_path),
+    ], timeout=15)
+    return {
+        "ok": res.ok,
+        "unit": unit,
+        "script": str(script_path),
+        "output": (res.stdout + res.stderr).strip(),
+    }
+
+
+def _post_restore_apply_script(sections: dict[str, bool], ts: str) -> str:
+    lines = [
+        "#!/bin/bash",
+        "set -u",
+        "log=/var/log/server-gui/restore-finalize-" + shlex.quote(ts) + ".log",
+        "mkdir -p /var/log/server-gui",
+        "exec >>\"$log\" 2>&1",
+        "echo \"[restore-finalize] start $(date -Is)\"",
+        "unit_exists() { systemctl list-unit-files --no-legend \"$1\" 2>/dev/null | awk '{print $1}' | grep -Fxq \"$1\"; }",
+        "enable_now() { unit_exists \"$1\" && systemctl enable --now \"$1\" || true; }",
+        "restart_unit() { unit_exists \"$1\" && systemctl restart \"$1\" || true; }",
+    ]
+
+    if sections.get("systemd", True):
+        lines.append("systemctl daemon-reload || true")
+    if sections.get("system_identity", True):
+        lines.extend([
+            "if [ -s /etc/hostname ]; then",
+            "  hn=$(head -n1 /etc/hostname | tr -d '[:space:]')",
+            "  [ -n \"$hn\" ] && hostnamectl set-hostname \"$hn\" || true",
+            "fi",
+        ])
+    if sections.get("server_gui_config", True) or sections.get("strongswan", True):
+        lines.append(_render_ipsec_regeneration_script())
+    if sections.get("systemd", True):
+        lines.extend([
+            "enable_now nginx.service",
+            "enable_now firewalld.service",
+            "enable_now dnsmasq.service",
+            "enable_now fail2ban.service",
+            "enable_now server-gui-ddns.timer",
+            "enable_now server-gui-geoip.timer",
+            "enable_now server-gui-backup.timer",
+            "enable_now server-gui-update-check.timer",
+            "enable_now synca-central-report.timer",
+            "enable_now synca-central-backup.timer",
+        ])
+    if sections.get("strongswan", True) or sections.get("server_gui_config", True):
+        lines.extend([
+            "enable_now strongswan.service",
+            "command -v swanctl >/dev/null 2>&1 && swanctl --load-all || true",
+        ])
+    if sections.get("wireguard", True):
+        lines.extend([
+            "if [ -s /etc/wireguard/wg0.conf ]; then",
+            "  enable_now wg-quick@wg0.service",
+            "  restart_unit wg-quick@wg0.service",
+            "fi",
+        ])
+    if sections.get("wireguard_ui", True):
+        lines.append("enable_now wgui-worker.service")
+    if sections.get("nginx", True):
+        lines.append("restart_unit nginx.service")
+    if sections.get("dnsmasq", True):
+        lines.append("restart_unit dnsmasq.service")
+    if sections.get("firewalld", True):
+        lines.append("firewall-cmd --reload || restart_unit firewalld.service")
+    if sections.get("fail2ban", True):
+        lines.append("restart_unit fail2ban.service")
+    if sections.get("network", True):
+        lines.extend([
+            "nmcli connection reload || true",
+            "if nmcli -t -f NAME connection show | grep -Fxq br-lan; then nmcli connection up br-lan || true; fi",
+            "for con in $(nmcli -t -f NAME connection show | grep '^br-lan-port-' || true); do nmcli connection up \"$con\" || true; done",
+        ])
+    if sections.get("server_gui_app", True) or sections.get("server_gui_config", True):
+        lines.append("restart_unit server-gui.service")
+    lines.extend([
+        "echo \"[restore-finalize] end $(date -Is)\"",
+        "rm -f " + shlex.quote(str(FINALIZE_DIR / f"server-gui-restore-finalize-{ts}.sh")),
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _render_ipsec_regeneration_script() -> str:
+    return r"""if [ -s /etc/server-gui/ipsec.json ]; then
+  PYTHONPATH=/opt/server-gui /opt/server-gui/venv/bin/python - <<'PY' || true
+import json
+import os
+from pathlib import Path
+from server_gui.modules import ipsec
+
+data = json.loads(Path("/etc/server-gui/ipsec.json").read_text(encoding="utf-8"))
+conns = data.get("connections", [])
+content = ipsec._render(conns) if conns else ""
+out = Path("/etc/strongswan/swanctl/conf.d/server-gui.conf")
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(content, encoding="utf-8")
+os.chmod(out, 0o600)
+print(f"rendered strongSwan managed connections={len(conns)}")
+PY
+fi"""
+
+
+def _restore_hostname_from_manifest(manifest: dict, pre: Path, applied: list[str]) -> str | None:
+    if "/etc/hostname" in applied:
+        return None
+    hostname = str(manifest.get("hostname") or "").strip()
+    if not _valid_restored_hostname(hostname):
+        return None
+    target = Path("/etc/hostname")
+    _backup_existing(target, pre)
+    target.write_text(hostname + "\n", encoding="utf-8")
+    target.chmod(0o644)
+    return str(target)
+
+
+def _valid_restored_hostname(hostname: str) -> bool:
+    if not hostname or len(hostname) > 253 or ".." in hostname:
+        return False
+    return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$", hostname))
 
 
 def _safe_backup_name(name: str) -> bool:
@@ -453,9 +620,13 @@ def _walk_files(root: Path):
 def _restore_section_allowed(target: Path, sections: dict[str, bool]) -> bool:
     s = str(target)
     for section, prefixes in RESTORE_SECTION_PREFIXES.items():
-        if any(s == p.rstrip("/") or s.startswith(p) for p in prefixes):
+        if any(_path_matches_restore_prefix(s, p) for p in prefixes):
             return sections.get(section, True)
     return False
+
+
+def _path_matches_restore_prefix(path: str, prefix: str) -> bool:
+    return path.startswith(prefix) if prefix.endswith("/") else path == prefix
 
 
 def _sections_from_mapping(mapping) -> dict[str, bool]:
@@ -502,17 +673,84 @@ def _restore_one(src: Path, target: Path) -> None:
 
 
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
     dest_resolved = dest.resolve()
     for member in tar.getmembers():
-        member_path = (dest / member.name).resolve()
-        try:
-            member_path.relative_to(dest_resolved)
-        except ValueError:
-            raise tarfile.TarError(f"unsafe path in archive: {member.name}")
         if member.islnk():
             raise tarfile.TarError(f"hard links not allowed: {member.name}")
+        member_path = _archive_member_path(dest, dest_resolved, member.name)
+        if member.isdir():
+            _prepare_archive_parent(dest, dest_resolved, member_path)
+            if member_path.is_symlink():
+                raise tarfile.TarError(f"directory conflicts with symlink: {member.name}")
+            member_path.mkdir(exist_ok=True)
+            _apply_member_metadata(member, member_path)
+            continue
         if member.issym():
-            link = Path(member.linkname)
-            if link.is_absolute() or ".." in link.parts:
-                raise tarfile.TarError(f"unsafe symlink in archive: {member.name}")
-    tar.extractall(dest)
+            _prepare_archive_parent(dest, dest_resolved, member_path)
+            if member_path.exists() or member_path.is_symlink():
+                if member_path.is_dir() and not member_path.is_symlink():
+                    raise tarfile.TarError(f"symlink conflicts with directory: {member.name}")
+                member_path.unlink()
+            os.symlink(member.linkname, member_path)
+            continue
+        if member.isfile():
+            _prepare_archive_parent(dest, dest_resolved, member_path)
+            if member_path.is_dir() and not member_path.is_symlink():
+                raise tarfile.TarError(f"file conflicts with directory: {member.name}")
+            if member_path.exists() or member_path.is_symlink():
+                member_path.unlink()
+            src = tar.extractfile(member)
+            if src is None:
+                raise tarfile.TarError(f"file unreadable: {member.name}")
+            with src, member_path.open("wb") as out:
+                shutil.copyfileobj(src, out)
+            _apply_member_metadata(member, member_path)
+            continue
+        raise tarfile.TarError(f"unsupported member type: {member.name}")
+
+
+def _archive_member_path(dest: Path, dest_resolved: Path, name: str) -> Path:
+    if not name or "\\" in name:
+        raise tarfile.TarError(f"unsafe path in archive: {name}")
+    raw = PurePosixPath(name)
+    if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts):
+        raise tarfile.TarError(f"unsafe path in archive: {name}")
+    member_path = dest.joinpath(*raw.parts)
+    try:
+        member_path.resolve().relative_to(dest_resolved)
+    except ValueError:
+        raise tarfile.TarError(f"unsafe path in archive: {name}")
+    return member_path
+
+
+def _prepare_archive_parent(dest: Path, dest_resolved: Path, member_path: Path) -> None:
+    try:
+        parent_parts = member_path.parent.relative_to(dest).parts
+    except ValueError:
+        raise tarfile.TarError(f"unsafe path in archive: {member_path}")
+    current = dest
+    for part in parent_parts:
+        current = current / part
+        if current.is_symlink():
+            raise tarfile.TarError(f"archive path traverses symlink: {member_path}")
+        if current.exists():
+            if not current.is_dir():
+                raise tarfile.TarError(f"archive parent is not a directory: {member_path}")
+            continue
+        current.mkdir()
+    try:
+        member_path.parent.resolve().relative_to(dest_resolved)
+    except ValueError:
+        raise tarfile.TarError(f"unsafe parent in archive: {member_path}")
+
+
+def _apply_member_metadata(member: tarfile.TarInfo, path: Path) -> None:
+    try:
+        os.chmod(path, member.mode & 0o7777)
+    except OSError:
+        logger.debug("failed to apply archive mode to %s", path, exc_info=True)
+    try:
+        os.utime(path, (member.mtime, member.mtime), follow_symlinks=False)
+    except (OSError, NotImplementedError):
+        logger.debug("failed to apply archive mtime to %s", path, exc_info=True)
