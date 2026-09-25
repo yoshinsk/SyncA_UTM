@@ -49,6 +49,20 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 - DHCP オプションのインポートとプレビュー
 - GUI からのローカル DHCP スコープ管理
 
+#### 初回起動時のDNS/DHCPはGUI管理設定として生成する
+
+初回起動で入力したLANアドレス、DHCP範囲、上流DNSは、`/etc/server-gui/dnsmasq.json` に保存し、GUIと同じ生成処理で `/etc/dnsmasq.d/server-gui.conf` へ反映します。初回起動専用の `synca-lan.conf` を新規作成しないため、初期設定だけがGUIの管理外に残ることはありません。
+
+DHCP開始・終了アドレスは、LAN CIDR内の有効なIPv4アドレスで、開始アドレスが終了アドレス以下でなければなりません。たとえば `192.168.11.100` から `192.168.11.235` は有効ですが、`192.168.11.2235` のような不正なIPv4アドレスは初回起動を中止して保存しません。
+
+初回起動後は、次の3点を確認します。`dnsmasq` が `active`、`dnsmasq --test` が成功、LAN IPの53番DNSと67番DHCPが待受状態であれば、DNS/DHCPサービスは起動済みです。
+
+```bash
+systemctl is-active dnsmasq
+dnsmasq --test
+ss -lunp | grep -E ':(53|67)\b'
+```
+
 ### DDNS / 証明書
 
 - `ddnsft.com` の DDNS ホスト名管理

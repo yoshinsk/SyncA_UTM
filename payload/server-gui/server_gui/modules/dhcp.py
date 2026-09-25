@@ -12,7 +12,7 @@ from ..auth import csrf_protect, login_required
 from ..config_store import ConfigStore
 from ..dnsmasq_apply import MODULE_NAME, apply as apply_dnsmasq, default as default_data
 from ..shell import run, sudo_run
-from ..validators import ValidationError, validate_interface, validate_ipv4, validate_mac
+from ..validators import ValidationError, validate_dhcp_range, validate_interface, validate_ipv4, validate_mac
 
 bp = Blueprint("dhcp", __name__, url_prefix="/dhcp")
 
@@ -588,9 +588,13 @@ def _dnsmasq_config_files(include_generated: bool = False) -> list[Path]:
 @csrf_protect
 def add_range():
     payload = request.get_json(force=True, silent=True) or {}
+    netmask = (payload.get("netmask") or "").strip() or None
     try:
-        start = validate_ipv4(payload.get("start", ""))
-        end = validate_ipv4(payload.get("end", ""))
+        start, end, netmask = validate_dhcp_range(
+            payload.get("start", ""),
+            payload.get("end", ""),
+            netmask,
+        )
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
     lease = str(payload.get("lease", "12h")).strip() or "12h"
@@ -606,13 +610,6 @@ def add_range():
         candidate_names = {item["name"] for item in candidates}
         if candidate_names and interface not in candidate_names:
             return jsonify({"error": f"interface is not eligible for DHCP range: {interface}"}), 400
-    netmask = (payload.get("netmask") or "").strip() or None
-    if netmask:
-        try:
-            validate_ipv4(netmask)
-        except ValidationError as e:
-            return jsonify({"error": str(e)}), 400
-
     new_id = uuid.uuid4().hex
     with _store().transaction(MODULE_NAME, default_data()) as data:
         data["dhcp"]["ranges"].append({
