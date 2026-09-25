@@ -344,6 +344,34 @@ else:
 PY
 }
 
+validate_lan_dhcp_config() {
+    # 初回起動の誤入力を設定ファイルへ書き込む前に止め、dnsmasq起動不能を防ぐ。
+    local message
+    if ! message="$(python3 - "$LAN_CIDR" "$DHCP_START" "$DHCP_END" <<'PY'
+import ipaddress
+import sys
+
+try:
+    lan = ipaddress.IPv4Interface(sys.argv[1])
+    start = ipaddress.IPv4Address(sys.argv[2])
+    end = ipaddress.IPv4Address(sys.argv[3])
+    network = lan.network
+    if start > end:
+        raise ValueError("DHCP start must not be greater than DHCP end")
+    for label, address in (("DHCP start", start), ("DHCP end", end)):
+        if address not in network:
+            raise ValueError(f"{label} is outside LAN subnet {network}")
+        if address in (network.network_address, network.broadcast_address, lan.ip):
+            raise ValueError(f"{label} cannot use the network, broadcast, or LAN gateway address")
+except ValueError as error:
+    print(error)
+    raise SystemExit(1)
+PY
+)"; then
+        fatal "Invalid LAN DHCP configuration: ${message}"
+    fi
+}
+
 collect_config() {
     clear || true
     ui_message "Welcome" "This wizard configures SyncA UTM for first use.
@@ -536,13 +564,21 @@ configure_network() {
 }
 
 write_server_gui_config() {
-    local lan_ip endpoint_host netmask update_branch_value
+    local lan_ip endpoint_host netmask update_branch_value wan_mac ignored_macs_json
     lan_ip="$(cidr_ip "$LAN_CIDR")"
     netmask="$(cidr_netmask "$LAN_CIDR")"
     update_branch_value="$(update_branch)"
     endpoint_host="${DDNS_LEFT}.${DDNS_DOMAIN}"
     if [[ -z "$DDNS_LEFT" ]]; then
         endpoint_host="$lan_ip"
+    fi
+    wan_mac=""
+    if [[ -r "/sys/class/net/${WAN_IF}/address" ]]; then
+        wan_mac="$(tr '[:upper:]' '[:lower:]' < "/sys/class/net/${WAN_IF}/address")"
+    fi
+    ignored_macs_json="[]"
+    if [[ "$wan_mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ && "$wan_mac" != "00:00:00:00:00:00" ]]; then
+        ignored_macs_json="[\"${wan_mac}\"]"
     fi
 
     install -d -m 0700 "$CONFIG_DIR"
@@ -628,7 +664,8 @@ JSON
     "options": [
       {"id": "router", "tag": "", "option": "router", "value": "${lan_ip}"},
       {"id": "dns", "tag": "", "option": "dns-server", "value": "${lan_ip},1.1.1.1,1.0.0.1"}
-    ]
+    ],
+    "ignored_macs": ${ignored_macs_json}
   }
 }
 JSON
@@ -776,55 +813,15 @@ configure_dnsmasq() {
     if [[ "${SYNCA_APPLY_LAN:-${SYNCA_APPLY_NETWORK:-1}}" != "1" ]]; then
         return 0
     fi
-    local lan_ip netmask
-    lan_ip="$(cidr_ip "$LAN_CIDR")"
-    netmask="$(cidr_netmask "$LAN_CIDR")"
-    local wan_mac=""
-    if [[ -r "/sys/class/net/${WAN_IF}/address" ]]; then
-        wan_mac="$(tr '[:upper:]' '[:lower:]' < "/sys/class/net/${WAN_IF}/address")"
-    fi
-    configure_dnsmasq_runtime
-    install -d -m 0755 /etc/dnsmasq.d
-    cat > /etc/dnsmasq.d/synca-lan.conf <<CONF
-# Managed by SyncA UTM firstboot.
-interface=${LAN_IF}
-bind-dynamic
-dhcp-range=${DHCP_START},${DHCP_END},${netmask},4h
-dhcp-option=option:router,${lan_ip}
-dhcp-option=option:dns-server,${lan_ip},1.1.1.1,1.0.0.1
-server=1.1.1.1
-server=1.0.0.1
-domain-needed
-bogus-priv
-CONF
-    if [[ "$wan_mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ && "$wan_mac" != "00:00:00:00:00:00" ]]; then
-        echo "dhcp-host=${wan_mac},ignore" >> /etc/dnsmasq.d/synca-lan.conf
-    fi
-    systemctl enable dnsmasq
-}
+    # 初回起動でもGUIと同じ生成経路を使い、管理対象外の設定を残さない。
+    if ! PYTHONPATH=/opt/server-gui /opt/server-gui/venv/bin/python - <<'PY'
+from server_gui.dnsmasq_apply import apply
 
-configure_dnsmasq_runtime() {
-    install -d -m 0755 /etc/systemd/system/dnsmasq.service.d
-    cat > /etc/systemd/system/dnsmasq.service.d/synca-utm.conf <<'CONF'
-# Managed by SyncA UTM firstboot.
-[Unit]
-Wants=network-online.target
-After=network-online.target NetworkManager.service
-StartLimitIntervalSec=0
-
-[Service]
-ExecStartPre=/bin/sh -c 'test ! -x /opt/server-gui/bin/dnsmasq-runtime-guard || exec /opt/server-gui/bin/dnsmasq-runtime-guard'
-Restart=on-failure
-RestartSec=5s
-CONF
-    if [[ -x /opt/server-gui/bin/dnsmasq-runtime-guard ]]; then
-        /opt/server-gui/bin/dnsmasq-runtime-guard
+apply("/etc/server-gui")
+PY
+    then
+        fatal "Failed to apply managed DNS/DHCP configuration."
     fi
-    if [[ -f /etc/dnsmasq.conf ]] && grep -Eq '^[[:space:]]*bind-interfaces([[:space:]]|$)' /etc/dnsmasq.conf; then
-        cp -a /etc/dnsmasq.conf "/etc/dnsmasq.conf.synca-bind-dynamic.$(date +%Y%m%d%H%M%S).bak"
-        sed -i -E 's/^([[:space:]]*)bind-interfaces([[:space:]]*)$/# SyncA UTM: bind-dynamic is used so LAN bridges can appear after dnsmasq starts.\n#\1bind-interfaces\2/' /etc/dnsmasq.conf
-    fi
-    systemctl daemon-reload
 }
 
 configure_nginx() {
@@ -1061,6 +1058,7 @@ main() {
             exit 2
             ;;
     esac
+    validate_lan_dhcp_config
     write_install_env
     ui_apply_started
     install -d -m 0755 "$(dirname "$FIRSTBOOT_LOG")"

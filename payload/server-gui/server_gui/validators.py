@@ -37,6 +37,32 @@ def validate_ipv4_cidr(value: str) -> str:
     return value
 
 
+def validate_dhcp_range(start: str, end: str, netmask: str | None = None) -> tuple[str, str, str | None]:
+    """DHCP範囲の開始・終了・ネットマスクが同一IPv4サブネットに収まることを確認する。"""
+    start = validate_ipv4(start)
+    end = validate_ipv4(end)
+    start_address = ipaddress.IPv4Address(start)
+    end_address = ipaddress.IPv4Address(end)
+    if start_address > end_address:
+        raise ValidationError("DHCP範囲の開始アドレスは終了アドレス以下にしてください")
+    if not netmask:
+        return start, end, None
+
+    netmask = validate_ipv4(netmask)
+    try:
+        network = ipaddress.IPv4Network(f"{start}/{netmask}", strict=False)
+    except ValueError as e:
+        raise ValidationError(f"DHCP範囲のネットマスクが不正です: {netmask!r}") from e
+    if end_address not in network:
+        raise ValidationError("DHCP範囲の開始アドレスと終了アドレスは同一サブネットにしてください")
+    if start_address in {network.network_address, network.broadcast_address} or end_address in {
+        network.network_address,
+        network.broadcast_address,
+    }:
+        raise ValidationError("DHCP範囲にネットワークアドレスまたはブロードキャストアドレスは指定できません")
+    return start, end, netmask
+
+
 def validate_hostname(value: str) -> str:
     if not isinstance(value, str) or not HOSTNAME_RE.match(value):
         raise ValidationError(f"ホスト名が不正です: {value!r}")

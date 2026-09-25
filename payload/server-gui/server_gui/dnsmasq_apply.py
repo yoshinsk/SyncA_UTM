@@ -11,6 +11,7 @@ from typing import Any
 
 from .config_store import ConfigStore
 from .shell import sudo_run
+from .validators import ValidationError, validate_dhcp_range
 
 CONFIG_PATH = Path("/etc/dnsmasq.d/server-gui.conf")
 LEGACY_FIRSTBOOT_CONFIG_PATH = Path("/etc/dnsmasq.d/synca-lan.conf")
@@ -47,12 +48,14 @@ def default() -> dict:
             "ranges": [],      # [{id, interface, start, end, lease, tag}]
             "static_hosts": [],# [{id, mac, ip, hostname, lease}]
             "options": [],     # [{id, option, value, tag, range_id}]
+            "ignored_macs": [],# [MAC address] 初回起動時に検出したWAN NICをDHCP対象外にする
         },
     }
 
 
 def generate(data: dict) -> str:
     """Render the JSON model to a dnsmasq.conf snippet."""
+    _validate_dhcp_ranges(data)
     lines: list[str] = [
         "# Managed by server-gui - do not edit by hand.",
         "# To stop GUI management, simply delete this file (existing dnsmasq",
@@ -81,7 +84,7 @@ def generate(data: dict) -> str:
         lines.append("dhcp-authoritative")
         lines.append("")
 
-    ignored_macs = _ignored_local_dhcp_client_macs(listen_interfaces) if listen_interfaces else []
+    ignored_macs = _ignored_local_dhcp_client_macs(data, listen_interfaces) if listen_interfaces else []
     if ignored_macs:
         lines.append("# --- DHCP self-protection ---")
         for mac in ignored_macs:
@@ -144,7 +147,10 @@ def apply(config_dir: Any) -> None:
     """
     store = ConfigStore(config_dir)
     data = store.load(MODULE_NAME, default())
-    content = generate(data)
+    try:
+        content = generate(data)
+    except ValidationError as e:
+        raise RuntimeError(f"管理DHCP範囲が不正です: {e}") from e
     needs_dynamic_bind = bool(_listen_interfaces(data))
 
     backup: bytes | None = None
@@ -228,6 +234,26 @@ def _range_tags(ranges: list[dict]) -> dict[str, str]:
     return out
 
 
+def _validate_dhcp_ranges(data: dict) -> None:
+    """保存済み設定も生成前に検査し、不正値でdnsmasq全体を停止させない。"""
+    if not isinstance(data, dict):
+        raise ValidationError("dnsmasq設定の形式が不正です")
+    dhcp = data.get("dhcp", {})
+    if not isinstance(dhcp, dict):
+        raise ValidationError("DHCP設定の形式が不正です")
+    ranges = dhcp.get("ranges", [])
+    if not isinstance(ranges, list):
+        raise ValidationError("DHCP範囲の形式が不正です")
+    for index, item in enumerate(ranges, start=1):
+        if not isinstance(item, dict):
+            raise ValidationError(f"DHCP範囲 {index} の形式が不正です")
+        validate_dhcp_range(
+            str(item.get("start", "")).strip(),
+            str(item.get("end", "")).strip(),
+            str(item.get("netmask", "")).strip() or None,
+        )
+
+
 def _option_tag(option: dict, range_tags: dict[str, str]) -> str:
     """Resolve an option target: range_id takes precedence over manual tag."""
     range_id = str(option.get("range_id", "")).strip()
@@ -258,13 +284,22 @@ def _listen_interfaces(data: dict) -> list[str]:
     })
 
 
-def _ignored_local_dhcp_client_macs(listen_interfaces: list[str]) -> list[str]:
-    """Prevent this UTM's WAN NIC from taking a LAN DHCP lease during L2 mixups."""
+def _ignored_local_dhcp_client_macs(data: dict, listen_interfaces: list[str]) -> list[str]:
+    """初回起動時のWAN MACと現在の既定経路NICをLAN DHCP対象外にする。"""
+    configured = (data.get("dhcp") or {}).get("ignored_macs") or []
+    macs = {
+        str(mac).strip().lower()
+        for mac in configured
+        if isinstance(mac, str) and re.match(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$", mac.strip().lower())
+        and mac.strip().lower() != "00:00:00:00:00:00"
+    }
     wan_if = _default_route_interface()
     if not wan_if or wan_if in listen_interfaces:
-        return []
+        return sorted(macs)
     mac = _interface_mac(wan_if)
-    return [mac] if mac else []
+    if mac:
+        macs.add(mac)
+    return sorted(macs)
 
 
 def _default_route_interface() -> str:
