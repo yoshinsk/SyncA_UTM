@@ -1052,6 +1052,16 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
         if not res.ok and "NAME_CONFLICT" not in (res.stderr + res.stdout):
             return {"ok": False, "error": (res.stderr or res.stdout).strip()}
         changed.append(f"created zone {allow_zone}")
+        zones.add(allow_zone)
+
+    # A full zone description also reads NAT/direct rules. Snapshot only sources
+    # once so applying multiple ipsets completes within the GUI worker timeout.
+    source_zones: dict[str, set[str]] = {}
+    for zone in sorted(zones):
+        res = sudo_run(["firewall-cmd", "--permanent", "--zone", zone, "--list-sources"])
+        if not res.ok:
+            return {"ok": False, "error": (res.stderr or res.stdout).strip()}
+        source_zones[zone] = set(res.stdout.split())
 
     public = _describe_zone("public", permanent=True)
     services = list(public.get("services", []))
@@ -1066,7 +1076,7 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
 
     for name in ipsets:
         source = f"ipset:{name}"
-        _remove_source_from_other_zones(source, allow_zone, changed, errors)
+        _remove_source_from_other_zones(source, allow_zone, changed, errors, source_zones)
         _collect_firewall_change(
             ["firewall-cmd", "--permanent", "--zone", allow_zone, "--add-source", source],
             changed, errors,
@@ -1123,18 +1133,26 @@ def _apply_public_ipset_allowlist(allow_zone: str, ipsets: list[str], remove_pub
     return {"ok": not errors, "changed": changed, "errors": errors}
 
 
-def _remove_source_from_other_zones(source: str, keep_zone: str, changed: list[str], errors: list[str]) -> None:
+def _remove_source_from_other_zones(
+    source: str,
+    keep_zone: str,
+    changed: list[str],
+    errors: list[str],
+    source_zones: dict[str, set[str]],
+) -> None:
     """Move a source into one zone without leaving it unassigned on ZONE_CONFLICT."""
-    for zone in sorted(_zone_names()):
+    for zone in sorted(source_zones):
         if zone == keep_zone:
             continue
-        info = _describe_zone(zone, permanent=True)
-        if source not in info.get("sources", []):
+        if source not in source_zones[zone]:
             continue
+        error_count = len(errors)
         _collect_firewall_change(
             ["firewall-cmd", "--permanent", "--zone", zone, "--remove-source", source],
             changed, errors, ignore_missing=True,
         )
+        if len(errors) == error_count:
+            source_zones[zone].discard(source)
 
 
 def _remove_allowlist_drop_guards(ipsets: list[str], changed: list[str], errors: list[str]) -> None:

@@ -35,6 +35,7 @@ SyncA UTM は AlmaLinux 9 系を基盤にした UTM / ルーターアプライ�
 - UPnP / NAT-PMP の明示的な ON/OFF 管理 (既定は OFF)
 - ISO インストール用 firewalld プロファイル
 - GUI からのルール管理と手動ルール維持
+- PublicのIPセット許可制では、各ゾーンの送信元一覧を1回取得し、複数IPセットの移動処理で再利用
 - VPN トンネル作成時の必要許可追加
 
 ### VPN
