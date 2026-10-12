@@ -57,7 +57,7 @@ RUNTIME_BINARY = Path("/opt/server-gui/bin/ai-defense-check")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 PORT_RE = re.compile(r"^(\d{1,5}(?:-\d{1,5})?)/(tcp|udp|sctp|dccp)$", re.IGNORECASE)
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
-IP_TOKEN_RE = re.compile(r"(?:\bfrom\s+|\brhost=|\bSRC=)([0-9A-Fa-f:.]+)")
+IP_TOKEN_RE = re.compile(r"(?:\bfrom\s+|\brhost=|\bSRC=|\brate limit hit for\s+)([0-9A-Fa-f:.]+)")
 KERNEL_PACKET_RE = re.compile(r"\bSRC=([0-9A-Fa-f:.]+).*?\bDPT=(\d{1,5}).*?\bPROTO=([A-Za-z]+)")
 NGINX_LINE_RE = re.compile(r'^([^\s]+)\s+\S+\s+\S+\s+"(?:[A-Z]+)\s+([^\s?]+)[^\"]*"\s+(\d{3})\b')
 SUSPICIOUS_HTTP_PATH_RE = re.compile(
@@ -510,7 +510,7 @@ def _normalise_port_tokens(tokens: list[str]) -> list[str]:
 
 def _parse_forward_ports(text: str) -> list[str]:
     """Extract original protocol/port pairs from firewalld forward-port output."""
-    matches = re.findall(r"port=(\d{1,5})(?:-\d{1,5})?:proto=(tcp|udp|sctp|dccp)", text, re.IGNORECASE)
+    matches = re.findall(r"port=(\d{1,5}(?:-\d{1,5})?):proto=(tcp|udp|sctp|dccp)", text, re.IGNORECASE)
     return _normalise_port_tokens([f"{port}/{proto}" for port, proto in matches])
 
 
@@ -681,7 +681,13 @@ def _build_candidates(records: dict[str, dict[str, Any]], open_ports: set[str]) 
         total = sum(events.values())
         if not _requires_review(events, total):
             continue
-        ports = sorted(set(item.get("ports", set())) & open_ports, key=_port_sort_key)
+        # Kernel logs contain the concrete destination port, whereas firewalld
+        # may expose a range such as 10000-10100/tcp.  Keep the concrete value
+        # when it belongs to one of the currently exposed ranges.
+        ports = sorted(
+            {port for port in item.get("ports", set()) if _contains_port(open_ports, port)},
+            key=_port_sort_key,
+        )
         if not ports:
             continue
         selected.append({"ip": ip, "event_types": events, "event_total": total, "target_ports": ports})
