@@ -14,6 +14,20 @@ SyncA UTMはAlmaLinux9系を基盤とするUTM・ルーターアプライアン�
 
 ## 主な機能
 
+### 管理メニュー
+
+デスクトップの左メニューとハンバーガーメニューは、同じ区分と順序で表示します。TOPにはダッシュボードを置き、ほかの画面は機能別に分類します。
+
+| 区分 | 画面 |
+| --- | --- |
+| TOP | ダッシュボード |
+| Network | ネットワーク、DHCP、DNS、IPv6、UPnP |
+| Check | WAN品質 |
+| Defense | 国別IP、Firewall、fail2ban、AI防御 |
+| VPN | IPsec、WireGuard |
+| Publish | DDNS、Nginx、証明書 |
+| Manage | 管理、バックアップ、Sophos取込 |
+
 ### ネットワーク
 
 - WAN の DHCP / 固定 IP / PPPoE
@@ -228,6 +242,7 @@ DHCPへ切り替える場合は、上位側でDHCP OFFER、デフォルトゲー
 
 ```bash
 python scripts/test-wan-quality-ai-defense.py
+python scripts/test-navigation-groups.py
 python -m py_compile \
   payload/server-gui/server_gui/modules/wan_quality.py \
   payload/server-gui/server_gui/modules/ai_defense.py \
@@ -239,6 +254,8 @@ bash -n scripts/bootstrap-synca-testhost.sh
 ```
 
 回帰テストでは、ping 結果の解析、WAN品質の状態整理、Jev に IP アドレスを含めない要求生成、Jev 応答形式の検証、安全側の遮断条件、GUI の試行制限ログ、送信元 IP セットを使う公開ゾーン、サービス定義の永続設定からのポート取得、公開ポート範囲、アプリケーション登録、ISO インストーラと初回起動時の timer 有効化、firewalld を再読込しない遮断経路を確認します。テンプレートの JavaScript 構文と差分の空白エラーも確認しました。
+
+ナビゲーションの回帰テストは、デスクトップの左メニューとハンバーガーメニューに、同じ区分、リンク順、アクティブページの `aria-current` が表示されることを確認します。Flask のテンプレートレンダリングで確認し、実機ブラウザでの画面幅ごとの目視確認は未実施です。
 
 実機では、WAN インターフェースのゾーンが空で、送信元 IP セットの許可ゾーンに公開サービス、明示ポート、ポート転送がある構成を読み取り専用で確認しました。修正後は AlmaLinux 9.8 の実機で送信元 IP セットの許可ゾーンから 14 種類のポート・範囲を検出し、候補 0 件の確認処理が `no_candidates` で完了しました。候補がなかったため、Jev API 呼出しと AI 防御による遮断は今回実行していません。実際の Jev API 呼出し、firewalld IP セットへの追加・解除、AlmaLinux 8.10 の ISO 起動試験は未実施です。これらは公開サービスや回線に影響するため、検証環境で API キーとテスト用送信元を用意して確認してください。
 

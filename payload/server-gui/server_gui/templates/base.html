@@ -1,3 +1,40 @@
+{#-
+payload/server-gui/server_gui/templates/base.html
+
+SyncA UTM の共通レイアウト。デスクトップ側とハンバーガーメニュー側で、
+同じ機能分類とリンク順を表示する。
+-#}
+{%- macro render_navigation(groups, navigation_id) -%}
+    {#
+    同じメニュー定義をデスクトップとモバイルに描画する。リンクを二重定義
+    すると、機能追加時に片方だけの順序や分類がずれるため、ここで統一する。
+    #}
+    {% for group_id, group_label, group_icon, tabs in groups %}
+    <div class="app-nav-group" role="group" aria-labelledby="{{ navigation_id }}-{{ group_id }}-label">
+        <div class="app-nav-group-title" id="{{ navigation_id }}-{{ group_id }}-label">
+            <i class="bi {{ group_icon }}" aria-hidden="true"></i>
+            <span>{{ group_label }}</span>
+        </div>
+        <div class="app-nav-group-links">
+            {% for tab_id, endpoint, icon, label in tabs %}
+                {% if endpoint %}
+                <a class="app-nav-link d-flex align-items-center gap-2 {% if active_tab == tab_id %}active{% endif %}"
+                   href="{{ url_for(endpoint) }}"
+                   {% if active_tab == tab_id %}aria-current="page"{% endif %}>
+                    <i class="bi {{ icon }}" aria-hidden="true"></i>
+                    <span>{{ label }}</span>
+                </a>
+                {% else %}
+                <span class="app-nav-link disabled d-flex align-items-center gap-2" title="未実装">
+                    <i class="bi {{ icon }}" aria-hidden="true"></i>
+                    <span>{{ label }}</span>
+                </span>
+                {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+{%- endmacro -%}
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -11,26 +48,41 @@
 </head>
 <body class="bg-body-tertiary {% if session.user %}app-has-sidebar{% endif %}">
 {% if session.user %}
-{% set tabs = [
-    ('dashboard', 'system.dashboard',  'bi-speedometer2', 'ダッシュボード'),
-    ('network',   'network.page',      'bi-hdd-network',  'ネットワーク'),
-    ('wan_quality', 'wan_quality.page', 'bi-activity', 'WAN品質'),
-    ('ddns',      'ddns.page',         'bi-broadcast',    'DDNS'),
-    ('firewall',  'firewall.page',     'bi-bricks',       'Firewall'),
-    ('fail2ban',  'fail2ban.page',     'bi-slash-circle', 'fail2ban'),
-    ('ai_defense', 'ai_defense.page',  'bi-shield-exclamation', 'AI防御'),
-    ('geoip',     'geoip.page',        'bi-globe-asia-australia', '国別IP'),
-    ('dns',       'dns.page',          'bi-signpost-split', 'DNS'),
-    ('dhcp',      'dhcp.page',         'bi-diagram-3',    'DHCP'),
-    ('ipv6',      'ipv6.page',         'bi-globe2',       'IPv6'),
-    ('upnp',      'upnp.page',         'bi-router',       'UPnP'),
-    ('ipsec',     'ipsec.page',        'bi-lock-fill',    'IPsec'),
-    ('wireguard', 'wireguard.page',    'bi-shield-shaded', 'WireGuard'),
-    ('nginx',     'nginx_proxy.page',  'bi-arrow-left-right', 'Nginx'),
-    ('certs',     'certs.page',        'bi-patch-check',  '証明書'),
-    ('backup',    'backup.page',       'bi-archive',      'バックアップ'),
-    ('sophos_import', 'sophos_import.page', 'bi-box-arrow-in-down', 'Sophos取込'),
-    ('admin',     'admin.page',        'bi-gear-fill',    '管理'),
+{# 機能の役割に沿ったメニュー構成。TOP は常にダッシュボードを先頭に置く。 #}
+{% set navigation_groups = [
+    ('top', 'TOP', 'bi-house-door', [
+        ('dashboard', 'system.dashboard', 'bi-speedometer2', 'ダッシュボード'),
+    ]),
+    ('network', 'Network', 'bi-diagram-3', [
+        ('network', 'network.page', 'bi-hdd-network', 'ネットワーク'),
+        ('dhcp', 'dhcp.page', 'bi-diagram-3', 'DHCP'),
+        ('dns', 'dns.page', 'bi-signpost-split', 'DNS'),
+        ('ipv6', 'ipv6.page', 'bi-globe2', 'IPv6'),
+        ('upnp', 'upnp.page', 'bi-router', 'UPnP'),
+    ]),
+    ('check', 'Check', 'bi-clipboard2-check', [
+        ('wan_quality', 'wan_quality.page', 'bi-activity', 'WAN品質'),
+    ]),
+    ('defense', 'Defense', 'bi-shield-check', [
+        ('geoip', 'geoip.page', 'bi-globe-asia-australia', '国別IP'),
+        ('firewall', 'firewall.page', 'bi-bricks', 'Firewall'),
+        ('fail2ban', 'fail2ban.page', 'bi-slash-circle', 'fail2ban'),
+        ('ai_defense', 'ai_defense.page', 'bi-shield-exclamation', 'AI防御'),
+    ]),
+    ('vpn', 'VPN', 'bi-shield-lock', [
+        ('ipsec', 'ipsec.page', 'bi-lock-fill', 'IPsec'),
+        ('wireguard', 'wireguard.page', 'bi-shield-shaded', 'WireGuard'),
+    ]),
+    ('publish', 'Publish', 'bi-broadcast', [
+        ('ddns', 'ddns.page', 'bi-broadcast', 'DDNS'),
+        ('nginx', 'nginx_proxy.page', 'bi-arrow-left-right', 'Nginx'),
+        ('certs', 'certs.page', 'bi-patch-check', '証明書'),
+    ]),
+    ('manage', 'Manage', 'bi-gear', [
+        ('admin', 'admin.page', 'bi-gear-fill', '管理'),
+        ('backup', 'backup.page', 'bi-archive', 'バックアップ'),
+        ('sophos_import', 'sophos_import.page', 'bi-box-arrow-in-down', 'Sophos取込'),
+    ]),
 ] %}
 <aside class="app-sidebar d-none d-xl-flex flex-column bg-dark text-white shadow-sm">
     <a class="app-sidebar-brand fw-semibold d-flex align-items-center gap-2 text-white text-decoration-none" href="/">
@@ -38,20 +90,7 @@
         SyncA UTM
     </a>
     <nav class="app-sidebar-nav flex-grow-1" aria-label="main navigation">
-        {% for tab_id, endpoint, icon, label in tabs %}
-            {% if endpoint %}
-            <a class="app-nav-link d-flex align-items-center gap-2 {% if active_tab == tab_id %}active{% endif %}"
-               href="{{ url_for(endpoint) }}">
-                <i class="bi {{ icon }}"></i>
-                <span>{{ label }}</span>
-            </a>
-            {% else %}
-            <span class="app-nav-link disabled d-flex align-items-center gap-2" title="未実装">
-                <i class="bi {{ icon }}"></i>
-                <span>{{ label }}</span>
-            </span>
-            {% endif %}
-        {% endfor %}
+        {{ render_navigation(navigation_groups, 'desktop-nav') }}
     </nav>
     <form method="POST" action="{{ url_for('auth.logout') }}" class="app-sidebar-logout">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -84,20 +123,7 @@
     </div>
     <div class="offcanvas-body d-flex flex-column">
         <nav class="app-sidebar-nav flex-grow-1" aria-label="mobile navigation">
-            {% for tab_id, endpoint, icon, label in tabs %}
-                {% if endpoint %}
-                <a class="app-nav-link d-flex align-items-center gap-2 {% if active_tab == tab_id %}active{% endif %}"
-                   href="{{ url_for(endpoint) }}">
-                    <i class="bi {{ icon }}"></i>
-                    <span>{{ label }}</span>
-                </a>
-                {% else %}
-                <span class="app-nav-link disabled d-flex align-items-center gap-2" title="未実装">
-                    <i class="bi {{ icon }}"></i>
-                    <span>{{ label }}</span>
-                </span>
-                {% endif %}
-            {% endfor %}
+            {{ render_navigation(navigation_groups, 'mobile-nav') }}
         </nav>
         <form method="POST" action="{{ url_for('auth.logout') }}" class="pt-3">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
