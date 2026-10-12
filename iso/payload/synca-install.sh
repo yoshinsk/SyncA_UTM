@@ -473,6 +473,35 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+    cat > /etc/systemd/system/server-gui-ai-defense.service <<'UNIT'
+[Unit]
+Description=server-gui Jev AI defense check
+After=network-online.target firewalld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/ai-defense-check
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-ai-defense.timer <<'UNIT'
+[Unit]
+Description=Run server-gui Jev AI defense check periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
     cat > /etc/systemd/system/synca-central-report.service <<'UNIT'
 [Unit]
 Description=SyncA UTM 集中管理 状態送信

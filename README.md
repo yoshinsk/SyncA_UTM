@@ -1,6 +1,6 @@
 # SyncA UTM
 
-SyncA UTMはAlmaLinux9系を基盤とするUTM・ルーターアプライアンスです。ローカル管理GUIでネットワーク、ファイアウォール、VPN、DNS/DHCP、DDNS、証明書、バックアップ、fail2ban、Nginxリバースプロキシを管理できます。
+SyncA UTMはAlmaLinux9系を基盤とするUTM・ルーターアプライアンスです。ローカル管理GUIでネットワーク、WAN回線品質診断、ファイアウォール、AI防御、VPN、DNS/DHCP、DDNS、証明書、バックアップ、fail2ban、Nginxリバースプロキシを管理できます。
 
 このリポジトリには、既存のSyncA UTMへ配信する更新と、オフラインインストールISOの作成に必要なソースを収録しています。
 
@@ -24,6 +24,21 @@ SyncA UTMはAlmaLinux9系を基盤とするUTM・ルーターアプライアン�
 - VLAN タグ付きインターフェース
 - 複数 NIC のブリッジ構成
 - PPPoE MTU / MSS 調整
+
+### WAN回線品質診断
+
+「WAN品質」画面は、現在の IPv4 既定経路で回線品質を手動測定する画面です。自動測定は行わないため、WAN 通信は管理者が実行したときだけ発生します。結果は直近 20 件をローカルに保存します。
+
+| 計測項目 | 内容 | 読み方 |
+| --- | --- | --- |
+| 下り速度 | Cloudflare の固定測定先から約 20 MB を受信して求める実効速度 | 契約上の最大速度ではありません。宅内利用状況、測定先、経路の混雑で変動します。 |
+| 上り速度 | Cloudflare の固定測定先へ約 10 MB を送信して求める実効速度 | バックアップやクラウド送信の目安になります。 |
+| 平均 RTT | Cloudflare DNS、Google Public DNS、Quad9 DNS への ping 往復時間 | 小さいほど応答性の目安になります。Web会議や VPN の遅延確認に使えます。 |
+| RTT のばらつき | ping の mdev | 値が大きい場合は、応答時間が不安定な可能性があります。 |
+| パケット損失 | 送信した ping に対して応答がなかった割合 | 損失が継続する場合は、回線、物理リンク、上位機器を確認してください。 |
+| WAN リンク状態 | 既定経路、carrier、MTU、リンク速度、受信・送信エラー、破棄の累計値 | エラーや破棄の増加傾向は、物理リンクや上位機器を調べる材料になります。 |
+
+画面の「大きな異常なし」「要確認」は、固定の参照先に対する一回の測定を整理するための表示です。ISP障害や契約速度を確定する判定ではありません。
 
 ### ファイアウォール
 
@@ -110,6 +125,24 @@ ss -lunp | grep -E ':(53|67)\b'
 - Unban 操作
 - Ban IP の ignore IP への移動
 
+### AI防御（Jev）
+
+「AI防御」画面は、WAN の既定インターフェースに対応する firewalld ゾーンから、現在公開しているサービス、明示ポート、ポート転送を取得します。直近ログに認証失敗、探索的な HTTP 要求、または繰り返しの記録がある送信元だけを候補にします。direct ルールや任意の nftables ルールは自動列挙しません。
+
+Jev へ送る内容は、`source-001` のような匿名候補 ID、イベント種別の件数、対象ポートだけです。IP アドレス、API キー、元のログ行、利用者名、要求パス、認証情報は SyncA UTM の外部へ送信しません。
+
+初期状態は無効です。Jev API キーが未設定の場合、確認も遮断も行いません。有効化するときは、次の手順で API キーを設定します。
+
+1. [Typesafe AI Console](https://console.typesafe.ai/) にサインインします。
+2. ダッシュボードで API キーを発行し、作成直後に安全な場所へ控えます。
+3. 「AI防御」画面に API キーを貼り付け、有効化して設定を保存します。
+
+API キーは `/etc/server-gui/ai_defense.json` に権限 `0600` で保存し、画面には再表示しません。既定の実行間隔は 8 時間ごとで、1 日 3 回です。画面から 1 ～ 168 時間ごとに変更できます。systemd の `server-gui-ai-defense.timer` は 1 時間ごとに起動し、設定した間隔に達した場合だけ `server-gui-ai-defense.service` を実行します。
+
+遮断は安全側で判断します。公開ポートに対する不審候補について、Jev が `benign` と判定し、確信度が `0.85` 以上かつ悪性確率が `0` の場合だけ遮断しません。`malicious`、`insufficient`、低い確信度、または悪性確率が 0 より大きい結果は、専用の `synca-ai-defense-v4` または `synca-ai-defense-v6` IP セットに追加して遮断します。Jev API の通信失敗や応答形式の不正時は、判定結果を検証できないため自動遮断しません。
+
+遮断前には `drop` ゾーンの対象が `DROP` であることを確認し、firewalld の再読込は行いません。遮断した IP アドレスは「AI防御」の一覧から手動で解除できます。解除時は、現在の firewalld 設定と永続設定の両方から削除します。
+
 ### バックアップ
 
 - GUI からのアプライアンスバックアップ
@@ -186,6 +219,26 @@ DHCPへ切り替える場合は、上位側でDHCP OFFER、デフォルトゲー
 アプライアンスバックアップ、`evidence/`、`/etc/server-gui`、WireGuard 鍵、IPsec PSK、DDNS 認証情報、SMTP 認証情報、Let's Encrypt 秘密鍵、NetworkManager 接続秘密情報、サーバーログはコミットしません。
 
 `.gitignore` は生成 ISO と一般的な秘密情報ファイルを除外します。内部 ISO 専用ファイルはリポジトリ外、または ignore 済みローカルパスで管理します。
+
+## 今回の検証
+
+開発環境では、次の確認を実行しました。
+
+```bash
+python scripts/test-wan-quality-ai-defense.py
+python -m py_compile \
+  payload/server-gui/server_gui/modules/wan_quality.py \
+  payload/server-gui/server_gui/modules/ai_defense.py \
+  payload/server-gui/server_gui/app.py \
+  payload/server-gui/bin/ai-defense-check
+bash -n iso/payload/synca-install.sh
+bash -n iso/payload/synca-firstboot.sh
+bash -n scripts/bootstrap-synca-testhost.sh
+```
+
+回帰テストでは、ping 結果の解析、WAN品質の状態整理、Jev に IP アドレスを含めない要求生成、Jev 応答形式の検証、安全側の遮断条件、アプリケーション登録、ISO インストーラと初回起動時の timer 有効化、firewalld を再読込しない遮断経路を確認します。テンプレートの JavaScript 構文と差分の空白エラーも確認しました。
+
+実機の WAN 回線測定、実際の Jev API 呼出し、実際の firewalld IP セットへの追加・解除、AlmaLinux 9.8 / 8.10 の ISO 起動試験は未実施です。これらは公開サービスや回線に影響するため、検証環境で API キーとテスト用送信元を用意して確認してください。
 
 ## 開発とコミット
 

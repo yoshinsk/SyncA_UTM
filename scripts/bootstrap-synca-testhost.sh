@@ -527,6 +527,35 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+    cat > /etc/systemd/system/server-gui-ai-defense.service <<'UNIT'
+[Unit]
+Description=server-gui Jev AI defense check
+After=network-online.target firewalld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/server-gui
+Environment=SERVER_GUI_CONFIG_DIR=/etc/server-gui
+ExecStart=/opt/server-gui/bin/ai-defense-check
+StandardOutput=journal
+StandardError=journal
+UNIT
+
+    cat > /etc/systemd/system/server-gui-ai-defense.timer <<'UNIT'
+[Unit]
+Description=Run server-gui Jev AI defense check periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
     cat > /etc/systemd/system/synca-upnp.service <<'UNIT'
 [Unit]
 Description=SyncA UTM UPnP/NAT-PMP gateway
@@ -621,7 +650,7 @@ start_services() {
     # Do not start dnsmasq DHCP until LAN IP migration is intentionally run.
     systemctl daemon-reload
     systemctl enable --now server-gui nginx wgui-worker
-    systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer
+    systemctl enable --now server-gui-ddns.timer server-gui-geoip.timer server-gui-backup.timer server-gui-update-check.timer server-gui-ai-defense.timer
     systemctl disable --now synca-upnp.service >/dev/null 2>&1 || true
     systemctl disable --now radvd.service >/dev/null 2>&1 || true
     systemctl disable --now frr.service >/dev/null 2>&1 || true

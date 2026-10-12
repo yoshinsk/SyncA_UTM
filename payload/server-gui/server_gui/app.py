@@ -13,6 +13,7 @@ from flask import Flask, redirect, session, url_for
 
 from .auth import auth_bp, login_required
 from .modules import admin as admin_module
+from .modules import ai_defense as ai_defense_module
 from .modules import backup as backup_module
 from .modules import certs as certs_module
 from .modules import central_sso as central_sso_module
@@ -30,6 +31,7 @@ from .modules import sophos_import as sophos_import_module
 from .modules import system as system_module
 from .modules import upnp as upnp_module
 from .modules import wireguard as wireguard_module
+from .modules import wan_quality as wan_quality_module
 
 
 def create_app(config_dir: str | None = None) -> Flask:
@@ -60,6 +62,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     app.register_blueprint(auth_bp)
     system_module.register(app)
     network_module.register(app)
+    wan_quality_module.register(app)
     firewall_module.register(app)
     geoip_module.register(app)
     dns_module.register(app)
@@ -71,6 +74,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     nginx_module.register(app)
     certs_module.register(app)
     fail2ban_module.register(app)
+    ai_defense_module.register(app)
     ddns_module.register(app)
     backup_module.register(app)
     sophos_import_module.register(app)

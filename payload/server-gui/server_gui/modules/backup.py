@@ -596,6 +596,7 @@ def _post_restore_apply_script(sections: dict[str, bool], ts: str) -> str:
             "enable_now server-gui-geoip.timer",
             "enable_now server-gui-backup.timer",
             "enable_now server-gui-update-check.timer",
+            "enable_now server-gui-ai-defense.timer",
             "enable_now synca-central-report.timer",
             "enable_now synca-central-backup.timer",
         ])
