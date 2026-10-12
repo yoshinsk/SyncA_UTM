@@ -2,19 +2,28 @@
 payload/server-gui/server_gui/templates/base.html
 
 SyncA UTM の共通レイアウト。デスクトップ側とハンバーガーメニュー側で、
-同じ機能分類とリンク順を表示する。
+同じ機能分類、開閉状態、リンク順を表示する。
 -#}
 {%- macro render_navigation(groups, navigation_id) -%}
     {#
     同じメニュー定義をデスクトップとモバイルに描画する。リンクを二重定義
-    すると、機能追加時に片方だけの順序や分類がずれるため、ここで統一する。
+    すると、機能追加時に片方だけの順序、分類、開閉動作がずれるため、
+    ここで統一する。
     #}
     {% for group_id, group_label, group_icon, tabs in groups %}
-    <div class="app-nav-group" role="group" aria-labelledby="{{ navigation_id }}-{{ group_id }}-label">
-        <div class="app-nav-group-title" id="{{ navigation_id }}-{{ group_id }}-label">
+        {# 現在の画面が属するカテゴリだけを初期状態で展開する。 #}
+        {% set group_state = namespace(is_open=false) %}
+        {% for tab_id, endpoint, icon, label in tabs %}
+            {% if active_tab == tab_id %}
+                {% set group_state.is_open = true %}
+            {% endif %}
+        {% endfor %}
+    <details class="app-nav-group" id="{{ navigation_id }}-{{ group_id }}" {% if group_state.is_open %}open{% endif %}>
+        <summary class="app-nav-group-toggle">
             <i class="bi {{ group_icon }}" aria-hidden="true"></i>
             <span>{{ group_label }}</span>
-        </div>
+            <i class="bi bi-chevron-down app-nav-group-chevron" aria-hidden="true"></i>
+        </summary>
         <div class="app-nav-group-links">
             {% for tab_id, endpoint, icon, label in tabs %}
                 {% if endpoint %}
@@ -32,7 +41,7 @@ SyncA UTM の共通レイアウト。デスクトップ側とハンバーガー�
                 {% endif %}
             {% endfor %}
         </div>
-    </div>
+    </details>
     {% endfor %}
 {%- endmacro -%}
 <!DOCTYPE html>
