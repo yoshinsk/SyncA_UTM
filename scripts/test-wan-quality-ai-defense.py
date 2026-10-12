@@ -8,6 +8,7 @@ validation logic, installer timer wiring, and the fail-open firewall contract.
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import re
 import unittest
@@ -86,6 +87,13 @@ class AiDefenseTests(unittest.TestCase):
             {
                 "JevResponseError",
                 "_build_jev_request",
+                "_build_candidates",
+                "_contains_port",
+                "_first_public_ip",
+                "_normalise_port_tokens",
+                "_parse_forward_ports",
+                "_port_sort_key",
+                "_public_ip",
                 "_validate_jev_response",
                 "_requires_review",
                 "_meets_local_block_guard",
@@ -93,6 +101,10 @@ class AiDefenseTests(unittest.TestCase):
             },
         )
         cls.logic["CLEAR_BENIGN_CONFIDENCE_MINIMUM"] = 0.85
+        cls.logic["MAX_CANDIDATES"] = 20
+        cls.logic["PORT_RE"] = re.compile(r"^(\d{1,5}(?:-\d{1,5})?)/(tcp|udp|sctp|dccp)$", re.IGNORECASE)
+        cls.logic["IP_TOKEN_RE"] = re.compile(r"(?:\bfrom\s+|\brhost=|\bSRC=|\brate limit hit for\s+)([0-9A-Fa-f:.]+)")
+        cls.logic["ipaddress"] = ipaddress
 
     def test_jev_request_never_contains_source_ip(self) -> None:
         candidates = [{
@@ -139,6 +151,22 @@ class AiDefenseTests(unittest.TestCase):
         benign = {"choice": "benign", "confidence": 0.90, "probabilities": {"malicious": 0.0}}
         self.assertFalse(self.logic["_should_block"](candidate, benign))
         self.assertFalse(self.logic["_meets_local_block_guard"]({"ssh_failed_auth": 1}, 1))
+
+    def test_open_port_ranges_remain_in_scope(self) -> None:
+        forward = self.logic["_parse_forward_ports"]("port=10000-10100:proto=tcp:toport=443:toaddr=192.0.2.10")
+        self.assertEqual(forward, ["10000-10100/tcp"])
+        records = {
+            "8.8.4.4": {
+                "events": {"firewall_logged_packet": 3},
+                "ports": {"10042/tcp"},
+            }
+        }
+        candidates = self.logic["_build_candidates"](records, {"10000-10100/tcp"})
+        self.assertEqual(candidates[0]["target_ports"], ["10042/tcp"])
+
+    def test_gui_rate_limit_source_is_extracted_locally(self) -> None:
+        source = self.logic["_first_public_ip"]("rate limit hit for 8.8.4.4")
+        self.assertEqual(source, "8.8.4.4")
 
 
 class WiringTests(unittest.TestCase):
