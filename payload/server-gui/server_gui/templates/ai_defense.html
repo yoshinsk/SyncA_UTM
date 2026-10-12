@@ -225,8 +225,14 @@ function renderExposure(exposure) {
     } else if (!ports.length) {
         target.innerHTML = '<span class="text-secondary">現在、判定対象となる公開ポートは検出されていません。</span>';
     } else {
-        const services = (exposure.services || []).map(item => `<code>${escapeHtml(item)}</code>`).join(', ') || '-';
-        target.innerHTML = `WAN IF: <code>${escapeHtml(exposure.device || '-')}</code> / zone: <code>${escapeHtml(exposure.zone || '-')}</code><br>公開ポート: ${ports.map(item => `<code>${escapeHtml(item)}</code>`).join(' ')}<br>サービス: ${services}`;
+        const zones = (exposure.zones || []).map(item => {
+            const services = (item.services || []).map(value => `<code>${escapeHtml(value)}</code>`).join(', ') || '-';
+            const zonePorts = (item.ports || []).map(value => `<code>${escapeHtml(value)}</code>`).join(' ') || '-';
+            const scope = item.scope === 'source' ? '送信元条件' : 'WAN インターフェース';
+            return `<li><code>${escapeHtml(item.name || '-')}</code>（${scope}）: ${zonePorts}<br>サービス: ${services}</li>`;
+        }).join('');
+        const excluded = (exposure.excluded_zones || []).map(value => `<code>${escapeHtml(value)}</code>`).join(' ');
+        target.innerHTML = `WAN IF: <code>${escapeHtml(exposure.device || '-')}</code> / 基準ゾーン: <code>${escapeHtml(exposure.zone || '-')}</code><br>公開ポート: ${ports.map(item => `<code>${escapeHtml(item)}</code>`).join(' ')}${zones ? `<div class="mt-2">判定に含めたゾーン:<ul class="mb-0 ps-3">${zones}</ul></div>` : ''}${excluded ? `<div class="text-secondary mt-2">除外した遮断ゾーン: ${excluded}</div>` : ''}`;
     }
     document.getElementById('exposure-limitation').textContent = exposure.limitation || '';
 }

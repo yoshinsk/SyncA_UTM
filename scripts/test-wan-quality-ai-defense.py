@@ -36,7 +36,7 @@ def _load_selected_definitions(path: Path, names: set[str]) -> dict[str, Any]:
         node for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names
     ]
-    namespace: dict[str, Any] = {"re": re, "Any": Any}
+    namespace: dict[str, Any] = {"re": re, "Any": Any, "ipaddress": ipaddress, "json": json}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
 
@@ -86,14 +86,28 @@ class AiDefenseTests(unittest.TestCase):
             AI_MODULE,
             {
                 "JevResponseError",
+                "_active_zone_bindings",
                 "_build_jev_request",
                 "_build_candidates",
                 "_contains_port",
+                "_discover_open_ports",
+                "_drop_zone_is_drop",
+                "_empty_exposure",
+                "_firewall",
+                "_is_terminal_deny_target",
                 "_first_public_ip",
+                "_merge_zone_exposure",
                 "_normalise_port_tokens",
+                "_parse_active_zone_bindings",
                 "_parse_forward_ports",
+                "_parse_zone_target",
                 "_port_sort_key",
                 "_public_ip",
+                "_read_zone_exposure",
+                "_runtime_zone_target",
+                "_select_exposure_zones",
+                "_service_port_tokens",
+                "_source_bindings_can_reach_wan",
                 "_validate_jev_response",
                 "_requires_review",
                 "_meets_local_block_guard",
@@ -103,6 +117,7 @@ class AiDefenseTests(unittest.TestCase):
         cls.logic["CLEAR_BENIGN_CONFIDENCE_MINIMUM"] = 0.85
         cls.logic["MAX_CANDIDATES"] = 20
         cls.logic["PORT_RE"] = re.compile(r"^(\d{1,5}(?:-\d{1,5})?)/(tcp|udp|sctp|dccp)$", re.IGNORECASE)
+        cls.logic["SERVICE_RE"] = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
         cls.logic["IP_TOKEN_RE"] = re.compile(r"(?:\bfrom\s+|\brhost=|\bSRC=|\brate limit hit for\s+)([0-9A-Fa-f:.]+)")
         cls.logic["ipaddress"] = ipaddress
 
@@ -163,6 +178,80 @@ class AiDefenseTests(unittest.TestCase):
         }
         candidates = self.logic["_build_candidates"](records, {"10000-10100/tcp"})
         self.assertEqual(candidates[0]["target_ports"], ["10042/tcp"])
+
+    def test_source_bound_allow_zone_contributes_its_open_ports(self) -> None:
+        """Source-zone allow lists must not disappear behind an empty WAN zone."""
+
+        class Result:
+            def __init__(self, stdout: str, ok: bool = True) -> None:
+                self.stdout = stdout
+                self.ok = ok
+
+        calls: list[tuple[str, ...]] = []
+        responses = {
+            ("ip", "-j", "route", "get", "1.1.1.1"): Result('[{"dev": "ens3"}]'),
+            ("firewall-cmd", "--get-zone-of-interface=ens3"): Result("public\n"),
+            (
+                "firewall-cmd",
+                "--get-active-zones",
+            ): Result(
+                "drop\n"
+                "  sources: ipset:cn-ipv4\n"
+                "japan\n"
+                "  sources: ipset:jp-ipv4\n"
+                "public\n"
+                "  interfaces: ens3\n"
+                "trusted\n"
+                "  sources: 192.168.1.0/24\n"
+            ),
+            ("firewall-cmd", "--zone=drop", "--list-all"): Result("drop\n  target: DROP\n"),
+            ("firewall-cmd", "--zone=japan", "--list-all"): Result("japan\n  target: default\n"),
+            ("firewall-cmd", "--zone=public", "--list-services"): Result(""),
+            ("firewall-cmd", "--zone=public", "--list-ports"): Result(""),
+            ("firewall-cmd", "--zone=public", "--list-forward-ports"): Result(""),
+            ("firewall-cmd", "--zone=japan", "--list-services"): Result("https ssh\n"),
+            ("firewall-cmd", "--zone=japan", "--list-ports"): Result("4444/tcp\n"),
+            (
+                "firewall-cmd",
+                "--zone=japan",
+                "--list-forward-ports",
+            ): Result("port=10000-10100:proto=udp:toport=10000-10100:toaddr=192.0.2.10\n"),
+            ("firewall-cmd", "--permanent", "--service=https", "--get-ports"): Result("443/tcp\n"),
+            ("firewall-cmd", "--permanent", "--service=ssh", "--get-ports"): Result("22/tcp\n"),
+        }
+
+        def fake_run(argv: list[str], timeout: int = 0) -> Result:
+            key = tuple(argv)
+            calls.append(key)
+            return responses.get(key, Result("", ok=False))
+
+        self.logic["run"] = fake_run
+        exposure = self.logic["_discover_open_ports"]()
+        self.assertEqual(exposure["zone"], "public")
+        self.assertEqual([item["name"] for item in exposure["zones"]], ["public", "japan"])
+        self.assertEqual(exposure["excluded_zones"], ["drop"])
+        self.assertEqual(exposure["ports"], ["22/tcp", "443/tcp", "4444/tcp", "10000-10100/udp"])
+        self.assertIn(("firewall-cmd", "--permanent", "--service=ssh", "--get-ports"), calls)
+
+    def test_drop_target_guard_reads_runtime_and_saved_zone_views(self) -> None:
+        """The block guard must work on firewalld builds with permanent-only get-target."""
+
+        class Result:
+            def __init__(self, stdout: str) -> None:
+                self.stdout = stdout
+                self.ok = True
+
+        calls: list[tuple[str, ...]] = []
+
+        def fake_run(argv: list[str], timeout: int = 0) -> Result:
+            calls.append(tuple(argv))
+            return Result("drop\n  target: DROP\n")
+
+        self.logic["run"] = fake_run
+        self.assertTrue(self.logic["_drop_zone_is_drop"](False))
+        self.assertTrue(self.logic["_drop_zone_is_drop"](True))
+        self.assertIn(("firewall-cmd", "--zone=drop", "--list-all"), calls)
+        self.assertIn(("firewall-cmd", "--permanent", "--zone=drop", "--list-all"), calls)
 
     def test_gui_rate_limit_source_is_extracted_locally(self) -> None:
         source = self.logic["_first_public_ip"]("rate limit hit for 8.8.4.4")
