@@ -1,0 +1,278 @@
+{# payload/server-gui/server_gui/templates/wan_quality.html - WAN 回線品質診断の画面 #}
+{% extends "base.html" %}
+{% block title %}WAN 回線品質 — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-activity text-primary"></i> WAN 回線品質
+    </h1>
+    <div class="d-flex gap-2 align-items-center">
+        <span id="quality-badge"></span>
+        <button id="run-button" class="btn btn-primary btn-sm" onclick="runMeasurement()">
+            <i class="bi bi-play-fill"></i> 今すぐ測定
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()" title="再読み込み">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-info small" role="alert">
+    <i class="bi bi-info-circle-fill me-1"></i>
+    この診断は現在の IPv4 既定経路を使い、下り約 20 MB、上り約 10 MB の通信を発生させます。回線の混雑、測定先、宅内ネットワークの利用状況で結果は変わるため、契約速度や障害箇所を確定するものではありません。
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small">下り速度</div>
+                <div id="download-speed" class="fs-3 fw-semibold">-</div>
+                <div id="download-detail" class="small text-secondary">未測定</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small">上り速度</div>
+                <div id="upload-speed" class="fs-3 fw-semibold">-</div>
+                <div id="upload-detail" class="small text-secondary">未測定</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small">既定 WAN 経路</div>
+                <div id="route-device" class="fs-5 fw-semibold font-monospace">-</div>
+                <div id="route-detail" class="small text-secondary">未測定</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <div class="text-secondary small">測定時刻</div>
+                <div id="measured-at" class="small fw-semibold">未測定</div>
+                <div id="quality-reason" class="small text-secondary mt-1"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-signpost-2 text-primary"></i><strong>代表測定先への遅延</strong>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>測定先</th>
+                        <th>平均 RTT</th>
+                        <th>最小 / 最大</th>
+                        <th>ばらつき</th>
+                        <th>パケット損失</th>
+                        <th>応答</th>
+                    </tr>
+                </thead>
+                <tbody id="latency-body">
+                    <tr><td colspan="6" class="text-secondary small p-3">まだ測定していません。</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-ethernet text-primary"></i><strong>WAN リンク状態</strong>
+            </div>
+            <div class="card-body small" id="interface-detail">
+                未測定
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-journal-text text-primary"></i><strong>計測項目の説明</strong>
+            </div>
+            <div class="card-body small">
+                <dl class="row mb-0">
+                    <dt class="col-sm-4">下り / 上り速度</dt>
+                    <dd class="col-sm-8">Cloudflare の固定測定先へ実際に転送したデータ量から求める実効速度です。契約上の最大速度ではありません。</dd>
+                    <dt class="col-sm-4">平均 RTT</dt>
+                    <dd class="col-sm-8">小さなパケットが往復する平均時間です。Web 会議や VPN など、応答性が必要な通信の目安になります。</dd>
+                    <dt class="col-sm-4">ばらつき</dt>
+                    <dd class="col-sm-8">RTT の揺れを示す mdev です。値が大きい場合は、通信の応答が不安定な可能性があります。</dd>
+                    <dt class="col-sm-4">パケット損失</dt>
+                    <dd class="col-sm-8">送信した ping に対して応答がなかった割合です。損失が続く場合は回線や経路の状態を確認してください。</dd>
+                    <dt class="col-sm-4">リンクカウンター</dt>
+                    <dd class="col-sm-8">WAN インターフェースが報告するエラーと破棄の累計値です。増加傾向は物理リンクや上位機器の確認材料になります。</dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex align-items-center gap-2">
+        <i class="bi bi-clock-history text-primary"></i><strong>直近の測定履歴</strong>
+        <span class="small text-secondary">最大 20 件を装置内に保存します。</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>時刻</th>
+                        <th>状態</th>
+                        <th>下り</th>
+                        <th>上り</th>
+                        <th>平均 RTT</th>
+                        <th>損失</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    <tr><td colspan="6" class="text-secondary small p-3">読み込み中</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function fmtMbps(item) {
+    return item && item.ok && Number.isFinite(item.mbps) ? `${item.mbps.toFixed(2)} Mbps` : '-';
+}
+
+function fmtMs(value) {
+    return Number.isFinite(value) ? `${value.toFixed(2)} ms` : '-';
+}
+
+function fmtCount(value) {
+    return Number.isFinite(value) ? value.toLocaleString('ja-JP') : '-';
+}
+
+function stateBadge(quality) {
+    const state = quality && quality.state;
+    const styles = {
+        good: 'bg-success-subtle text-success-emphasis',
+        warning: 'bg-warning-subtle text-warning-emphasis',
+        error: 'bg-danger-subtle text-danger-emphasis',
+        unavailable: 'bg-secondary-subtle text-secondary-emphasis',
+    };
+    const label = quality && quality.label ? quality.label : '未測定';
+    return `<span class="badge ${styles[state] || styles.unavailable}">${escapeHtml(label)}</span>`;
+}
+
+function renderResult(result) {
+    const quality = result || {};
+    document.getElementById('quality-badge').innerHTML = stateBadge(quality.quality);
+    document.getElementById('download-speed').textContent = fmtMbps(quality.download);
+    document.getElementById('upload-speed').textContent = fmtMbps(quality.upload);
+    document.getElementById('download-detail').textContent = quality.download && quality.download.ok
+        ? `${fmtCount(quality.download.bytes)} bytes / ${quality.download.duration_seconds} 秒`
+        : (quality.download && quality.download.error) || '未測定';
+    document.getElementById('upload-detail').textContent = quality.upload && quality.upload.ok
+        ? `${fmtCount(quality.upload.bytes)} bytes / ${quality.upload.duration_seconds} 秒`
+        : (quality.upload && quality.upload.error) || '未測定';
+    document.getElementById('route-device').textContent = (quality.route && quality.route.device) || '-';
+    document.getElementById('route-detail').textContent = quality.route && quality.route.device
+        ? `gateway: ${quality.route.gateway || '-'} / source: ${quality.route.source || '-'}`
+        : ((quality.route && quality.route.error) || '未測定');
+    document.getElementById('measured-at').textContent = quality.measured_at || '未測定';
+    document.getElementById('quality-reason').textContent = (quality.quality && quality.quality.reason) || '';
+    renderLatency(quality.latency || []);
+    renderInterface(quality.interface || {});
+}
+
+function renderLatency(items) {
+    const body = document.getElementById('latency-body');
+    if (!items.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">まだ測定していません。</td></tr>';
+        return;
+    }
+    body.innerHTML = items.map(item => `
+        <tr>
+            <td><strong>${escapeHtml(item.name || '-')}</strong><div class="small text-secondary font-monospace">${escapeHtml(item.address || '')}</div></td>
+            <td>${fmtMs(item.avg_ms)}</td>
+            <td>${fmtMs(item.min_ms)} / ${fmtMs(item.max_ms)}</td>
+            <td>${fmtMs(item.mdev_ms)}</td>
+            <td>${Number.isFinite(item.packet_loss_percent) ? `${item.packet_loss_percent.toFixed(1)} %` : '-'}</td>
+            <td>${item.ok ? '<span class="text-success">応答あり</span>' : `<span class="text-danger">${escapeHtml(item.error || '応答なし')}</span>`}</td>
+        </tr>`).join('');
+}
+
+function renderInterface(item) {
+    const target = document.getElementById('interface-detail');
+    if (!item.available) {
+        target.textContent = '既定 WAN インターフェースの情報を取得できませんでした。';
+        return;
+    }
+    target.innerHTML = `
+        <div class="row g-2">
+            <div class="col-sm-6">インターフェース: <code>${escapeHtml(item.device || '-')}</code></div>
+            <div class="col-sm-6">状態: <code>${escapeHtml(item.operstate || '-')}</code> / carrier: <code>${escapeHtml(item.carrier || '-')}</code></div>
+            <div class="col-sm-6">MTU: <code>${fmtCount(item.mtu)}</code></div>
+            <div class="col-sm-6">リンク速度: <code>${item.speed_mbps && item.speed_mbps > 0 ? `${fmtCount(item.speed_mbps)} Mbps` : '-'}</code> / duplex: <code>${escapeHtml(item.duplex || '-')}</code></div>
+            <div class="col-sm-6">受信エラー / 破棄: <code>${fmtCount(item.rx_errors)} / ${fmtCount(item.rx_dropped)}</code></div>
+            <div class="col-sm-6">送信エラー / 破棄: <code>${fmtCount(item.tx_errors)} / ${fmtCount(item.tx_dropped)}</code></div>
+        </div>`;
+}
+
+function renderHistory(history) {
+    const body = document.getElementById('history-body');
+    if (!history.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">保存された測定結果はありません。</td></tr>';
+        return;
+    }
+    body.innerHTML = history.map(item => {
+        const pings = item.latency || [];
+        const response = pings.filter(p => p.ok);
+        const avg = response.length ? response.reduce((sum, p) => sum + (p.avg_ms || 0), 0) / response.length : null;
+        const loss = response.length ? Math.max(...response.map(p => p.packet_loss_percent || 0)) : null;
+        return `<tr>
+            <td class="small">${escapeHtml(item.measured_at || '-')}</td>
+            <td>${stateBadge(item.quality)}</td>
+            <td>${fmtMbps(item.download)}</td>
+            <td>${fmtMbps(item.upload)}</td>
+            <td>${fmtMs(avg)}</td>
+            <td>${Number.isFinite(loss) ? `${loss.toFixed(1)} %` : '-'}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function refresh() {
+    const data = await api.get('/wan-quality/api/status');
+    if (!data) return;
+    renderResult(data.last_result);
+    renderHistory(data.history || []);
+}
+
+async function runMeasurement() {
+    const message = '現在の WAN 回線で下り約 20 MB、上り約 10 MB を通信して測定します。開始しますか？';
+    if (!confirm(message)) return;
+    const button = document.getElementById('run-button');
+    button.disabled = true;
+    try {
+        const result = await api.send('/wan-quality/api/run', 'POST', {});
+        if (!result) return;
+        renderResult(result);
+        toast(result.ok ? 'WAN 回線品質の測定を完了しました。' : (result.quality && result.quality.reason) || '測定先に到達できませんでした。', !result.ok);
+        await refresh();
+    } finally {
+        button.disabled = false;
+    }
+}
+
+refresh();
+</script>
+{% endblock %}

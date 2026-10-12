@@ -37,7 +37,7 @@ run_cmd fail2ban-status bash -lc 'fail2ban-client status 2>/dev/null || true; fo
 run_cmd fail2ban-systemd bash -lc 'systemctl cat fail2ban.service 2>/dev/null || true; systemctl status fail2ban --no-pager 2>/dev/null || true'
 run_cmd nginx-test bash -lc 'nginx -T 2>/dev/null || nginx -t 2>&1 || true'
 run_cmd server-gui-api-files bash -lc 'find /etc/server-gui /var/lib/server-gui /var/log/server-gui -maxdepth 4 -type f 2>/dev/null | sort || true'
-run_cmd server-gui-systemd bash -lc 'systemctl cat server-gui.service server-gui-ddns.service server-gui-ddns.timer server-gui-geoip.service server-gui-geoip.timer server-gui-update-check.service server-gui-update-check.timer 2>/dev/null || true'
+run_cmd server-gui-systemd bash -lc 'systemctl cat server-gui.service server-gui-ddns.service server-gui-ddns.timer server-gui-geoip.service server-gui-geoip.timer server-gui-update-check.service server-gui-update-check.timer server-gui-ai-defense.service server-gui-ai-defense.timer 2>/dev/null || true'
 run_cmd wgui-systemd bash -lc 'systemctl cat wgui.service wgui.path wgui-worker.service wg-quick@wg0.service 2>/dev/null || true'
 run_cmd python-freeze bash -lc '/opt/server-gui/venv/bin/pip freeze 2>/dev/null || true'
 run_cmd wireguard-ui-version bash -lc '/opt/wireguard/wireguard-ui --version 2>/dev/null || strings /opt/wireguard/wireguard-ui 2>/dev/null | grep -Ei "wireguard-ui|version" | head -20 || true'

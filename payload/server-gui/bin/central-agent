@@ -54,6 +54,7 @@ SERVICES = [
     "server-gui-ddns.timer",
     "server-gui-geoip.timer",
     "server-gui-update-check.timer",
+    "server-gui-ai-defense.timer",
 ]
 
 BACKUP_PATHS = [
@@ -71,6 +72,8 @@ BACKUP_PATHS = [
     "/etc/systemd/system/server-gui-ddns.timer",
     "/etc/systemd/system/server-gui-update-check.service",
     "/etc/systemd/system/server-gui-update-check.timer",
+    "/etc/systemd/system/server-gui-ai-defense.service",
+    "/etc/systemd/system/server-gui-ai-defense.timer",
     "/etc/systemd/system/synca-central-report.service",
     "/etc/systemd/system/synca-central-report.timer",
     "/etc/systemd/system/synca-central-backup.service",

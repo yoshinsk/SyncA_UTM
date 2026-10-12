@@ -1,0 +1,310 @@
+{# payload/server-gui/server_gui/templates/ai_defense.html - Jev を利用した AI 防御の画面 #}
+{% extends "base.html" %}
+{% block title %}AI 防御 — SyncA UTM{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h1 class="h3 mb-0 d-flex align-items-center gap-2">
+        <i class="bi bi-shield-exclamation text-primary"></i> AI 防御
+    </h1>
+    <div class="d-flex gap-2 align-items-center">
+        <span id="defense-badge"></span>
+        <button id="check-now-button" class="btn btn-primary btn-sm" onclick="checkNow()">
+            <i class="bi bi-shield-check"></i> 今すぐ確認
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="refresh()" title="再読み込み">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-warning small" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+    現在公開しているポートへの不審なアクセス候補について、Jev が不正の可能性を否定できない場合は安全側で遮断します。重要な接続元は遮断一覧を定期的に確認し、必要に応じて手動で解除してください。
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-gear text-primary"></i><strong>有効化と実行間隔</strong>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-7">
+                        <label for="api-key" class="form-label">Jev API キー</label>
+                        <input type="password" class="form-control font-monospace" id="api-key" autocomplete="new-password" placeholder="設定済みのキーは表示しません">
+                        <div id="api-key-status" class="form-text">未設定</div>
+                    </div>
+                    <div class="col-md-5">
+                        <label for="interval-hours" class="form-label">実行間隔</label>
+                        <div class="input-group">
+                            <input type="number" class="form-control" id="interval-hours" min="1" max="168" step="1" value="8">
+                            <span class="input-group-text">時間ごと</span>
+                        </div>
+                        <div class="form-text">既定は 8 時間ごとで、1 日 3 回です。</div>
+                    </div>
+                    <div class="col-12 d-flex flex-wrap gap-3 align-items-center">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="enabled">
+                            <label class="form-check-label" for="enabled">AI 防御を有効にする</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="clear-api-key">
+                            <label class="form-check-label" for="clear-api-key">保存済みの API キーを削除する</label>
+                        </div>
+                        <button class="btn btn-primary btn-sm ms-md-auto" onclick="saveSettings()">
+                            <i class="bi bi-save"></i> 設定を保存
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-5">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-key text-primary"></i><strong>Jev API キーの取得</strong>
+            </div>
+            <div class="card-body small">
+                <ol class="mb-2 ps-3">
+                    <li><a href="https://console.typesafe.ai/" target="_blank" rel="noopener">Typesafe AI Console</a> にサインインします。</li>
+                    <li>ダッシュボードで API キーを発行し、作成直後に安全な場所へ控えます。</li>
+                    <li>この画面に貼り付けて有効化し、設定を保存します。</li>
+                </ol>
+                <p class="mb-0 text-secondary">API キーが未設定の場合、この機能は確認も遮断も行いません。キーは装置内の <code>/etc/server-gui/ai_defense.json</code> に権限 <code>0600</code> で保存され、画面には再表示しません。</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-5">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-clock-history text-primary"></i><strong>実行状態</strong>
+            </div>
+            <div class="card-body small">
+                <dl class="row mb-0">
+                    <dt class="col-sm-5">systemd timer</dt>
+                    <dd class="col-sm-7" id="timer-status">読み込み中</dd>
+                    <dt class="col-sm-5">前回の確認</dt>
+                    <dd class="col-sm-7" id="last-completed">-</dd>
+                    <dt class="col-sm-5">前回の結果</dt>
+                    <dd class="col-sm-7" id="last-result">-</dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-eye text-primary"></i><strong>確認対象の公開ポート</strong>
+            </div>
+            <div class="card-body small">
+                <div id="exposure-summary">読み込み中</div>
+                <div id="exposure-limitation" class="text-secondary mt-2"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-file-earmark-lock text-primary"></i><strong>Jev に渡す情報</strong>
+            </div>
+            <div class="card-body small">
+                <p class="mb-2">候補を <code>source-001</code> のような匿名 ID に置き換え、イベント種別の件数と現在公開している対象ポートだけを送ります。</p>
+                <p class="mb-0 text-secondary">IP アドレス、API キー、元のログ行、利用者名、要求パス、認証情報は Jev に送信しません。</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white d-flex align-items-center gap-2">
+                <i class="bi bi-shield-lock text-primary"></i><strong>遮断の条件</strong>
+            </div>
+            <div class="card-body small">
+                <p class="mb-2">遮断対象は、現在公開しているポートへの認証失敗、探索的な要求、または繰り返しの記録がある候補に限ります。Jev が <code>benign</code> と判定し、確信度が <code>0.85</code> 以上、悪性確率が <code>0</code> の場合だけ遮断しません。</p>
+                <p class="mb-0 text-secondary"><code>malicious</code>、<code>insufficient</code>、低い確信度、または悪性確率が 0 より大きい結果は遮断します。遮断には専用 IP セットを使い、firewalld の再読込は行いません。<code>drop</code> ゾーンの対象が <code>DROP</code> であることを確認できない場合は遮断しません。</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-ban text-danger me-1"></i><strong>AI 防御による遮断一覧</strong></span>
+        <span class="small text-secondary">解除すると、現在の設定と再起動後の設定の両方から削除します。</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>IP アドレス</th>
+                        <th>遮断時刻</th>
+                        <th>Jev 判定</th>
+                        <th>ローカルイベント</th>
+                        <th>対象ポート</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="blocked-body">
+                    <tr><td colspan="6" class="text-secondary small p-3">読み込み中</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let currentDefenseStatus = null;
+
+function yesNo(value, yes, no) {
+    return value ? yes : no;
+}
+
+function eventLabel(name) {
+    const labels = {
+        ssh_invalid_user: 'SSH の無効な利用者名',
+        ssh_failed_auth: 'SSH の認証失敗',
+        gui_failed_auth: '管理 GUI の認証失敗',
+        gui_rate_limit: '管理 GUI の試行制限',
+        http_suspicious_path: 'Web の探索的な要求',
+        http_auth_failure: 'Web の認証・拒否応答',
+        firewall_logged_packet: 'firewalld の記録パケット',
+    };
+    return labels[name] || name;
+}
+
+function choiceLabel(choice) {
+    const labels = {
+        malicious: '不正の可能性あり',
+        benign: '良性',
+        insufficient: '判断材料不足',
+    };
+    return labels[choice] || choice || '-';
+}
+
+function defenseBadge(data) {
+    if (!data || !data.enabled) return '<span class="badge bg-secondary-subtle text-secondary-emphasis">無効</span>';
+    if (!data.api_key_configured) return '<span class="badge bg-warning-subtle text-warning-emphasis">API キー未設定</span>';
+    return '<span class="badge bg-success-subtle text-success-emphasis">有効</span>';
+}
+
+function renderStatus(data) {
+    currentDefenseStatus = data;
+    document.getElementById('defense-badge').innerHTML = defenseBadge(data);
+    document.getElementById('enabled').checked = !!data.enabled;
+    document.getElementById('interval-hours').value = data.interval_hours || 8;
+    document.getElementById('api-key').value = '';
+    document.getElementById('clear-api-key').checked = false;
+    document.getElementById('api-key-status').textContent = data.api_key_configured
+        ? 'API キーは設定済みです。空欄のまま保存すると現在のキーを維持します。'
+        : 'API キーは未設定です。';
+    const timer = data.timer || {};
+    document.getElementById('timer-status').innerHTML = timer.installed
+        ? `${timer.enabled ? '<span class="text-success">有効</span>' : '<span class="text-warning">無効</span>'} / ${timer.active ? '<span class="text-success">待機中</span>' : '<span class="text-secondary">停止中</span>'}`
+        : '<span class="text-warning">未配置</span>';
+    document.getElementById('last-completed').textContent = data.last_completed_at || '未実行';
+    const last = data.last_result || {};
+    document.getElementById('last-result').textContent = last.message || '未実行';
+    renderExposure(data.exposure || {});
+    renderBlocks(data.blocked || []);
+}
+
+function renderExposure(exposure) {
+    const target = document.getElementById('exposure-summary');
+    const ports = exposure.ports || [];
+    if (exposure.error) {
+        target.innerHTML = `<span class="text-warning">${escapeHtml(exposure.error)}</span>`;
+    } else if (!ports.length) {
+        target.innerHTML = '<span class="text-secondary">現在、判定対象となる公開ポートは検出されていません。</span>';
+    } else {
+        const services = (exposure.services || []).map(item => `<code>${escapeHtml(item)}</code>`).join(', ') || '-';
+        target.innerHTML = `WAN IF: <code>${escapeHtml(exposure.device || '-')}</code> / zone: <code>${escapeHtml(exposure.zone || '-')}</code><br>公開ポート: ${ports.map(item => `<code>${escapeHtml(item)}</code>`).join(' ')}<br>サービス: ${services}`;
+    }
+    document.getElementById('exposure-limitation').textContent = exposure.limitation || '';
+}
+
+function renderBlocks(blocked) {
+    const body = document.getElementById('blocked-body');
+    if (!blocked.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-secondary small p-3">AI 防御による遮断はありません。</td></tr>';
+        return;
+    }
+    body.innerHTML = blocked.map(item => {
+        const events = Object.entries(item.event_types || {}).map(([name, count]) => `${eventLabel(name)}: ${count}`).join('<br>');
+        const confidence = Number.isFinite(item.confidence) ? item.confidence.toFixed(2) : '-';
+        const probability = Number.isFinite(item.malicious_probability) ? item.malicious_probability.toFixed(2) : '-';
+        return `<tr>
+            <td><code>${escapeHtml(item.ip)}</code></td>
+            <td class="small">${escapeHtml(item.blocked_at || '-')}</td>
+            <td>${escapeHtml(choiceLabel(item.jev_choice))}<br><span class="small text-secondary">確信度 ${confidence} / 悪性確率 ${probability}</span></td>
+            <td class="small">${events || '-'}</td>
+            <td>${(item.target_ports || []).map(port => `<code>${escapeHtml(port)}</code>`).join(' ') || '-'}</td>
+            <td class="text-end"><button class="btn btn-sm btn-outline-success" onclick="unblockIp('${escapeHtml(item.ip)}')">遮断を解除</button></td>
+        </tr>`;
+    }).join('');
+}
+
+async function refresh() {
+    const data = await api.get('/ai-defense/api/status');
+    if (data) renderStatus(data);
+}
+
+async function saveSettings() {
+    const interval = Number(document.getElementById('interval-hours').value);
+    const enabled = document.getElementById('enabled').checked;
+    const clear = document.getElementById('clear-api-key').checked;
+    const apiKey = document.getElementById('api-key').value;
+    if (enabled && !apiKey && !(currentDefenseStatus && currentDefenseStatus.api_key_configured)) {
+        toast('有効化するには Jev API キーを入力してください。', true);
+        return;
+    }
+    const result = await api.send('/ai-defense/api/settings', 'PUT', {
+        enabled,
+        interval_hours: interval,
+        api_key: apiKey,
+        clear_api_key: clear,
+    });
+    if (!result) return;
+    toast(result.timer_provision && !result.timer_provision.ok
+        ? (result.timer_provision.message || '設定は保存しましたが timer を準備できませんでした。')
+        : 'AI 防御の設定を保存しました。', !!(result.timer_provision && !result.timer_provision.ok));
+    await refresh();
+}
+
+async function checkNow() {
+    if (!currentDefenseStatus || !currentDefenseStatus.enabled || !currentDefenseStatus.api_key_configured) {
+        toast('Jev API キーを設定し、AI 防御を有効にしてから実行してください。', true);
+        return;
+    }
+    if (!confirm('現在の公開ポートと直近のログを確認します。開始しますか？')) return;
+    const button = document.getElementById('check-now-button');
+    button.disabled = true;
+    try {
+        const result = await api.send('/ai-defense/api/check', 'POST', {});
+        if (!result) return;
+        toast(result.message || 'AI 防御確認を完了しました。', !result.ok);
+        await refresh();
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function unblockIp(ip) {
+    if (!confirm(`${ip} の遮断を解除しますか？`)) return;
+    const result = await api.send('/ai-defense/api/blocked/unblock', 'POST', { ip });
+    if (!result) return;
+    toast(`${ip} の遮断を解除しました。`);
+    await refresh();
+}
+
+refresh();
+</script>
+{% endblock %}

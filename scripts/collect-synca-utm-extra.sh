@@ -19,6 +19,8 @@ systemctl cat \
   server-gui-ddns.timer \
   server-gui-geoip.timer \
   server-gui-update-check.timer \
+  server-gui-ai-defense.service \
+  server-gui-ai-defense.timer \
   > "${OUT}/systemd/units.txt" 2>&1 || true
 
 find /etc/systemd/system /usr/local /opt -maxdepth 5 \
