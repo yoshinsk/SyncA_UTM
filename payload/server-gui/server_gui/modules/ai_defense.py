@@ -430,11 +430,17 @@ def _record_check_result(store: ConfigStore, result: dict[str, Any], new_blocks:
 
 
 def _discover_open_ports() -> dict[str, Any]:
-    """List firewalld exposure for the interface selected by the IPv4 default route.
+    """List ports accepted by WAN-interface and source-bound active zones.
 
-    Service definitions, explicit ports, and forward ports are covered.  Direct
-    rules and arbitrary nftables rules are deliberately not guessed, because
-    guessing them could make an unrelated local listener look WAN-exposed.
+    A SyncA UTM can deliberately leave the WAN interface in a DROP-oriented
+    zone and permit selected public source networks through a separate
+    firewalld zone. Looking only at the interface zone would therefore miss
+    the ports that are actually reachable by the permitted sources. This
+    function combines the WAN-interface zone with active source-bound zones
+    that can match an external address, while excluding source-only terminal
+    deny zones such as ``drop``. Direct rules and arbitrary nftables rules are
+    still not guessed, because that could make an unrelated local listener
+    look WAN-exposed.
     """
     route = run(["ip", "-j", "route", "get", "1.1.1.1"], timeout=10)
     device = ""
@@ -448,12 +454,148 @@ def _discover_open_ports() -> dict[str, Any]:
         return _empty_exposure("WAN の既定インターフェースを特定できませんでした。")
     zone_result = run(["firewall-cmd", f"--get-zone-of-interface={device}"], timeout=10)
     zone = zone_result.stdout.strip() if zone_result.ok else ""
-    if not zone:
+    if not SERVICE_RE.fullmatch(zone or "") or zone.lower() == "no":
         default_zone = run(["firewall-cmd", "--get-default-zone"], timeout=10)
         zone = default_zone.stdout.strip() if default_zone.ok else ""
     if not SERVICE_RE.fullmatch(zone or ""):
         return _empty_exposure("WAN 側の firewalld ゾーンを取得できませんでした。", device=device)
 
+    active_zones = _active_zone_bindings()
+    selected_zones, excluded_zones = _select_exposure_zones(zone, active_zones)
+    zone_details = [_read_zone_exposure(item["name"], item["scope"]) for item in selected_zones]
+    aggregated = _merge_zone_exposure(zone_details)
+    return {
+        "device": device,
+        "zone": zone,
+        "zones": zone_details,
+        "excluded_zones": excluded_zones,
+        **aggregated,
+        "limitation": (
+            "対象は WAN 既定経路の firewalld ゾーンと、外部送信元に適用される有効な送信元ゾーンの"
+            "サービス、明示ポート、ポート転送です。送信元専用で DROP または REJECT のゾーン、direct ルール、"
+            "任意の nftables ルールは自動列挙しません。"
+        ),
+    }
+
+
+def _active_zone_bindings() -> dict[str, dict[str, list[str]]]:
+    """Read active firewalld zone bindings without relying on zone file names.
+
+    ``firewall-cmd --get-active-zones`` is the runtime source of truth. A
+    source-bound zone has no interface line, so its source list must be kept
+    separately from the WAN interface zone discovered above.
+    """
+    result = run(["firewall-cmd", "--get-active-zones"], timeout=10)
+    return _parse_active_zone_bindings(result.stdout) if result.ok else {}
+
+
+def _parse_active_zone_bindings(text: str) -> dict[str, dict[str, list[str]]]:
+    """Parse ``--get-active-zones`` output into validated zone bindings.
+
+    The firewalld output is line-oriented: a non-indented zone name is
+    followed by indented ``interfaces:`` and ``sources:`` lines. Only
+    recognised names and values are retained before they are passed back to
+    firewalld as command arguments.
+    """
+    bindings: dict[str, dict[str, list[str]]] = {}
+    current = ""
+    for raw_line in text.splitlines():
+        if raw_line and not raw_line[0].isspace():
+            candidate = raw_line.strip()
+            if SERVICE_RE.fullmatch(candidate):
+                current = candidate
+                bindings.setdefault(current, {"interfaces": [], "sources": []})
+            else:
+                current = ""
+            continue
+        if not current:
+            continue
+        label, separator, value = raw_line.strip().partition(":")
+        if separator and label in {"interfaces", "sources"}:
+            bindings[current][label] = [item for item in value.split() if item]
+    return bindings
+
+
+def _select_exposure_zones(
+    interface_zone: str,
+    active_zones: dict[str, dict[str, list[str]]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Select verified WAN-relevant zones and report skipped deny zones.
+
+    The interface zone is always retained because its service rules can accept
+    traffic even when the zone's fallback target is DROP. A source-only zone
+    is added only when it has an external-capable binding and its runtime
+    target is not a terminal deny target. This preserves allow-list designs
+    such as a country IP set while preventing the AI defense's own ``drop``
+    source zone from becoming inspection scope.
+    """
+    selected = [{"name": interface_zone, "scope": "interface"}]
+    excluded: list[str] = []
+    for name in sorted(active_zones):
+        if name == interface_zone:
+            continue
+        sources = active_zones[name].get("sources", [])
+        if not _source_bindings_can_reach_wan(sources):
+            continue
+        target = _runtime_zone_target(name)
+        if _is_terminal_deny_target(target):
+            excluded.append(name)
+            continue
+        selected.append({"name": name, "scope": "source"})
+    return selected, excluded
+
+
+def _source_bindings_can_reach_wan(sources: list[str]) -> bool:
+    """Return whether a source-zone binding can describe an external client.
+
+    Named ipsets are included because firewalld does not expose their complete
+    membership through the active-zone summary and they are commonly used for
+    country or partner allow-lists. Literal addresses and networks are added
+    only when they are globally routable (or a full-address-family wildcard),
+    so LAN-only source zones are not mistaken for WAN exposure.
+    """
+    for source in sources:
+        if source.startswith("ipset:") and SERVICE_RE.fullmatch(source[6:]):
+            return True
+        try:
+            network = ipaddress.ip_network(source, strict=False)
+        except ValueError:
+            continue
+        if network.prefixlen == 0 or network.is_global:
+            return True
+    return False
+
+
+def _runtime_zone_target(zone: str) -> str:
+    """Read one runtime target from ``--list-all`` across firewalld versions.
+
+    Some supported firewalld builds allow ``--get-target`` only for permanent
+    configuration. ``--list-all`` exposes the runtime target on both older and
+    newer builds, which lets the caller safely recognise source deny zones.
+    """
+    result = run(["firewall-cmd", f"--zone={zone}", "--list-all"], timeout=10)
+    return _parse_zone_target(result.stdout) if result.ok else ""
+
+
+def _parse_zone_target(text: str) -> str:
+    """Extract and normalise the target line from ``firewall-cmd --list-all``."""
+    match = re.search(r"(?mi)^\s*target:\s*(\S+)\s*$", text)
+    return match.group(1).upper() if match else ""
+
+
+def _is_terminal_deny_target(target: str) -> bool:
+    """Recognise source-zone targets that never contribute accepted exposure."""
+    return target.upper() in {"DROP", "REJECT", "%%REJECT%%"}
+
+
+def _read_zone_exposure(zone: str, scope: str) -> dict[str, Any]:
+    """Collect one selected zone's services, port rules, and forwarding rules.
+
+    Runtime zone membership determines whether a zone is active, whereas
+    firewalld service definitions are queried through permanent configuration
+    on several supported releases. The two data sources are intentionally kept
+    separate to avoid silently losing named service ports.
+    """
     services_result = run(["firewall-cmd", f"--zone={zone}", "--list-services"], timeout=10)
     explicit_result = run(["firewall-cmd", f"--zone={zone}", "--list-ports"], timeout=10)
     forward_result = run(["firewall-cmd", f"--zone={zone}", "--list-forward-ports"], timeout=10)
@@ -461,21 +603,58 @@ def _discover_open_ports() -> dict[str, Any]:
     ports = set(_normalise_port_tokens(explicit_result.stdout.split() if explicit_result.ok else []))
     service_ports: dict[str, list[str]] = {}
     for service in services:
-        info = run(["firewall-cmd", f"--service={service}", "--get-ports"], timeout=10)
-        parsed = _normalise_port_tokens(info.stdout.split() if info.ok else [])
+        parsed = _service_port_tokens(service)
         service_ports[service] = parsed
         ports.update(parsed)
     forward_ports = _parse_forward_ports(forward_result.stdout if forward_result.ok else "")
     ports.update(forward_ports)
     return {
-        "device": device,
-        "zone": zone,
+        "name": zone,
+        "scope": scope,
         "services": services,
         "service_ports": service_ports,
         "explicit_ports": _normalise_port_tokens(explicit_result.stdout.split() if explicit_result.ok else []),
         "forward_ports": forward_ports,
         "ports": sorted(ports, key=_port_sort_key),
-        "limitation": "対象は WAN 既定経路の firewalld ゾーンにあるサービス、明示ポート、ポート転送です。direct ルールや任意の nftables ルールは自動列挙しません。",
+    }
+
+
+def _service_port_tokens(service: str) -> list[str]:
+    """Resolve a named service definition on permanent-first firewalld builds.
+
+    Firewalld service definitions are configuration objects, not runtime zone
+    membership. AlmaLinux builds used by SyncA UTM require ``--permanent`` for
+    ``--service=<name> --get-ports``; the runtime form remains a fallback for
+    compatible versions rather than turning a compatibility difference into an
+    empty WAN exposure result.
+    """
+    for prefix in (["--permanent"], []):
+        result = run(["firewall-cmd", *prefix, f"--service={service}", "--get-ports"], timeout=10)
+        if result.ok:
+            return _normalise_port_tokens(result.stdout.split())
+    return []
+
+
+def _merge_zone_exposure(zone_details: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge selected zone details into the backward-compatible API summary."""
+    services: set[str] = set()
+    explicit_ports: set[str] = set()
+    forward_ports: set[str] = set()
+    ports: set[str] = set()
+    service_ports: dict[str, set[str]] = {}
+    for detail in zone_details:
+        services.update(detail["services"])
+        explicit_ports.update(detail["explicit_ports"])
+        forward_ports.update(detail["forward_ports"])
+        ports.update(detail["ports"])
+        for service, values in detail["service_ports"].items():
+            service_ports.setdefault(service, set()).update(values)
+    return {
+        "services": sorted(services),
+        "service_ports": {name: sorted(values, key=_port_sort_key) for name, values in sorted(service_ports.items())},
+        "explicit_ports": sorted(explicit_ports, key=_port_sort_key),
+        "forward_ports": sorted(forward_ports, key=_port_sort_key),
+        "ports": sorted(ports, key=_port_sort_key),
     }
 
 
@@ -484,13 +663,15 @@ def _empty_exposure(error: str, device: str = "") -> dict[str, Any]:
     return {
         "device": device,
         "zone": "",
+        "zones": [],
+        "excluded_zones": [],
         "services": [],
         "service_ports": {},
         "explicit_ports": [],
         "forward_ports": [],
         "ports": [],
         "error": error,
-        "limitation": "対象は WAN 既定経路の firewalld ゾーンにあるサービス、明示ポート、ポート転送です。direct ルールや任意の nftables ルールは自動列挙しません。",
+        "limitation": "対象は firewalld の WAN 関連ゾーンです。direct ルールや任意の nftables ルールは自動列挙しません。",
     }
 
 
@@ -902,10 +1083,16 @@ def _firewall(args: list[str]):
 
 
 def _drop_zone_is_drop(permanent: bool) -> bool:
-    """Refuse automatic blocking unless both zone classifications use DROP."""
-    args = (["--permanent"] if permanent else []) + ["--zone=drop", "--get-target"]
+    """Refuse blocking unless the selected runtime or saved drop zone is DROP.
+
+    ``--get-target`` is permanent-only on some supported firewalld versions.
+    ``--list-all`` supplies the target for both runtime and permanent views,
+    so a compatible appliance cannot fail the safety guard solely because of
+    that command-form difference.
+    """
+    args = (["--permanent"] if permanent else []) + ["--zone=drop", "--list-all"]
     result = _firewall(args)
-    return result.ok and result.stdout.strip().upper() == "DROP"
+    return result.ok and _parse_zone_target(result.stdout) == "DROP"
 
 
 def _ensure_ipset(name: str, family: str, permanent: bool) -> bool:
