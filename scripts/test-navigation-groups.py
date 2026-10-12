@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""scripts/test-navigation-groups.py - Verify grouped SyncA UTM navigation.
+"""scripts/test-navigation-groups.py - Verify hierarchical SyncA UTM navigation.
 
 Renders the shared base template in an isolated Flask application. The test
-checks that the desktop sidebar and hamburger menu share the requested group
-and link order without invoking appliance services or touching configuration.
+checks that the desktop sidebar and hamburger menu share the requested group,
+expansion state, and link order without invoking appliance services or
+touching configuration.
 """
 from __future__ import annotations
 
@@ -72,9 +73,33 @@ ENDPOINTS = [
     ("admin", "page", "admin"),
 ]
 
+# Every registered page must expand only the category to which it belongs.
+# Keeping this explicit makes a category change fail the rendered-page test.
+EXPECTED_ACTIVE_GROUPS = {
+    "dashboard": "TOP",
+    "network": "Network",
+    "dhcp": "Network",
+    "dns": "Network",
+    "ipv6": "Network",
+    "upnp": "Network",
+    "wan_quality": "Check",
+    "geoip": "Defense",
+    "firewall": "Defense",
+    "fail2ban": "Defense",
+    "ai_defense": "Defense",
+    "ipsec": "VPN",
+    "wireguard": "VPN",
+    "ddns": "Publish",
+    "nginx": "Publish",
+    "certs": "Publish",
+    "admin": "Manage",
+    "backup": "Manage",
+    "sophos_import": "Manage",
+}
+
 
 class NavigationParser(HTMLParser):
-    """Extract one rendered navigation list without relying on external parsers."""
+    """Extract one rendered hierarchical navigation without external parsers."""
 
     def __init__(self, navigation_label: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -97,10 +122,10 @@ class NavigationParser(HTMLParser):
             return
 
         classes = set((attributes.get("class") or "").split())
-        if tag == "div" and "app-nav-group" in classes:
-            self.current_group = {"label": "", "links": []}
+        if tag == "details" and "app-nav-group" in classes:
+            self.current_group = {"label": "", "links": [], "open": "open" in attributes}
             self.groups.append(self.current_group)
-        elif tag == "div" and "app-nav-group-title" in classes:
+        elif tag == "summary" and "app-nav-group-toggle" in classes:
             self.reading_group_title = True
         elif tag == "a" and "app-nav-link" in classes:
             # The group remains active until the next app-nav-group begins,
@@ -115,8 +140,10 @@ class NavigationParser(HTMLParser):
             assert isinstance(links, list)
             links.append((" ".join(self.current_link["label"].split()), self.current_link["href"]))
             self.current_link = None
-        elif tag == "div" and self.reading_group_title:
+        elif tag == "summary" and self.reading_group_title:
             self.reading_group_title = False
+        elif tag == "details":
+            self.current_group = None
         elif tag == "nav":
             self.navigation_depth -= 1
 
@@ -128,14 +155,15 @@ class NavigationParser(HTMLParser):
         if self.current_link is not None:
             self.current_link["label"] += data
 
-    def result(self) -> list[tuple[str, list[tuple[str, str]]]]:
-        """Return normalized labels and links in their rendered order."""
-        parsed: list[tuple[str, list[tuple[str, str]]]] = []
+    def result(self) -> list[tuple[str, bool, list[tuple[str, str]]]]:
+        """Return normalized labels, expansion states, and links in order."""
+        parsed: list[tuple[str, bool, list[tuple[str, str]]]] = []
         for group in self.groups:
             label = " ".join(str(group["label"]).split())
+            is_open = bool(group["open"])
             links = group["links"]
             assert isinstance(links, list)
-            parsed.append((label, links))
+            parsed.append((label, is_open, links))
         return parsed
 
 
@@ -157,31 +185,47 @@ def build_test_app() -> Flask:
     return app
 
 
+def expected_groups(active_group: str) -> list[tuple[str, bool, list[tuple[str, str]]]]:
+    """Add the expected expanded state to the fixed menu specification."""
+    return [(label, label == active_group, links) for label, links in EXPECTED_GROUPS]
+
+
+def render_navigation_document(app: Flask, active_tab: str) -> str:
+    """Render a signed-in layout for one current navigation tab."""
+    with app.test_request_context("/test/render"):
+        session["user"] = "navigation-test"
+        session["csrf_token"] = "navigation-test-token"
+        return render_template_string(
+            '{% extends "base.html" %}{% block content %}<p>test</p>{% endblock %}',
+            active_tab=active_tab,
+        )
+
+
 class NavigationGroupsTest(unittest.TestCase):
-    """Confirm that desktop and mobile menus retain identical grouping."""
+    """Confirm desktop and mobile menus retain the same hierarchy."""
 
     def test_desktop_and_mobile_navigation_match_specification(self) -> None:
         app = build_test_app()
-        with app.test_request_context("/test/render"):
-            session["user"] = "navigation-test"
-            session["csrf_token"] = "navigation-test-token"
-            document = render_template_string(
-                '{% extends "base.html" %}{% block content %}<p>test</p>{% endblock %}',
-                active_tab="ai_defense",
-            )
+        for active_tab, active_group in EXPECTED_ACTIVE_GROUPS.items():
+            with self.subTest(active_tab=active_tab):
+                document = render_navigation_document(app, active_tab)
 
-        # Macro definitions must not add bytes before the doctype, which could
-        # otherwise put browsers into an unexpected document rendering mode.
-        self.assertTrue(document.startswith("<!DOCTYPE html>"))
+                # Macro definitions must not add bytes before the doctype,
+                # which could otherwise trigger unexpected rendering modes.
+                self.assertTrue(document.startswith("<!DOCTYPE html>"))
 
-        for navigation_label in ("main navigation", "mobile navigation"):
-            parser = NavigationParser(navigation_label)
-            parser.feed(document)
-            parser.close()
-            self.assertEqual(parser.result(), EXPECTED_GROUPS, navigation_label)
+                for navigation_label in ("main navigation", "mobile navigation"):
+                    parser = NavigationParser(navigation_label)
+                    parser.feed(document)
+                    parser.close()
+                    self.assertEqual(
+                        parser.result(),
+                        expected_groups(active_group),
+                        navigation_label,
+                    )
 
-        # The current page is announced once in each navigation surface.
-        self.assertEqual(document.count('aria-current="page"'), 2)
+                # The current page is announced once in each navigation surface.
+                self.assertEqual(document.count('aria-current="page"'), 2)
 
 
 if __name__ == "__main__":
