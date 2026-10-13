@@ -50,6 +50,7 @@ frr
 git
 glibc-langpack-ja
 iproute
+iputils
 iptables-nft
 langpacks-ja
 nginx

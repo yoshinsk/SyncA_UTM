@@ -10,9 +10,12 @@ from __future__ import annotations
 import ast
 import ipaddress
 import json
+import math
 import re
+import struct
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -46,7 +49,16 @@ class WanQualityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.logic = _load_selected_definitions(WAN_MODULE, {"_parse_ping_output", "_quality_summary"})
+        cls.logic = _load_selected_definitions(WAN_MODULE, {
+            "_parse_ping_output", "_quality_summary", "_ping_target",
+            "_measure_http_transfer", "_icmp_checksum", "_icmp_reply_matches",
+        })
+        cls.logic.update({
+            "math": math, "struct": struct,
+            "INTERFACE_RE": re.compile(r"^[A-Za-z0-9_.:+-]{1,64}$"),
+            "PING_COUNT": 4, "PING_TIMEOUT_SECONDS": 2, "PING_DEADLINE_SECONDS": 12,
+            "TRANSFER_CONNECT_TIMEOUT_SECONDS": 10, "TRANSFER_MAX_SECONDS": 45,
+        })
 
     def test_ping_parser_reads_loss_and_rtt(self) -> None:
         output = (
@@ -75,6 +87,98 @@ class WanQualityTests(unittest.TestCase):
             {"ok": True},
         )
         self.assertEqual(warning["state"], "warning")
+
+    def test_missing_latency_is_never_reported_as_good(self) -> None:
+        quality = self.logic["_quality_summary"](
+            {"device": "wan0"}, [{"ok": False, "sent": 0}], {"ok": True}, {"ok": True},
+        )
+        self.assertEqual(quality["state"], "warning")
+
+    def test_missing_ping_uses_native_icmp_and_preserves_rtt(self) -> None:
+        commands = []
+
+        def missing_ping(argv, **kwargs):
+            commands.append(argv)
+            return SimpleNamespace(returncode=127, ok=False, stdout="", stderr="ping not found")
+
+        self.logic["run"] = missing_ping
+        self.logic["_native_icmp_probe"] = lambda address, device: {
+            "sent": 4, "received": 4, "avg_ms": 3.5, "packet_loss_percent": 0.0,
+            "method": "icmp_socket",
+        }
+        result = self.logic["_ping_target"]({"name": "test", "address": "1.1.1.1"}, "wan0")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["avg_ms"], 3.5)
+        self.assertEqual(commands[0][:4], ["env", "LC_ALL=C", "ping", "-4"])
+        self.assertIn("wan0", commands[0])
+
+    def test_icmp_reply_does_not_accept_other_requests_or_error_packets(self) -> None:
+        payload = b"test-probe-token"
+        ip_header = bytes([0x45]) + b"\0" * 19
+        echo_reply = struct.pack("!BBHHH", 0, 0, 0, 321, 2) + payload
+        matches = self.logic["_icmp_reply_matches"]
+        self.assertTrue(matches(ip_header + echo_reply, 321, 2, payload))
+        self.assertFalse(matches(ip_header + echo_reply, 322, 2, payload))
+        self.assertFalse(matches(ip_header + echo_reply, 321, 3, payload))
+        self.assertFalse(matches(ip_header + echo_reply, 321, 2, b"different"))
+        self.assertFalse(matches(ip_header + struct.pack("!BBHHH", 3, 0, 0, 321, 2) + payload, 321, 2, payload))
+        self.assertFalse(matches(ip_header[:10], 321, 2, payload))
+        # Validate checksum closure for an odd-length echo request, not just
+        # the sum of the helper's own intermediate values.
+        data = struct.pack("!BBHHH", 8, 0, 0, 321, 2) + b"odd"
+        checksum = self.logic["_icmp_checksum"](data)
+        complete = struct.pack("!BBHHH", 8, 0, checksum, 321, 2) + b"odd"
+        self.assertEqual(self.logic["_icmp_checksum"](complete), 0)
+
+    def test_transfer_binds_ipv4_wan_with_a_total_deadline(self) -> None:
+        calls = []
+
+        def transfer(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(ok=True, returncode=0, stdout="200\t20000000\t0\t2.000", stderr="")
+
+        self.logic["run"] = transfer
+        result = self.logic["_measure_http_transfer"]("download", "https://speed.cloudflare.com/__down?bytes=20000000", 20_000_000, "wan0")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mbps"], 80.0)
+        argv, options = calls[0]
+        self.assertIn("--ipv4", argv)
+        self.assertEqual(argv[argv.index("--interface") + 1], "wan0")
+        self.assertEqual(argv[argv.index("--max-time") + 1], "45")
+        self.assertEqual(options["timeout"], 50)
+
+    def test_incomplete_timeout_http_error_and_absent_route_are_not_speed_results(self) -> None:
+        for returncode, output, error_code in (
+            (0, "200\t1000\t0\t2.000", "incomplete_transfer"),
+            (28, "000\t0\t0\t45.000", "timeout"),
+            (22, "503\t0\t0\t0.020", "http_error"),
+            (0, "200\t20000000\t0\tnan", "incomplete_transfer"),
+        ):
+            with self.subTest(returncode=returncode, output=output):
+                self.logic["run"] = lambda argv, **kwargs: SimpleNamespace(
+                    ok=returncode == 0, returncode=returncode, stdout=output, stderr="",
+                )
+                result = self.logic["_measure_http_transfer"]("download", "https://speed.cloudflare.com/__down", 20_000_000, "wan0")
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["mbps"])
+                self.assertEqual(result["error_code"], error_code)
+        # Missing routes must not invoke an unbound transfer on another NIC.
+        self.logic["run"] = lambda *args, **kwargs: self.fail("unexpected WAN transfer")
+        self.assertEqual(self.logic["_measure_http_transfer"]("download", "https://speed.cloudflare.com/__down", 20_000_000, "")["error_code"], "route_unavailable")
+
+    def test_upload_measures_only_the_confirmed_payload(self) -> None:
+        def upload(argv, **kwargs):
+            self.assertEqual(kwargs["stdin"], "\0" * 1_000)
+            return SimpleNamespace(ok=True, returncode=0, stdout="200\t0\t1000\t1.000", stderr="")
+
+        self.logic["run"] = upload
+        result = self.logic["_measure_http_transfer"]("upload", "https://speed.cloudflare.com/__up", 1_000, "wan0")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["bytes"], 1_000)
+
+    def test_iso_requires_iputils_for_new_installations(self) -> None:
+        for path in (ROOT / "iso/package-lists/synca-rpms.txt", ROOT / "iso/kickstart/synca-utm.ks"):
+            self.assertIn("iputils", _source(path).splitlines(), str(path))
 
 
 class AiDefenseTests(unittest.TestCase):

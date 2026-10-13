@@ -10,11 +10,13 @@ from __future__ import annotations
 import datetime as dt
 import fcntl
 import json
+import math
 import os
 import re
+import secrets
+import socket
+import struct
 import time
-import urllib.error
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -32,10 +34,11 @@ MODULE_NAME = "wan_quality"
 HISTORY_LIMIT = 20
 DOWNLOAD_BYTES = 20_000_000
 UPLOAD_BYTES = 10_000_000
-TRANSFER_TIMEOUT_SECONDS = 60
-TRANSFER_MAX_SECONDS = 75
+TRANSFER_CONNECT_TIMEOUT_SECONDS = 10
+TRANSFER_MAX_SECONDS = 45
 PING_COUNT = 4
 PING_TIMEOUT_SECONDS = 2
+PING_DEADLINE_SECONDS = PING_COUNT * (PING_TIMEOUT_SECONDS + 1)
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.:+-]{1,64}$")
 
 # The endpoints and targets are fixed in source code.  Operators cannot cause
@@ -130,11 +133,14 @@ def run_measurement(config_dir: Path | str) -> dict[str, Any]:
     with _exclusive_measurement_lock(base_dir):
         route = _default_ipv4_route()
         interface = _interface_snapshot(route.get("device", ""))
-        latency = [_ping_target(target, route.get("device", "")) for target in LATENCY_TARGETS]
-        download = _measure_http_transfer("download", DOWNLOAD_URL, DOWNLOAD_BYTES)
-        upload = _measure_http_transfer("upload", UPLOAD_URL, UPLOAD_BYTES)
+        device = route.get("device", "")
+        # All probes use the same IPv4 WAN device. With no route, do not send
+        # probes through an unrelated interface or an implicit IPv6 route.
+        latency = [_ping_target(target, device) for target in LATENCY_TARGETS] if device else []
+        download = _measure_http_transfer("download", DOWNLOAD_URL, DOWNLOAD_BYTES, device)
+        upload = _measure_http_transfer("upload", UPLOAD_URL, UPLOAD_BYTES, device)
         result = {
-            "ok": bool(route.get("device")),
+            "ok": bool(device and (any(item["ok"] for item in latency) or download["ok"] or upload["ok"])),
             "measured_at": _now_iso(),
             "route": route,
             "interface": interface,
@@ -224,17 +230,117 @@ def _interface_snapshot(device: str) -> dict[str, Any]:
 
 
 def _ping_target(target: dict[str, str], device: str) -> dict[str, Any]:
-    """Ping one fixed target and parse Linux ping loss and RTT summary lines."""
-    argv = ["ping", "-4", "-n", "-c", str(PING_COUNT), "-W", str(PING_TIMEOUT_SECONDS)]
+    """Measure one fixed IPv4 target with bounded, locale-independent ping.
+
+    Older deployed ISOs may lack iputils. In that case the service's native
+    ICMP implementation performs the same measurement without installing
+    packages during a diagnostic request.
+    """
+    argv = ["env", "LC_ALL=C", "ping", "-4", "-n", "-c", str(PING_COUNT),
+            "-W", str(PING_TIMEOUT_SECONDS), "-w", str(PING_DEADLINE_SECONDS)]
     if device and INTERFACE_RE.match(device):
         argv.extend(["-I", device])
     argv.append(target["address"])
-    result = run(argv, timeout=(PING_COUNT * (PING_TIMEOUT_SECONDS + 1)) + 5)
-    parsed = _parse_ping_output(result.stdout)
+    result = run(argv, timeout=PING_DEADLINE_SECONDS + 2)
+    if result.returncode == 127:
+        parsed = _native_icmp_probe(target["address"], device)
+    else:
+        parsed = _parse_ping_output(result.stdout)
+        parsed["method"] = "ping"
+        if not parsed["sent"]:
+            parsed["error_code"] = "probe_unavailable"
+            parsed["error"] = "遅延測定を実行できませんでした。測定コマンドの権限と設定を確認してください。"
     parsed.update({"name": target["name"], "address": target["address"], "ok": parsed["received"] > 0})
     if not parsed["ok"]:
-        parsed["error"] = "応答を受信できませんでした。"
+        parsed.setdefault("error_code", "no_response")
+        parsed.setdefault("error", "応答を受信できませんでした。")
     return parsed
+
+
+def _icmp_checksum(data: bytes) -> int:
+    """Compute the Internet checksum for an ICMP echo request."""
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    total = (total & 0xffff) + (total >> 16)
+    total = (total & 0xffff) + (total >> 16)
+    return (~total) & 0xffff
+
+
+def _icmp_reply_matches(packet: bytes, identifier: int, sequence: int, payload: bytes) -> bool:
+    """Accept only a complete IPv4 echo reply for this exact request.
+
+    Raw sockets also receive our requests and unrelated ICMP packets. Check
+    the IP header length, reply type, identifier, sequence, and random payload
+    so neither an ICMP error nor another process's reply becomes a sample.
+    """
+    if len(packet) < 28 or packet[0] >> 4 != 4:
+        return False
+    offset = (packet[0] & 0x0f) * 4
+    if offset < 20 or len(packet) < offset + 8:
+        return False
+    kind, code, _, reply_id, reply_sequence = struct.unpack("!BBHHH", packet[offset:offset + 8])
+    return (kind == 0 and code == 0 and reply_id == identifier
+            and reply_sequence == sequence and packet[offset + 8:] == payload)
+
+
+def _native_icmp_probe(address: str, device: str) -> dict[str, Any]:
+    """Send four small ICMP probes when the installed image has no ping binary.
+
+    The GUI service runs as root on the appliance. Bind to the measured WAN
+    interface and give the complete probe a deadline, including unrelated
+    received packets. No firewall, kernel, or package configuration is changed.
+    """
+    samples: list[float] = []
+    sent = 0
+    error_code = error = ""
+    identifier = os.getpid() & 0xffff
+    payload = secrets.token_bytes(24)
+    deadline = time.monotonic() + PING_DEADLINE_SECONDS
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as probe:
+            if device and INTERFACE_RE.match(device):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, device.encode("ascii") + b"\0")
+            for sequence in range(1, PING_COUNT + 1):
+                if time.monotonic() >= deadline:
+                    break
+                header = struct.pack("!BBHHH", 8, 0, 0, identifier, sequence)
+                checksum = _icmp_checksum(header + payload)
+                packet = struct.pack("!BBHHH", 8, 0, checksum, identifier, sequence) + payload
+                started = time.monotonic()
+                probe.sendto(packet, (address, 0))
+                sent += 1
+                sample_deadline = min(deadline, started + PING_TIMEOUT_SECONDS)
+                while time.monotonic() < sample_deadline:
+                    probe.settimeout(max(sample_deadline - time.monotonic(), 0.001))
+                    try:
+                        reply, source = probe.recvfrom(65535)
+                    except socket.timeout:
+                        break
+                    if source[0] == address and _icmp_reply_matches(reply, identifier, sequence, payload):
+                        samples.append((time.monotonic() - started) * 1000)
+                        break
+                if sequence < PING_COUNT:
+                    time.sleep(max(0, min(1 - (time.monotonic() - started), deadline - time.monotonic())))
+    except PermissionError:
+        error_code = "probe_unavailable"
+        error = "遅延測定に必要な権限がありません。iputils の導入と GUI サービスの権限を確認してください。"
+    except OSError:
+        error_code = "probe_error"
+        error = "WAN インターフェースから遅延測定を実行できませんでした。"
+    average = sum(samples) / len(samples) if samples else None
+    result = {
+        "sent": sent, "received": len(samples),
+        "packet_loss_percent": round((sent - len(samples)) * 100 / sent, 1) if sent else None,
+        "min_ms": round(min(samples), 3) if samples else None,
+        "avg_ms": round(average, 3) if average is not None else None,
+        "max_ms": round(max(samples), 3) if samples else None,
+        "mdev_ms": round(math.sqrt(sum((value - average) ** 2 for value in samples) / len(samples)), 3) if samples else None,
+        "method": "icmp_socket",
+    }
+    if error:
+        result.update({"error_code": error_code, "error": error})
+    return result
 
 
 def _parse_ping_output(output: str) -> dict[str, Any]:
@@ -265,54 +371,61 @@ def _parse_ping_output(output: str) -> dict[str, Any]:
     }
 
 
-def _measure_http_transfer(direction: str, url: str, byte_count: int) -> dict[str, Any]:
+def _measure_http_transfer(direction: str, url: str, byte_count: int, device: str) -> dict[str, Any]:
     """Measure one bounded HTTP transfer and report its effective payload rate.
 
-    The byte limit and deadline prevent a slow or unavailable external service
-    from occupying a gunicorn worker indefinitely.  The destination is fixed
-    by the module constants, not supplied by a browser request.
+    curl fixes the address family and WAN interface and imposes a deadline on
+    DNS, connection, TLS, and the body transfer together. urllib's per-socket
+    timeout could be spent for each unusable IPv6 address and exceed the GUI's
+    180-second request timeout. Only complete payloads count as speed results.
     """
-    started = time.monotonic()
-    transferred = 0
+    empty = {"ok": False, "bytes": 0, "duration_seconds": 0.0, "mbps": None, "error": ""}
+    if not device or not INTERFACE_RE.match(device):
+        return {**empty, "error_code": "route_unavailable", "error": "IPv4 の WAN 経路を確認できないため測定できません。"}
+    argv = [
+        "env", "LC_ALL=C", "curl", "--ipv4", "--silent", "--show-error", "--fail",
+        "--noproxy", "*", "--interface", device,
+        "--connect-timeout", str(TRANSFER_CONNECT_TIMEOUT_SECONDS),
+        "--max-time", str(TRANSFER_MAX_SECONDS), "--max-filesize", str(byte_count),
+        "--output", "/dev/null", "--user-agent", "SyncA-UTM-WAN-Quality/1.1",
+        "--header", "Cache-Control: no-cache",
+        "--write-out", "%{http_code}\t%{size_download}\t%{size_upload}\t%{time_total}",
+    ]
+    payload = None
+    if direction == "upload":
+        argv.extend(["--header", "Content-Type: application/octet-stream", "--header", "Expect:", "--data-binary", "@-"])
+        payload = "\0" * byte_count
+    argv.append(url)
+    result = run(argv, timeout=TRANSFER_MAX_SECONDS + 5, stdin=payload)
     try:
-        headers = {"User-Agent": "SyncA-UTM-WAN-Quality/1.0", "Cache-Control": "no-cache"}
-        if direction == "upload":
-            request = urllib.request.Request(url, data=b"\0" * byte_count, headers=headers, method="POST")
-            with urllib.request.urlopen(request, timeout=TRANSFER_TIMEOUT_SECONDS) as response:
-                while response.read(65536):
-                    _ensure_transfer_deadline(started)
-            transferred = byte_count
-        else:
-            request = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(request, timeout=TRANSFER_TIMEOUT_SECONDS) as response:
-                while True:
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    transferred += len(chunk)
-                    _ensure_transfer_deadline(started)
-        elapsed = max(time.monotonic() - started, 0.001)
-        return {
-            "ok": transferred > 0,
-            "bytes": transferred,
-            "duration_seconds": round(elapsed, 3),
-            "mbps": round((transferred * 8) / elapsed / 1_000_000, 2),
-            "error": "",
-        }
-    except (TimeoutError, urllib.error.URLError, urllib.error.HTTPError, OSError):
-        return {
-            "ok": False,
-            "bytes": transferred,
-            "duration_seconds": round(max(time.monotonic() - started, 0.0), 3),
-            "mbps": None,
-            "error": "測定先に接続できないか、測定時間の上限に達しました。",
-        }
-
-
-def _ensure_transfer_deadline(started: float) -> None:
-    """Stop a transfer after the module-wide wall-clock budget."""
-    if time.monotonic() - started > TRANSFER_MAX_SECONDS:
-        raise TimeoutError("WAN transfer deadline exceeded")
+        status, downloaded, uploaded, duration = result.stdout.strip().split("\t")
+        transferred = int(float(uploaded if direction == "upload" else downloaded))
+        elapsed = float(duration)
+        if transferred < 0 or not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError
+    except (ValueError, OverflowError):
+        status, transferred, elapsed = "000", 0, 0.0
+    complete = result.ok and status.isdigit() and 200 <= int(status) < 300 and transferred == byte_count and elapsed > 0
+    data = {**empty, "ok": complete, "bytes": transferred, "duration_seconds": round(elapsed, 3)}
+    if complete:
+        data["mbps"] = round((transferred * 8) / elapsed / 1_000_000, 2)
+        return data
+    # Keep stable, actionable error codes without returning raw command output,
+    # URL errors, or local environment details to the browser.
+    errors = {
+        127: ("probe_unavailable", "転送測定に必要な curl がありません。"),
+        5: ("dns_error", "測定先の名前を解決できませんでした。DNS 設定を確認してください。"),
+        6: ("dns_error", "測定先の名前を解決できませんでした。DNS 設定を確認してください。"),
+        7: ("connection_error", "IPv4 の WAN 経路から測定先へ接続できませんでした。"),
+        22: ("http_error", "測定先がエラーを返しました。時間を置いて再測定してください。"),
+        28: ("timeout", "転送測定が時間の上限に達しました。"),
+        124: ("timeout", "転送測定が時間の上限に達しました。"),
+        35: ("tls_error", "測定先との TLS 接続に失敗しました。"),
+        45: ("interface_error", "測定用の WAN インターフェースを利用できませんでした。"),
+        60: ("certificate_error", "測定先の証明書を確認できませんでした。装置の時刻と CA 証明書を確認してください。"),
+    }
+    code, message = errors.get(result.returncode, ("incomplete_transfer", "測定データを最後まで転送できませんでした。"))
+    return {**data, "error_code": code, "error": message}
 
 
 def _quality_summary(
@@ -329,6 +442,7 @@ def _quality_summary(
         return {"state": "error", "label": "外部到達を確認できません", "reason": "遅延または転送の測定先へ到達できませんでした。"}
     has_loss = any((item.get("packet_loss_percent") or 0) > 2 for item in responding)
     has_delay = any((item.get("avg_ms") or 0) >= 100 or (item.get("mdev_ms") or 0) >= 20 for item in responding)
-    if has_loss or has_delay or not download.get("ok") or not upload.get("ok"):
-        return {"state": "warning", "label": "要確認", "reason": "損失、遅延の増加、または転送測定の失敗がありました。"}
+    missing_latency = not latency or any(not item.get("ok") for item in latency)
+    if has_loss or has_delay or missing_latency or not download.get("ok") or not upload.get("ok"):
+        return {"state": "warning", "label": "要確認", "reason": "損失、遅延の増加、または測定できなかった項目がありました。"}
     return {"state": "good", "label": "今回の測定では大きな異常なし", "reason": "固定の参照先に対する一回の測定結果です。"}
