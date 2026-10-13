@@ -30,6 +30,7 @@ frr
 git
 glibc-langpack-ja
 iproute
+iputils
 iptables-nft
 langpacks-ja
 mod_security
