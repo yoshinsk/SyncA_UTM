@@ -117,7 +117,7 @@
             </div>
             <div class="card-body small">
                 <p class="mb-2">候補を <code>source-001</code> のような匿名 ID に置き換え、イベント種別の件数と現在公開している対象ポートだけを送ります。</p>
-                <p class="mb-0 text-secondary">IP アドレス、API キー、元のログ行、利用者名、要求パス、認証情報は Jev に送信しません。</p>
+                <p class="mb-0 text-secondary">IP アドレス、元のログ行、利用者名、要求パス、アクセス元の認証情報は判定データに含めません。API キーは Jev API の認証ヘッダーにのみ使用し、画面やログには表示しません。</p>
             </div>
         </div>
     </div>
@@ -128,7 +128,7 @@
             </div>
             <div class="card-body small">
                 <p class="mb-2">遮断対象は、現在公開しているポートへの認証失敗、探索的な要求、または繰り返しの記録がある候補に限ります。Jev が <code>benign</code> と判定し、確信度が <code>0.85</code> 以上、悪性確率が <code>0</code> の場合だけ遮断しません。</p>
-                <p class="mb-0 text-secondary"><code>malicious</code>、<code>insufficient</code>、低い確信度、または悪性確率が 0 より大きい結果は遮断します。遮断には専用 IP セットを使い、firewalld の再読込は行いません。<code>drop</code> ゾーンの対象が <code>DROP</code> であることを確認できない場合は遮断しません。</p>
+                <p class="mb-0 text-secondary"><code>malicious</code>、<code>insufficient</code>、低い確信度、または悪性確率が 0 より大きい結果は遮断します。専用 IP セットに保存し、実行時のセットが未配置の場合は専用の DROP ルールで即時遮断します。firewalld の再読込は行いません。<code>drop</code> ゾーンの対象が <code>DROP</code> であることを確認できない場合は遮断しません。</p>
             </div>
         </div>
     </div>
@@ -295,11 +295,15 @@ async function checkNow() {
     button.disabled = true;
     try {
         const result = await api.send('/ai-defense/api/check', 'POST', {});
-        if (!result) return;
-        toast(result.message || 'AI 防御確認を完了しました。', !result.ok);
-        await refresh();
+        if (result) toast(result.message || 'AI 防御確認を完了しました。', !result.ok);
     } finally {
-        button.disabled = false;
+        // Error responses are already shown by the shared API helper. Reload
+        // the persisted result even after HTTP 503, then restore the button.
+        try {
+            await refresh();
+        } finally {
+            button.disabled = false;
+        }
     }
 }
 
