@@ -3,8 +3,8 @@
 The module derives anonymised, aggregated attack evidence from local logs for
 currently exposed firewalld ports. It asks Jev to classify each opaque source
 summary and, for a suspicious candidate, blocks in the safer direction unless
-Jev can clearly rule out malicious intent. Raw log lines, source IP addresses,
-and the API key never leave the appliance.
+Jev can clearly rule out malicious intent. Raw log lines and source IP
+addresses remain local; the API key is used only in Jev's authentication header.
 """
 from __future__ import annotations
 
@@ -12,8 +12,11 @@ import datetime as dt
 import fcntl
 import ipaddress
 import json
+import logging
 import os
 import re
+import socket
+import ssl
 import tempfile
 import time
 import urllib.error
@@ -30,6 +33,7 @@ from ..shell import run
 
 
 bp = Blueprint("ai_defense", __name__, url_prefix="/ai-defense")
+logger = logging.getLogger(__name__)
 
 MODULE_NAME = "ai_defense"
 DEFAULT_INTERVAL_HOURS = 8
@@ -51,6 +55,8 @@ JEV_MAX_REQUEST_BYTES = 64 * 1024
 CLEAR_BENIGN_CONFIDENCE_MINIMUM = 0.85
 IPSET_V4 = "synca-ai-defense-v4"
 IPSET_V6 = "synca-ai-defense-v6"
+DIRECT_BLOCK_COMMENT = "synca-ai-defense"
+DIRECT_BLOCK_PRIORITY = "-32768"
 AI_DEFENSE_SERVICE = "server-gui-ai-defense.service"
 AI_DEFENSE_TIMER = "server-gui-ai-defense.timer"
 RUNTIME_BINARY = Path("/opt/server-gui/bin/ai-defense-check")
@@ -220,7 +226,11 @@ def check_now():
         return jsonify({"ok": False, "error": "別の AI 防御確認が実行中です。"}), 409
     if result.get("status") in {"disabled", "api_key_missing"}:
         return jsonify({"ok": False, "error": result["message"]}), 409
-    return jsonify(result), (200 if result.get("ok") else 503)
+    if not result.get("ok"):
+        # The common GUI helper displays error, while stored check results use
+        # message. Provide both so HTTP 503 does not hide the diagnostic cause.
+        return jsonify({**result, "error": result["message"]}), 503
+    return jsonify(result), 200
 
 
 @bp.route("/api/blocked/unblock", methods=["POST"])
@@ -267,7 +277,7 @@ def _public_state(state: dict[str, Any]) -> dict[str, Any]:
         "blocked": blocked,
         "privacy": {
             "sent_to_jev": "匿名化した候補ID、イベント種別の件数、対象ポートだけを送信します。",
-            "kept_local": "IP アドレス、API キー、元のログ行は装置内に保持します。",
+            "kept_local": "IP アドレスと元のログ行は装置内に保持します。API キーは Jev API の認証ヘッダーにのみ使用します。",
         },
     }
 
@@ -339,11 +349,16 @@ def run_scheduled_check(config_dir: Path | str, force: bool = False) -> dict[str
         state_payload, questions = _build_jev_request(candidates, exposure["ports"], state["interval_hours"])
         try:
             answers = _call_jev(state["api_key"], state_payload, questions)
-        except (JevResponseError, urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+        except (JevResponseError, urllib.error.URLError, OSError) as exc:
+            failure = _jev_failure_details(exc)
+            # Never log the exception, provider body, request, or headers:
+            # only allowlisted failure categories and numeric HTTP status.
+            logger.warning("AI defense Jev check failed: category=%s upstream_http_status=%s",
+                           failure["error_category"], failure.get("upstream_http_status"))
             result = {
                 "ok": False,
                 "status": "jev_unavailable",
-                "message": "Jev の判定結果を検証できなかったため、遮断は行いませんでした。",
+                **failure,
                 "completed_at": completed_at,
                 "open_ports": exposure["ports"],
                 "candidate_count": len(candidates),
@@ -354,12 +369,15 @@ def run_scheduled_check(config_dir: Path | str, force: bool = False) -> dict[str
 
         blocks: list[dict[str, Any]] = []
         blocked_count = 0
+        failed_count = 0
         for candidate in candidates:
             answer = answers.get(candidate["id"], {})
             if not _should_block(candidate, answer):
                 continue
             firewall_result = _block_ip(candidate["ip"])
             if not firewall_result["ok"]:
+                failed_count += 1
+                logger.warning("AI defense block failed: reason=%s", firewall_result.get("error", "unknown"))
                 continue
             blocks.append({
                 "ip": candidate["ip"],
@@ -369,16 +387,19 @@ def run_scheduled_check(config_dir: Path | str, force: bool = False) -> dict[str
                 "malicious_probability": answer["probabilities"]["malicious"],
                 "event_types": candidate["event_types"],
                 "target_ports": candidate["target_ports"],
+                "runtime_method": firewall_result.get("runtime_method", "ipset"),
             })
             blocked_count += 1
         result = {
-            "ok": True,
-            "status": "completed",
-            "message": "AI 防御確認を完了しました。",
+            "ok": failed_count == 0,
+            "status": "block_failed" if failed_count else "completed",
+            "message": (f"AI 防御の判定は完了しましたが、{failed_count} 件を遮断できませんでした。firewalld の状態を確認してください。"
+                        if failed_count else "AI 防御確認を完了しました。"),
             "completed_at": completed_at,
             "open_ports": exposure["ports"],
             "candidate_count": len(candidates),
             "blocked_count": blocked_count,
+            "blocked_failed_count": failed_count,
         }
         _record_check_result(store, result, blocks)
         return result
@@ -424,7 +445,13 @@ def _record_check_result(store: ConfigStore, result: dict[str, Any], new_blocks:
             "open_ports": result.get("open_ports", []),
             "candidate_count": result.get("candidate_count", 0),
             "blocked_count": result.get("blocked_count", 0),
+            "blocked_failed_count": result.get("blocked_failed_count", 0),
         }
+        # Store only bounded diagnostic identifiers, never provider response
+        # bodies which could echo submitted input or authentication data.
+        for field in ("error_category", "upstream_http_status"):
+            if field in result:
+                state["last_result"][field] = result[field]
         stored.clear()
         stored.update(state)
 
@@ -884,7 +911,7 @@ def _requires_review(events: dict[str, int], total: int) -> bool:
     return events.get("ssh_invalid_user", 0) >= 1 or events.get("http_suspicious_path", 0) >= 1 or total >= 3
 
 
-def _build_jev_request(candidates: list[dict[str, Any]], open_ports: list[str], interval_hours: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _build_jev_request(candidates: list[dict[str, Any]], open_ports: list[str], interval_hours: int) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Build a privacy-minimised Jev request with no source address or raw log text."""
     summaries = [
         {
@@ -902,29 +929,36 @@ def _build_jev_request(candidates: list[dict[str, Any]], open_ports: list[str], 
         "privacy": "No source IP address, raw log line, account name, request path, or credential is provided.",
         "candidates": summaries,
     }
-    questions = [
-        {
-            "id": item["id"],
-            "question": "Classify this anonymized event summary using only the supplied evidence.",
+    # System One v1 requires a map of typed questions. Question IDs are not
+    # model input, so explicitly point each instruction at its own summary;
+    # identical instructions could otherwise classify another source's events.
+    questions = {
+        item["id"]: {
+            "type": "choice",
+            "instructions": (
+                f"Classify only the anonymized WAN-access evidence in `candidates[{index}]`. "
+                "Use its event counters and target ports, not other candidates' activity."
+            ),
             "criteria": {
                 "malicious": "Repeated credential attack, exploit probing, or attack-like scanning is supported by the counters.",
                 "benign": "The counters are more consistent with ordinary legitimate use.",
                 "insufficient": "The supplied counters do not support a reliable classification.",
             },
-            "required": True,
         }
-        for item in summaries
-    ]
+        for index, item in enumerate(summaries)
+    }
     return state, questions
 
 
-def _call_jev(api_key: str, state: dict[str, Any], questions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _call_jev(api_key: str, state: dict[str, Any], questions: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Call the documented System One API and validate every answer before use.
 
     Only rate-limit and overload responses are retried.  All other failures,
     including malformed JSON and schema drift, are fail-open and cause no
     firewall change.
     """
+    if not isinstance(questions, dict) or not questions:
+        raise JevResponseError("Jev questions must be a nonempty map")
     body = json.dumps({"model": JEV_MODEL, "state": state, "questions": questions}, separators=(",", ":")).encode("utf-8")
     if len(body) > JEV_MAX_REQUEST_BYTES:
         raise JevResponseError("Jev request exceeds the bounded payload size")
@@ -945,19 +979,54 @@ def _call_jev(api_key: str, state: dict[str, Any], questions: list[dict[str, Any
                 raw = response.read(JEV_MAX_RESPONSE_BYTES + 1)
             if len(raw) > JEV_MAX_RESPONSE_BYTES:
                 raise JevResponseError("Jev response exceeds the bounded size")
-            parsed = json.loads(raw.decode("utf-8"))
-            return _validate_jev_response(parsed, {question["id"] for question in questions})
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
+                raise JevResponseError("Jev response is not valid UTF-8 JSON") from exc
+            return _validate_jev_response(parsed, set(questions))
         except urllib.error.HTTPError as exc:
             last_error = exc
+            exc.close()
             if exc.code not in {429, 529} or attempt == 2:
-                raise
-        except urllib.error.URLError as exc:
-            last_error = exc
-            if attempt == 2:
                 raise
         if attempt < 2:
             time.sleep(0.5 * (2 ** attempt))
     raise last_error if last_error is not None else JevResponseError("Jev call failed")
+
+
+def _jev_failure_details(exc: BaseException) -> dict[str, Any]:
+    """Translate a failure into safe diagnostic categories and operator guidance.
+
+    Provider validation responses can contain submitted input. Do not retain
+    or echo their text; the HTTP status and local exception type are sufficient
+    to distinguish authentication, bad requests, rate limits, and transport.
+    """
+    details: dict[str, Any] = {}
+    if isinstance(exc, urllib.error.HTTPError):
+        details["upstream_http_status"] = exc.code
+        exc.close()
+        if exc.code in {401, 403}:
+            category, message = "authentication", "Jev API の認証またはアクセス権限を確認できませんでした。API キーと利用権限を確認してください。"
+        elif exc.code in {400, 422}:
+            category, message = "request_format", "Jev API が判定要求の形式を受け付けませんでした。管理 GUI を最新版へ更新してください。"
+        elif exc.code == 429:
+            category, message = "rate_limit", "Jev API の利用制限に達しました。時間を置いて再実行してください。"
+        else:
+            category, message = "provider_error", "Jev API がエラーを返しました。時間を置いて再実行してください。"
+        message += f"（Jev HTTP {exc.code}）"
+    elif isinstance(exc, JevResponseError):
+        category, message = "invalid_response", "Jev の応答形式や判定結果を検証できませんでした。"
+    else:
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, TimeoutError):
+            category, message = "timeout", "Jev API への接続または応答が時間の上限に達しました。"
+        elif isinstance(reason, socket.gaierror):
+            category, message = "dns", "Jev API の名前を解決できませんでした。DNS 設定を確認してください。"
+        elif isinstance(reason, ssl.SSLError):
+            category, message = "tls", "Jev API との TLS 接続に失敗しました。装置の時刻と CA 証明書を確認してください。"
+        else:
+            category, message = "connection", "Jev API に接続できませんでした。WAN 経路を確認してください。"
+    return {**details, "error_category": category, "message": message + " 今回の確認では新たな遮断を行っていません。"}
 
 
 def _validate_jev_response(response: Any, expected_ids: set[str]) -> dict[str, dict[str, Any]]:
@@ -1026,10 +1095,12 @@ def _meets_local_block_guard(events: dict[str, Any], total: int) -> bool:
 
 
 def _block_ip(ip_text: str) -> dict[str, Any]:
-    """Add a verified public address to dedicated runtime and permanent drop ipsets.
+    """Block a verified public address immediately and persist its drop-ipset entry.
 
-    No firewalld reload is used.  The runtime block takes effect immediately;
-    the permanent entry makes it survive a normal future firewalld restart.
+    New ipsets can only be created permanently. Until a normal later reload
+    loads that set, use application-owned INPUT/FORWARD direct DROP rules;
+    their DROP verdict also applies before nftables zone permits. Do not
+    reload firewalld or alter existing zone/interface bindings to initialise it.
     """
     try:
         parsed = ipaddress.ip_address(ip_text)
@@ -1040,34 +1111,112 @@ def _block_ip(ip_text: str) -> dict[str, Any]:
     name, family = (IPSET_V4, "inet") if parsed.version == 4 else (IPSET_V6, "inet6")
     if not _drop_zone_is_drop(False) or not _drop_zone_is_drop(True):
         return {"ok": False, "error": "drop zone target is not DROP"}
-    for permanent in (True, False):
-        if not _ensure_ipset(name, family, permanent):
-            return {"ok": False, "error": "AI defense ipset is unavailable"}
-        if not _ensure_drop_source(name, permanent):
-            return {"ok": False, "error": "AI defense drop source is unavailable"}
-    runtime_add = _firewall([f"--ipset={name}", f"--add-entry={parsed}"])
-    if not runtime_add.ok and not _entry_already_present(runtime_add):
-        return {"ok": False, "error": "runtime block could not be added"}
+    if not _ensure_ipset(name, family, True) or not _ensure_drop_source(name, True):
+        return {"ok": False, "error": "permanent drop ipset is unavailable"}
+    previous = _firewall(["--permanent", f"--ipset={name}", f"--query-entry={parsed}"])
+    if previous.returncode not in {0, 1}:
+        return {"ok": False, "error": "permanent entry could not be checked"}
     permanent_add = _firewall(["--permanent", f"--ipset={name}", f"--add-entry={parsed}"])
     if not permanent_add.ok and not _entry_already_present(permanent_add):
-        _firewall([f"--ipset={name}", f"--remove-entry={parsed}"])
         return {"ok": False, "error": "permanent block could not be added"}
-    return {"ok": True, "ipset": name}
+    runtime_method = "ipset"
+    if _ensure_ipset(name, family, False):
+        runtime_ok = _ensure_drop_source(name, False)
+        if runtime_ok:
+            runtime_add = _firewall([f"--ipset={name}", f"--add-entry={parsed}"])
+            runtime_ok = (runtime_add.ok or _entry_already_present(runtime_add)) and _firewall([
+                f"--ipset={name}", f"--query-entry={parsed}",
+            ]).ok
+    else:
+        runtime_method = "direct"
+        runtime_ok = _update_direct_block(str(parsed), True)
+    if not runtime_ok:
+        # Roll back only a newly saved entry, never an earlier existing ban.
+        if not previous.ok:
+            _firewall(["--permanent", f"--ipset={name}", f"--remove-entry={parsed}"])
+        return {"ok": False, "error": "runtime block could not be added"}
+    return {"ok": True, "ipset": name, "runtime_method": runtime_method}
+
+
+def _direct_block_rules(ip_text: str) -> list[list[str]]:
+    """Return exact, labelled fallback rules for local and forwarded traffic."""
+    parsed = ipaddress.ip_address(ip_text)
+    family = "ipv4" if parsed.version == 4 else "ipv6"
+    return [[family, "filter", chain, DIRECT_BLOCK_PRIORITY, "-s", str(parsed),
+             "-m", "comment", "--comment", DIRECT_BLOCK_COMMENT, "-j", "DROP"]
+            for chain in ("INPUT", "FORWARD")]
+
+
+def _update_direct_block(ip_text: str, enabled: bool) -> bool:
+    """Idempotently add or remove only this module's two labelled DROP rules.
+
+    Verify firewalld registration and actual kernel placement. On a failed
+    add, roll back only rules created by this invocation; pre-existing rules
+    and unrelated administrator rules remain.
+    """
+    added: list[list[str]] = []
+    for rule in _direct_block_rules(ip_text):
+        exists = _firewall(["--direct", "--query-rule", *rule])
+        if exists.returncode not in {0, 1}:
+            success = False
+        elif exists.ok == enabled:
+            success = _direct_kernel_rule_present(rule) is enabled
+        else:
+            action = "--add-rule" if enabled else "--remove-rule"
+            changed = _firewall(["--direct", action, *rule])
+            success = changed.ok or (_entry_already_present(changed) if enabled else _entry_absent(changed))
+            if success and enabled:
+                added.append(rule)
+            if success:
+                verified = _firewall(["--direct", "--query-rule", *rule])
+                success = (verified.returncode == (0 if enabled else 1)
+                           and _direct_kernel_rule_present(rule) is enabled)
+        if not success:
+            for new_rule in added:
+                _firewall(["--direct", "--remove-rule", *new_rule])
+            return False
+    return True
+
+
+def _direct_kernel_rule_present(rule: list[str]) -> bool | None:
+    """Check the exact DROP rule in both supported direct-backend layouts.
+
+    With FirewallBackend=nftables, firewalld installs direct rules in INPUT
+    and FORWARD themselves. The iptables backend uses *_direct chains, which
+    must also be reachable from the built-in chain. A missing command, lock
+    timeout, or permission error is unknown, never proof of an absent rule.
+    """
+    command = "iptables" if rule[0] == "ipv4" else "ip6tables"
+    prefix = [command, "-w", "2", "-t", rule[1], "-C"]
+    for chain in (rule[2], rule[2] + "_direct"):
+        present = run([*prefix, chain, *rule[4:]], timeout=5)
+        if present.ok:
+            if chain == rule[2]:
+                return True
+            linked = run([*prefix, rule[2], "-j", chain], timeout=5)
+            return True if linked.ok else (False if linked.returncode == 1 else None)
+        if present.returncode != 1:
+            return None
+    return False
 
 
 def unblock_ip(config_dir: Path | str, ip_text: str) -> dict[str, Any]:
-    """Remove a recorded block permanently first, then remove its live entry."""
+    """Remove the saved ban and every owned runtime path, including fallback rules."""
     try:
         parsed = ipaddress.ip_address(ip_text)
     except ValueError:
         return {"ok": False, "error": "IP アドレスの形式が正しくありません。"}
     name = IPSET_V4 if parsed.version == 4 else IPSET_V6
+    family = "inet" if parsed.version == 4 else "inet6"
     permanent_remove = _firewall(["--permanent", f"--ipset={name}", f"--remove-entry={parsed}"])
     if not permanent_remove.ok and not _entry_absent(permanent_remove):
         return {"ok": False, "error": "永続設定から遮断を解除できませんでした。"}
-    runtime_remove = _firewall([f"--ipset={name}", f"--remove-entry={parsed}"])
-    if not runtime_remove.ok and not _entry_absent(runtime_remove):
-        return {"ok": False, "error": "現在の遮断を解除できませんでした。"}
+    if _ensure_ipset(name, family, False):
+        runtime_remove = _firewall([f"--ipset={name}", f"--remove-entry={parsed}"])
+        if not runtime_remove.ok and not _entry_absent(runtime_remove):
+            return {"ok": False, "error": "現在の IP セットから遮断を解除できませんでした。"}
+    if not _update_direct_block(str(parsed), False):
+        return {"ok": False, "error": "現在の遮断ルールを解除できませんでした。"}
     store = ConfigStore(Path(config_dir))
     with store.transaction(MODULE_NAME, _default_state()) as stored:
         state = _normalise_state(stored)
@@ -1096,11 +1245,17 @@ def _drop_zone_is_drop(permanent: bool) -> bool:
 
 
 def _ensure_ipset(name: str, family: str, permanent: bool) -> bool:
-    """Create or verify the dedicated hash:ip set without adopting a foreign set."""
+    """Create a saved set or verify a loaded one without adopting a foreign set.
+
+    --new-ipset is permanent-only. A missing runtime set is not an error to
+    repair with reload; the caller uses its labelled direct-rule fallback.
+    """
     prefix = ["--permanent"] if permanent else []
     info = _firewall([*prefix, f"--info-ipset={name}"])
     if info.ok:
         return _ipset_info_matches(info.stdout, family)
+    if not permanent:
+        return False
     created = _firewall([*prefix, f"--new-ipset={name}", "--type=hash:ip", f"--option=family={family}"])
     if not created.ok:
         return False

@@ -8,15 +8,22 @@ validation logic, installer timer wiring, and the fail-open firewall contract.
 from __future__ import annotations
 
 import ast
+import io
 import ipaddress
 import json
 import math
 import re
+import socket
+import ssl
 import struct
 import unittest
+import urllib.error
+import urllib.request
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,7 +199,19 @@ class AiDefenseTests(unittest.TestCase):
                 "JevResponseError",
                 "_active_zone_bindings",
                 "_build_jev_request",
+                "_call_jev",
+                "_jev_failure_details",
                 "_build_candidates",
+                "_block_ip",
+                "_direct_block_rules",
+                "_direct_kernel_rule_present",
+                "_ensure_drop_source",
+                "_ensure_ipset",
+                "_entry_absent",
+                "_entry_already_present",
+                "_ipset_info_matches",
+                "_update_direct_block",
+                "unblock_ip",
                 "_contains_port",
                 "_discover_open_ports",
                 "_drop_zone_is_drop",
@@ -216,6 +235,7 @@ class AiDefenseTests(unittest.TestCase):
                 "_requires_review",
                 "_meets_local_block_guard",
                 "_should_block",
+                "run_scheduled_check",
             },
         )
         cls.logic["CLEAR_BENIGN_CONFIDENCE_MINIMUM"] = 0.85
@@ -224,6 +244,15 @@ class AiDefenseTests(unittest.TestCase):
         cls.logic["SERVICE_RE"] = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
         cls.logic["IP_TOKEN_RE"] = re.compile(r"(?:\bfrom\s+|\brhost=|\bSRC=|\brate limit hit for\s+)([0-9A-Fa-f:.]+)")
         cls.logic["ipaddress"] = ipaddress
+        cls.logic.update({
+            "urllib": urllib, "socket": socket, "ssl": ssl,
+            "Path": Path, "MODULE_NAME": "ai_defense",
+            "JEV_URL": "https://api.typesafe.ai/v1/systemone", "JEV_MODEL": "jev-latest",
+            "JEV_TIMEOUT_SECONDS": 30, "JEV_MAX_RESPONSE_BYTES": 512 * 1024,
+            "JEV_MAX_REQUEST_BYTES": 64 * 1024,
+            "IPSET_V4": "synca-ai-defense-v4", "IPSET_V6": "synca-ai-defense-v6",
+            "DIRECT_BLOCK_COMMENT": "synca-ai-defense", "DIRECT_BLOCK_PRIORITY": "-32768",
+        })
 
     def test_jev_request_never_contains_source_ip(self) -> None:
         candidates = [{
@@ -238,6 +267,246 @@ class AiDefenseTests(unittest.TestCase):
         self.assertNotIn("8.8.4.4", serialized)
         self.assertIn("source-001", serialized)
         self.assertEqual(set(state["candidates"][0]), {"id", "event_counts", "target_ports", "event_total"})
+        self.assertIsInstance(questions, dict)
+        self.assertEqual(set(questions), {"source-001"})
+        self.assertEqual(set(questions["source-001"]), {"type", "instructions", "criteria"})
+        self.assertEqual(questions["source-001"]["type"], "choice")
+
+    def test_each_jev_question_is_bound_to_its_own_candidate(self) -> None:
+        candidates = [
+            {"id": "source-001", "ip": "8.8.4.4", "event_types": {"ssh_failed_auth": 3}, "event_total": 3, "target_ports": ["22/tcp"]},
+            {"id": "source-002", "ip": "1.1.1.1", "event_types": {"http_suspicious_path": 1}, "event_total": 1, "target_ports": ["443/tcp"]},
+        ]
+        state, questions = self.logic["_build_jev_request"](candidates, ["22/tcp", "443/tcp"], 8)
+        self.assertEqual(set(questions), {"source-001", "source-002"})
+        self.assertIn("`candidates[0]`", questions["source-001"]["instructions"])
+        self.assertIn("`candidates[1]`", questions["source-002"]["instructions"])
+        self.assertNotIn("8.8.4.4", json.dumps({"state": state, "questions": questions}))
+
+    def test_jev_transport_sends_the_v1_contract_and_retries_only_overload(self) -> None:
+        response = {
+            "model": "jev-1.13.0", "usage": {"input_tokens": 10, "output_tokens": 4},
+            "answers": {"source-001": {"type": "choice", "choice": "malicious", "confidence": 0.9,
+                        "probabilities": {"malicious": 1.0, "benign": 0.0, "insufficient": 0.0}}},
+        }
+        question = {"source-001": {"type": "choice", "instructions": "test", "criteria": {
+            "malicious": "attack", "benign": "normal", "insufficient": "unknown",
+        }}}
+        sleeps = []
+        self.logic["time"] = SimpleNamespace(sleep=sleeps.append)
+        overload = urllib.error.HTTPError("https://api.typesafe.ai/v1/systemone", 529, "overload", {}, io.BytesIO(b""))
+        with patch("urllib.request.urlopen", side_effect=[overload, io.BytesIO(json.dumps(response).encode())]) as opened:
+            answer = self.logic["_call_jev"]("unit-test-key", {}, question)
+            self.assertEqual(answer["source-001"]["choice"], "malicious")
+            self.assertEqual(opened.call_count, 2)
+            self.assertEqual(sleeps, [0.5])
+            body = json.loads(opened.call_args.args[0].data)
+            self.assertEqual(body["questions"], question)
+        for failure in (urllib.error.HTTPError("https://api.typesafe.ai/v1/systemone", 422, "bad question", {}, io.BytesIO(b"")),
+                        urllib.error.URLError("connection unavailable")):
+            with patch("urllib.request.urlopen", side_effect=failure) as opened:
+                with self.assertRaises(type(failure)):
+                    self.logic["_call_jev"]("unit-test-key", {}, question)
+                self.assertEqual(opened.call_count, 1)
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(b"not JSON")):
+            with self.assertRaises(self.logic["JevResponseError"]):
+                self.logic["_call_jev"]("unit-test-key", {}, question)
+
+    def test_jev_failure_details_do_not_echo_provider_data_or_secrets(self) -> None:
+        secret = "provider-secret-that-must-not-be-returned"
+        for status, category in ((401, "authentication"), (422, "request_format"), (429, "rate_limit"), (529, "provider_error")):
+            with self.subTest(status=status):
+                error = urllib.error.HTTPError("https://api.typesafe.ai/" + secret, status, secret, {}, io.BytesIO(secret.encode()))
+                details = self.logic["_jev_failure_details"](error)
+                self.assertEqual(details["error_category"], category)
+                self.assertEqual(details["upstream_http_status"], status)
+                self.assertNotIn(secret, json.dumps(details))
+        for reason, category in ((TimeoutError("private"), "timeout"), (socket.gaierror("private"), "dns"),
+                                 (ssl.SSLError("private"), "tls")):
+            self.assertEqual(self.logic["_jev_failure_details"](urllib.error.URLError(reason))["error_category"], category)
+
+    def test_jev_failure_records_diagnostic_without_blocking(self) -> None:
+        namespace = dict(self.logic)
+        state = {"enabled": True, "api_key": "unit-test-key", "interval_hours": 8}
+        saved = []
+        namespace.update({
+            "ConfigStore": lambda directory: SimpleNamespace(load=lambda *args: state),
+            "_default_state": lambda: {}, "_normalise_state": lambda value: value,
+            "_exclusive_defense_lock": lambda directory: nullcontext(),
+            "_discover_open_ports": lambda: {"ports": ["22/tcp"]},
+            "_collect_log_events": lambda *args: {},
+            "_build_candidates": lambda *args: [{"id": "source-001", "ip": "8.8.4.4", "event_types": {"ssh_failed_auth": 3},
+                                                "event_total": 3, "target_ports": ["22/tcp"]}],
+            "_now_iso": lambda: "2026-10-14T00:00:00+09:00",
+            "_record_check_result": lambda store, result, blocks: saved.append((result, blocks)),
+            "_block_ip": lambda *args: self.fail("an API error must not change firewall rules"),
+            "logger": SimpleNamespace(warning=lambda *args: None),
+        })
+
+        def unavailable(*args):
+            raise urllib.error.HTTPError("https://api.typesafe.ai/v1/systemone", 422, "validation", {}, io.BytesIO(b""))
+
+        namespace["_call_jev"] = unavailable
+        # Rebind the selected function to isolated globals so this operational
+        # regression cannot affect the other parser or firewall fixtures.
+        import types
+        check = types.FunctionType(self.logic["run_scheduled_check"].__code__, namespace)
+        result = check("/unused", True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_category"], "request_format")
+        self.assertEqual(saved[0][1], [])
+        namespace["_call_jev"] = lambda *args: {"source-001": {
+            "choice": "malicious", "confidence": 1.0,
+            "probabilities": {"malicious": 1.0, "benign": 0.0, "insufficient": 0.0},
+        }}
+        namespace["_block_ip"] = lambda *args: {"ok": False, "error": "runtime block could not be added"}
+        failed_block = check("/unused", True)
+        self.assertFalse(failed_block["ok"])
+        self.assertEqual(failed_block["status"], "block_failed")
+        self.assertEqual(failed_block["blocked_failed_count"], 1)
+        self.assertEqual(failed_block["blocked_count"], 0)
+
+    def _firewall_fixture(self, runtime_loaded: bool = False, failure_chain: str = ""):
+        """Model permanent-only ipset creation and independently tracked rules."""
+        state = {"saved": set(), "runtime": set(), "rules": set(), "kernel_rules": set(),
+                 "calls": [], "loaded": runtime_loaded, "kernel_available": True}
+
+        def result(ok=True, stdout="", code=None, stderr=""):
+            return SimpleNamespace(ok=ok, stdout=stdout, stderr=stderr,
+                                   returncode=(0 if ok else 1) if code is None else code)
+
+        def firewall(args):
+            state["calls"].append(tuple(args))
+            permanent = "--permanent" in args
+            if "--list-all" in args:
+                return result(stdout="drop\n target: DROP\n")
+            if any(arg.startswith("--info-ipset=") for arg in args):
+                return result(stdout="type: hash:ip\n options: family=inet\n") if permanent or state["loaded"] else result(False, code=136, stderr="INVALID_IPSET")
+            if any(arg.startswith("--new-ipset=") for arg in args):
+                self.assertTrue(permanent, "runtime ipset creation is unsupported")
+                return result()
+            if "--list-sources" in args:
+                return result(stdout="ipset:synca-ai-defense-v4")
+            if "--direct" in args:
+                rule = tuple(args[2:])
+                if args[1] == "--query-rule":
+                    return result(rule in state["rules"])
+                if args[1] == "--add-rule":
+                    if rule[2] == failure_chain:
+                        return result(False, code=13, stderr="COMMAND_FAILED")
+                    state["rules"].add(rule)
+                    if state["kernel_available"]:
+                        state["kernel_rules"].add(rule)
+                elif args[1] == "--remove-rule":
+                    state["rules"].discard(rule)
+                    state["kernel_rules"].discard(rule)
+                return result()
+            entries = state["saved"] if permanent else state["runtime"]
+            for action in ("query", "add", "remove"):
+                argument = next((arg for arg in args if arg.startswith(f"--{action}-entry=")), None)
+                if argument:
+                    ip = argument.split("=", 1)[1]
+                    if action == "query":
+                        return result(ip in entries)
+                    if action == "add":
+                        entries.add(ip)
+                    else:
+                        entries.discard(ip)
+                    return result()
+            self.fail("unexpected firewall operation: " + repr(args))
+
+        def kernel(argv, **kwargs):
+            state["calls"].append(tuple(argv))
+            self.assertIn(argv[0], {"iptables", "ip6tables"})
+            self.assertEqual(argv[1:6], ["-w", "2", "-t", "filter", "-C"])
+            family = "ipv4" if argv[0] == "iptables" else "ipv6"
+            rule = (family, "filter", argv[6], "-32768", *argv[7:])
+            return result(rule in state["kernel_rules"])
+
+        return state, firewall, kernel
+
+    def test_missing_runtime_ipset_uses_verified_direct_drop_without_reload(self) -> None:
+        state, firewall, kernel = self._firewall_fixture()
+        with patch.dict(self.logic, {"_firewall": firewall, "run": kernel}):
+            result = self.logic["_block_ip"]("8.8.4.4")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["runtime_method"], "direct")
+            self.assertEqual(state["saved"], {"8.8.4.4"})
+            self.assertEqual(len(state["rules"]), 2)
+            self.assertEqual({rule[2] for rule in state["rules"]}, {"INPUT", "FORWARD"})
+            self.assertTrue(all("synca-ai-defense" in rule and rule[-1] == "DROP" for rule in state["rules"]))
+            self.assertEqual(state["rules"], state["kernel_rules"])
+            self.assertFalse(any("--reload" in command for command in state["calls"]))
+            self.assertFalse(any(any(arg.startswith("--new-ipset=") for arg in command) for command in state["calls"]))
+
+    def test_loaded_runtime_ipset_uses_the_normal_set_path(self) -> None:
+        state, firewall, kernel = self._firewall_fixture(runtime_loaded=True)
+        with patch.dict(self.logic, {"_firewall": firewall, "run": kernel}):
+            result = self.logic["_block_ip"]("8.8.4.4")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["runtime_method"], "ipset")
+        self.assertEqual(state["saved"], {"8.8.4.4"})
+        self.assertEqual(state["runtime"], {"8.8.4.4"})
+        self.assertEqual(state["rules"], set())
+
+    def test_failed_fallback_rolls_back_only_new_bans(self) -> None:
+        state, firewall, kernel = self._firewall_fixture(failure_chain="FORWARD")
+        with patch.dict(self.logic, {"_firewall": firewall, "run": kernel}):
+            self.assertFalse(self.logic["_block_ip"]("8.8.4.4")["ok"])
+            self.assertEqual(state["saved"], set())
+            self.assertEqual(state["rules"], set())
+            state["saved"].add("8.8.4.4")
+            old_rule = tuple(self.logic["_direct_block_rules"]("8.8.4.4")[0])
+            state["rules"].add(old_rule)
+            state["kernel_rules"].add(old_rule)
+            self.assertFalse(self.logic["_block_ip"]("8.8.4.4")["ok"])
+            self.assertEqual(state["saved"], {"8.8.4.4"})
+            self.assertEqual(state["rules"], {old_rule})
+
+    def test_manual_unblock_cleans_both_paths_after_a_later_reload(self) -> None:
+        state, firewall, kernel = self._firewall_fixture()
+        config = {"blocked": [{"ip": "8.8.4.4", "runtime_method": "direct"}]}
+        store = SimpleNamespace(transaction=lambda *args: nullcontext(config))
+        with patch.dict(self.logic, {"_firewall": firewall, "run": kernel, "ConfigStore": lambda *args: store,
+                                    "_default_state": lambda: {}, "_normalise_state": lambda value: dict(value)}):
+            self.assertTrue(self.logic["_block_ip"]("8.8.4.4")["ok"])
+            # FlushAllOnReload=no may retain the owned direct rules while the
+            # saved set becomes loaded; manual unblock must clean both paths.
+            state["loaded"] = True
+            state["runtime"].update(state["saved"])
+            unrelated = ("ipv4", "filter", "INPUT", "0", "-s", "8.8.4.4", "-j", "DROP")
+            state["rules"].add(unrelated)
+            result = self.logic["unblock_ip"]("/unused", "8.8.4.4")
+        self.assertTrue(result["ok"])
+        self.assertEqual(state["saved"], set())
+        self.assertEqual(state["runtime"], set())
+        self.assertEqual(state["rules"], {unrelated})
+        self.assertEqual(config["blocked"], [])
+        self.assertTrue(all(rule[0] == "ipv6" for rule in self.logic["_direct_block_rules"]("2001:4860:4860::8888")))
+
+    def test_registered_rule_without_kernel_drop_is_a_block_failure(self) -> None:
+        state, firewall, kernel = self._firewall_fixture()
+        state["kernel_available"] = False
+        with patch.dict(self.logic, {"_firewall": firewall, "run": kernel}):
+            self.assertFalse(self.logic["_block_ip"]("8.8.4.4")["ok"])
+        self.assertEqual(state["saved"], set())
+        self.assertEqual(state["rules"], set())
+
+    def test_kernel_verification_checks_iptables_chain_links_and_command_errors(self) -> None:
+        rule = self.logic["_direct_block_rules"]("8.8.4.4")[0]
+        calls = []
+
+        def kernel(argv, **kwargs):
+            calls.append(argv)
+            present = argv[6] == "INPUT_direct" or argv[7:] == ["-j", "INPUT_direct"]
+            return SimpleNamespace(ok=present, returncode=0 if present else 1)
+
+        with patch.dict(self.logic, {"run": kernel}):
+            self.assertTrue(self.logic["_direct_kernel_rule_present"](rule))
+        self.assertEqual(calls[-1][-3:], ["INPUT", "-j", "INPUT_direct"])
+        for returncode in (124, 127, 4):
+            with patch.dict(self.logic, {"run": lambda *args, **kwargs: SimpleNamespace(ok=False, returncode=returncode)}):
+                self.assertIsNone(self.logic["_direct_kernel_rule_present"](rule))
 
     def test_jev_response_requires_complete_probability_contract(self) -> None:
         response = {
