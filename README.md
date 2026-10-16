@@ -103,6 +103,24 @@ python scripts/test-firewall-allowlist.py
 - DHCP オプションのインポートとプレビュー
 - GUI からのローカル DHCP スコープ管理
 
+#### 上流DNSの選択
+
+DNS画面でドメインを空欄にした上流DNSを登録すると、dnsmasqはその設定を通常の問い合わせ先として使います。生成設定に`no-resolv`を追加し、OSの`/etc/resolv.conf`にあるDNSを併用しないようにしました。LAN内の別ルーターから自動取得したDNSが、GUIで指定した上流DNSに混ざることを防ぎます。ドメインを指定した上流DNSへの振り分けも維持します。
+
+上流DNSをすべて削除した場合や、ドメインを指定した上流DNSだけを登録した場合は、通常の問い合わせにOSのDNSを使います。上流DNSが未設定の初期状態では、既定の`1.1.1.1`と`1.0.0.1`を使います。OS自身の名前解決に使うDNSは、この設定では変更しません。[dnsmasq公式マニュアル](https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html)の`--server`と`--no-resolv`に基づく動作です。
+
+既存装置では更新後にDNS画面から設定を適用してください。生成設定の変更時は`dnsmasq --test`で検査してからdnsmasqを再起動します。WAN、NetworkManager、firewalldの再起動は不要です。
+
+LAN端末が名前解決できない場合は、UTMのDNS応答に加え、端末が実際に使っているDNSとDHCPの配布元を確認してください。同じLAN内の別機器が配布するDHCPやIPv6 DNSは、その機器の設定や接続構成でも調整が必要です。端末と別DHCPサーバーが同じスイッチに接続されている場合、その間の通信はUTMを通らないことがあります。
+
+回帰テストは、リポジトリのルートから次のコマンドで実行できます。
+
+```bash
+python scripts/test-dnsmasq-upstream.py
+```
+
+2026年10月16日の検証では、既定上流DNSとドメイン指定の有無に応じた生成内容を確認しました。9.8系の実機では、構文検査、dnsmasqの上流DNS一覧、LAN端末とのDNS要求・応答、外部HTTPS通信を確認しています。8.10系は同じ回帰テストとPython構文検査を実施し、実機での適用とISOの再作成・起動は未検証です。別機器が配布する設定を使っている全端末の復旧は、この検証には含みません。
+
 #### 初回起動時のDNS/DHCPはGUI管理設定として生成する
 
 初回起動で入力したLANアドレス、DHCP範囲、上流DNSは、`/etc/server-gui/dnsmasq.json` に保存し、GUIと同じ生成処理で `/etc/dnsmasq.d/server-gui.conf` へ反映します。初回起動専用の `synca-lan.conf` を新規作成しないため、初期設定だけがGUIの管理外に残ることはありません。
