@@ -93,6 +93,14 @@ def generate(data: dict) -> str:
 
     if dns.get("hosts") or dns.get("cnames") or upstream:
         lines.append("# --- DNS ---")
+    # server= adds to the resolvers from /etc/resolv.conf; it does not replace
+    # them. When a default upstream is configured, exclude OS resolver entries
+    # so an unreachable DNS learned from LAN RA/DHCP cannot join that set.
+    # An empty list or domain-only rules must keep the OS resolver fallback for
+    # other domains. Match the stripping used below so blank rows do not
+    # accidentally disable that fallback.
+    if any(str(u.get("server", "")).strip() and not str(u.get("domain", "")).strip() for u in upstream):
+        lines.append("no-resolv")
     for h in dns.get("hosts", []):
         lines.append(f"address=/{h['domain']}/{h['ip']}")
     for c in dns.get("cnames", []):
