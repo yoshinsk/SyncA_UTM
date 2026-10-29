@@ -15,6 +15,16 @@
     </div>
 </div>
 
+<!-- payload/server-gui/server_gui/templates/firewall.html: LAN内の明示的な全IP通信許可 -->
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-white"><strong>LAN内の通信許可</strong></div>
+    <div class="card-body">
+        <p class="small text-secondary">trustedに属する同一IPv4サブネット内の全IPプロトコル・全ポートの転送を許可します。送信元と宛先の両方を限定し、実行時設定と永続設定へ反映します。WANの受信ポートは開放しません。初回は専用policyを作成するため、管理アクセス保護付きのfirewalld reloadを実行します。</p>
+        <div id="lan-access-items">取得中</div>
+        <p class="small text-secondary mt-2 mb-0">無効にすると、この画面で追加した専用ルールだけを削除します。trustedの既存の全許可設定や、UTMを通らない端末間通信、端末側のファイアウォールは変更しません。IPv6とIP以外のL2プロトコルは対象外です。</p>
+    </div>
+</div>
+
 <div class="card border-0 shadow-sm mb-3 firewall-visual-editor">
     <div class="card-header bg-white d-flex justify-content-between align-items-center">
         <div class="d-flex align-items-center gap-2">
@@ -453,12 +463,41 @@ function forwardPortBadges(fp) {
 
 async function init() {
     console.log('[firewall] init');
+    await loadLanAccess();
     await loadServiceList();
     await loadIpsets();
     await refreshZones();
     await loadDirectRules();
     await loadWanProtection();
     await loadVpnPassthrough();
+}
+
+// サーバーが検出したLANだけを選択できるようにし、値はHTMLへ安全に出力する。
+let lanAccessItems = [];
+async function loadLanAccess() {
+    const data = await api.get('/firewall/api/lan-access');
+    const container = document.getElementById('lan-access-items');
+    if (!data || !Array.isArray(data.items)) {
+        container.textContent = data?.error || '取得できませんでした';
+        return;
+    }
+    lanAccessItems = data.items;
+    container.innerHTML = data.items.map((row, index) => `<div class="d-flex gap-2 align-items-center mb-2 flex-wrap">
+        <span class="font-monospace">${escapeHtml(row.interface)} / ${escapeHtml(row.subnet)}</span>
+        <span>実行時: ${row.runtime ? '有効' : '未設定'} / 永続: ${row.permanent ? '有効' : '未設定'}</span>
+        <button class="btn btn-sm btn-outline-primary" onclick="setLanAccess(${index},true)">全IP通信を許可</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="setLanAccess(${index},false)">専用ルールを削除</button>
+        </div>`).join('') || '対象のtrusted LANがありません';
+}
+
+async function setLanAccess(index, enabled) {
+    const row = lanAccessItems[index];
+    if (!row) return;
+    const result = await api.send('/firewall/api/lan-access', 'POST', {
+        interface: row.interface, subnet: row.subnet, enabled,
+    });
+    toast(result?.ok ? 'LAN内通信の設定を反映しました' : (result?.error || '設定に失敗しました'), !result?.ok);
+    await loadLanAccess();
 }
 
 async function loadServiceList() {
