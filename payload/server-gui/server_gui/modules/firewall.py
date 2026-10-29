@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import re
 import shlex
+import ipaddress
+import json
 
 from flask import Blueprint, Flask, jsonify, render_template, request
 
@@ -91,6 +93,147 @@ def register(app: Flask) -> None:
 @login_required
 def page():
     return render_template("firewall.html", active_tab="firewall")
+
+
+def _lan_rule(subnet: str) -> str:
+    """同一IPv4サブネットの全IPプロトコルを許可する専用ルール。"""
+    return (f'rule family="ipv4" priority="-109" source address="{subnet}" '
+            f'destination address="{subnet}" accept')
+
+
+def _lan_policy_ready(create: bool = False) -> bool:
+    """転送専用policyを用意する。初回作成時だけ既存の保護付きreloadを使う。"""
+    policy = "synca-lan-internal"
+    states = []
+    for permanent in (True, False):
+        base = ["firewall-cmd"] + (["--permanent"] if permanent else [])
+        res = sudo_run(base + ["--get-policies"])
+        if not res.ok:
+            raise ValueError(res.stderr or res.stdout)
+        states.append(policy in res.stdout.split())
+    if all(states):
+        # 同名の外部設定を流用して許可範囲を広げない。
+        for permanent in (True, False):
+            base = ["firewall-cmd"] + (["--permanent"] if permanent else []) + [f"--policy={policy}"]
+            # EL8/EL9共通のlist-allを使う。target単独取得は永続設定に限定される。
+            res = sudo_run(base + ["--list-all"])
+            fields = dict(line.strip().split(":", 1) for line in res.stdout.splitlines()
+                          if ":" in line)
+            expected = {"ingress-zones": "trusted", "egress-zones": "trusted",
+                        "target": "CONTINUE", "priority": "-109"}
+            if not res.ok or any(fields.get(key, "").strip() != value
+                                 for key, value in expected.items()):
+                raise ValueError("LAN専用policyの範囲が一致しません")
+        return True
+    if any(states):
+        raise ValueError("LAN専用policyの実行時・永続設定が不一致です。設定を確認してください")
+    if not create:
+        return False
+    base = ["firewall-cmd", "--permanent", f"--policy={policy}"]
+    commands = [["firewall-cmd", "--permanent", f"--new-policy={policy}"]]
+    commands += [base + [option] for option in (
+        "--add-ingress-zone=trusted", "--add-egress-zone=trusted",
+        "--set-target=CONTINUE", "--set-priority=-109")]
+    for index, command in enumerate(commands):
+        res = sudo_run(command)
+        if not res.ok:
+            if index:
+                sudo_run(["firewall-cmd", "--permanent", f"--delete-policy={policy}"])
+            raise ValueError(res.stderr or res.stdout)
+    ok, output = _reload_firewall_and_refresh_fail2ban()
+    if not ok:
+        raise ValueError(output)
+    return True
+
+
+def _lan_candidates() -> list[dict]:
+    """WAN経路を持たずtrustedに属する実在LANの接続プレフィックスだけを返す。"""
+    addresses = sudo_run(["ip", "-j", "-4", "address", "show"])
+    routes = sudo_run(["ip", "-j", "-4", "route", "show", "default"])
+    if not addresses.ok or not routes.ok:
+        raise ValueError("LANアドレスまたはWAN経路を取得できません")
+    wan = {row.get("dev") for row in json.loads(routes.stdout)}
+    rows = []
+    for interface in json.loads(addresses.stdout):
+        name = interface["ifname"]
+        if name == "lo" or name in wan:
+            continue
+        zone = sudo_run(["firewall-cmd", f"--get-zone-of-interface={name}"])
+        if not zone.ok or zone.stdout.strip() != "trusted":
+            continue
+        for address in interface.get("addr_info", []):
+            if address.get("scope") != "global":
+                continue
+            network = ipaddress.IPv4Network(
+                f"{address['local']}/{address['prefixlen']}", strict=False)
+            # ホスト宛ルートやデフォルトルートはLAN内通信の対象にしない。
+            if network.prefixlen == 0 or network.prefixlen > 30:
+                continue
+            rows.append({"interface": name, "subnet": str(network)})
+    return rows
+
+
+@bp.route("/api/lan-access", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def lan_access():
+    """LAN内全許可を転送専用policyの実行時・永続設定へ反映する。"""
+    try:
+        rows = _lan_candidates()
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            if not isinstance(payload, dict):
+                return jsonify({"error": "JSONオブジェクトを指定してください"}), 400
+            selected = {"interface": payload.get("interface"), "subnet": payload.get("subnet")}
+            if selected not in rows or type(payload.get("enabled")) is not bool:
+                return jsonify({"error": "実在するtrusted LANと有効・無効を指定してください"}), 400
+            if not _lan_policy_ready(create=payload["enabled"]):
+                return jsonify({"ok": True, "enabled": False})
+            result = _set_lan_access(selected["subnet"], payload["enabled"])
+            return jsonify(result), 200 if result["ok"] else 500
+        ready = _lan_policy_ready()
+        for row in rows:
+            for permanent, key in ((False, "runtime"), (True, "permanent")):
+                if not ready:
+                    row[key] = False
+                    continue
+                cmd = ["firewall-cmd"] + (["--permanent"] if permanent else [])
+                res = sudo_run(cmd + ["--policy=synca-lan-internal", f"--query-rich-rule={_lan_rule(row['subnet'])}"])
+                if not res.ok and res.returncode != 1:
+                    raise ValueError(res.stderr or res.stdout)
+                row[key] = res.ok
+        return jsonify({"items": rows})
+    except (ValueError, KeyError, TypeError) as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+def _set_lan_access(subnet: str, enabled: bool) -> dict:
+    """変更前状態を確認し、途中失敗時はこの操作で追加・削除した分だけ戻す。"""
+    rule = _lan_rule(subnet)
+    changes = []
+    for permanent in (True, False):
+        base = ["firewall-cmd"] + (["--permanent"] if permanent else []) + ["--policy=synca-lan-internal"]
+        query = sudo_run(base + [f"--query-rich-rule={rule}"])
+        if not query.ok and query.returncode != 1:
+            failure = query
+            break
+        if query.ok == enabled:
+            continue
+        operation = "add" if enabled else "remove"
+        res = sudo_run(base + [f"--{operation}-rich-rule={rule}"])
+        if not res.ok:
+            failure = res
+            break
+        changes.append(base)
+    else:
+        return {"ok": True, "enabled": enabled}
+    errors = [failure.stderr or failure.stdout]
+    for base in reversed(changes):
+        inverse = "remove" if enabled else "add"
+        rollback = sudo_run(base + [f"--{inverse}-rich-rule={rule}"])
+        if not rollback.ok:
+            errors.append("設定の復元失敗: " + (rollback.stderr or rollback.stdout))
+    return {"ok": False, "error": " / ".join(errors)}
 
 
 @bp.route("/api/zones", methods=["GET"])
