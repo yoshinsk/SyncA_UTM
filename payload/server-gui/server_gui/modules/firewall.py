@@ -27,6 +27,9 @@ import re
 import shlex
 import ipaddress
 import json
+import os
+import sys
+from pathlib import Path
 
 from flask import Blueprint, Flask, jsonify, render_template, request
 
@@ -85,6 +88,38 @@ SOURCE_RE = re.compile(
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    # 旧版の更新処理には専用サービスの導入処理がないため、更新後の起動でも導入する。
+    if os.name == "posix" and Path("/opt/server-gui/venv/bin/python").is_file() and not app.testing:
+        result = _cve_mitigation_command("install")
+        if not result.get("ok"):
+            app.logger.error("CVE-2026-98432 mitigation setup failed: %s", result.get("error"))
+
+
+def _cve_mitigation_command(action: str) -> dict:
+    """専用管理モジュールの固定操作を実行し、失敗をGUIへ返す。"""
+    result = sudo_run([sys.executable, "-m", "server_gui.cve_2026_98432", action], timeout=90)
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": result.stderr or result.stdout or "緩和策の状態を取得できません"}
+    if not result.ok:
+        data["ok"] = False
+    return data
+
+
+@bp.route("/api/cve-2026-98432", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def cve_mitigation():
+    """暫定緩和の状態確認・有効化・解除。解除は次回更新後にも保持する。"""
+    action = "status"
+    if request.method == "POST":
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+            return jsonify({"error": "有効・無効を真偽値で指定してください"}), 400
+        action = "enable" if payload["enabled"] else "disable"
+    data = _cve_mitigation_command(action)
+    return jsonify(data), 200 if data.get("ok") else 503
 
 
 # ---- views -------------------------------------------------------------

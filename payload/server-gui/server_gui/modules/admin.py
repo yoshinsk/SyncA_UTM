@@ -1,4 +1,4 @@
-"""Admin module — password change + GitHub-based self-update.
+"""payload/server-gui/server_gui/modules/admin.py - パスワード変更とGitHub自己更新。
 
 Settings live in /etc/server-gui/admin.json:
     {
@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -485,6 +486,10 @@ def apply_update():
         # generated DHCP config can survive package updates on existing hosts.
         _refresh_dnsmasq_runtime_guard(_log)
 
+        # 更新後の新しいモジュールを別プロセスで実行し、旧workerのimportキャッシュを避ける。
+        if not _install_cve_mitigation(_log):
+            return _apply_failure("CVE-2026-98432暫定緩和の導入に失敗しました", log_lines)
+
         # Record success + new installed_sha
         with _store().transaction(MODULE_NAME, _default()) as data:
             data["branch"] = branch
@@ -518,6 +523,22 @@ def apply_update():
             shutil.rmtree(extract_root)
         except OSError:
             pass
+
+
+def _install_cve_mitigation(log) -> bool:
+    """専用サービスの導入に失敗した更新を、対策済みとして記録しない。"""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", sys.executable, "-m", "server_gui.cve_2026_98432", "install"],
+            cwd=INSTALL_DIR, capture_output=True, text=True, timeout=90, check=False)
+        data = json.loads(result.stdout)
+        if result.returncode == 0 and data.get("ok"):
+            log("CVE-2026-98432 mitigation: " + result.stdout.strip())
+            return True
+        log("CVE-2026-98432 mitigation failed: " + _truncate_output(result.stdout or result.stderr))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        log("CVE-2026-98432 mitigation failed: " + str(exc))
+    return False
 
 
 def _apply_failure(reason: str, log_lines: list[str]):

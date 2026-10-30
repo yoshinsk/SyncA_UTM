@@ -15,7 +15,22 @@
     </div>
 </div>
 
-<!-- payload/server-gui/server_gui/templates/firewall.html: LAN内の明示的な全IP通信許可 -->
+<!-- payload/server-gui/server_gui/templates/firewall.html: CVE暫定緩和とLAN通信設定 -->
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-white"><strong>CVE-2026-98432 暫定緩和</strong></div>
+    <div class="card-body">
+        <p class="small text-secondary">UTM自身へ届くIPv4 TCPのうち、IPオプション付きパケットを遮断します。カーネル修正の代替ではありません。通常のTCPオプション、転送通信、IPv6は対象外です。IPオプションが必要な通信には影響します。</p>
+        <div id="cve-98432-state" role="status">取得中</div>
+        <div class="d-flex gap-2 mt-2">
+            <button class="btn btn-sm btn-primary" onclick="setCveMitigation(true)">暫定緩和を有効化</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="setCveMitigation(false)">暫定緩和を解除</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="loadCveMitigation()">状態を更新</button>
+        </div>
+        <p class="small text-secondary mt-2 mb-0">修正済みカーネルで稼働していることを確認後に解除してください。解除指定は再起動・GUI更新後も保持します。</p>
+    </div>
+</div>
+
+<!-- LAN内の明示的な全IP通信許可 -->
 <div class="card border-0 shadow-sm mb-3">
     <div class="card-header bg-white"><strong>LAN内の通信許可</strong></div>
     <div class="card-body">
@@ -463,6 +478,7 @@ function forwardPortBadges(fp) {
 
 async function init() {
     console.log('[firewall] init');
+    await loadCveMitigation();
     await loadLanAccess();
     await loadServiceList();
     await loadIpsets();
@@ -470,6 +486,21 @@ async function init() {
     await loadDirectRules();
     await loadWanProtection();
     await loadVpnPassthrough();
+}
+
+// 暫定ルール・起動時適用を分けて示し、パッチ適用済みという表現は使わない。
+async function loadCveMitigation() {
+    const data = await api.get('/firewall/api/cve-2026-98432');
+    document.getElementById('cve-98432-state').textContent = data?.ok
+        ? `暫定ルール: ${data.active ? '有効' : '無効または不一致'} / 起動時適用: ${data.boot_enabled ? '有効' : '無効'} / サービス: ${data.service_active ? '稼働' : '停止'} / 解除指定: ${data.disabled ? 'あり' : 'なし'} / 遮断: ${data.packets} packets (${data.bytes} bytes)`
+        : (data?.error || '状態を取得できません');
+}
+
+async function setCveMitigation(enabled) {
+    if (!enabled && !confirm('CVE-2026-98432の暫定緩和を解除しますか。修正済みカーネルでの稼働を確認してください。')) return;
+    const result = await api.send('/firewall/api/cve-2026-98432', 'POST', {enabled});
+    toast(result?.ok ? '暫定緩和の設定を反映しました' : (result?.error || '処理に失敗しました'), !result?.ok);
+    await loadCveMitigation();
 }
 
 // サーバーが検出したLANだけを選択できるようにし、値はHTMLへ安全に出力する。
