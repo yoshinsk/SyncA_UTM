@@ -619,6 +619,8 @@ main() {
     install_letsencrypt_hooks
     enable_certbot_renewal || echo "warning: certbot renewal timer could not be enabled" >&2
     install_firewalld_profile
+    # 専用テーブルの暫定緩和を新規ISOにも導入する。firewalldの全体reloadは不要。
+    (cd /opt/server-gui && /opt/server-gui/venv/bin/python -m server_gui.cve_2026_98432 install)
     install_pppoe_parent_ip_dispatcher
     install_upnp_support
     install_ipv6_support
