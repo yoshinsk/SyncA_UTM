@@ -123,23 +123,40 @@ def _os_update_active() -> bool:
     return result.stdout.strip() in ('active', 'activating', 'deactivating', 'reloading')
 
 
+def _read_os_update_status() -> dict:
+    """workerの状態を取得し、状態未取得を更新失敗や成功と混同しない。"""
+    result = subprocess.run(['sudo', '-n', '/usr/libexec/platform-python',
+                             str(SERVER_GUI_BIN / 'os-security-update'), 'status'],
+                            capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr or result.stdout)
+    data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise ValueError('OS更新状態の形式が不正です')
+    return data
+
+
 @bp.route('/api/os-security/status', methods=['GET'])
 @login_required
 def os_security_status():
     """OS更新状態を読む。異常終了したworkerを実行中と表示し続けない。"""
     try:
-        result = subprocess.run(['sudo', '-n', '/usr/libexec/platform-python',
-                                 str(SERVER_GUI_BIN / 'os-security-update'), 'status'],
-                                capture_output=True, text=True, timeout=10, check=False)
-        if result.returncode:
-            return jsonify({'error': result.stderr or result.stdout}), 503
-        data = json.loads(result.stdout)
+        data = _read_os_update_status()
         data['job_active'] = _os_update_active()
-        if data.get('phase') in ('planning', 'preparing', 'testing', 'preflight', 'applying') and not data['job_active']:
+        # JSON読取りからsystemctl確認までに正常終了する競合を、中断と誤判定しない。
+        busy_phases = ('planning', 'preparing', 'testing', 'preflight', 'applying')
+        if data.get('phase') in busy_phases and not data['job_active']:
+            data = _read_os_update_status()
+            data['job_active'] = _os_update_active()
+        if data.get('phase') in busy_phases and not data['job_active']:
+            interrupted = {'planning': '更新計画の確認', 'preparing': 'ダウンロード・署名検証',
+                           'testing': 'トランザクション検査', 'preflight': '更新前の最終確認', 'applying': 'OS更新の適用'}[data['phase']]
             data['phase'] = 'interrupted'
-            data['error'] = '処理が中断されました。journalctl -u ' + OS_UPDATE_UNIT + ' で確認してください'
-        return jsonify(data)
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            data['error'] = interrupted + 'が中断されました。直近のOS更新適用結果とは別の状態です。journalctl -u ' + OS_UPDATE_UNIT + ' で確認してください'
+        response = jsonify(data)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return jsonify({'error': str(exc)}), 503
 
 
@@ -160,6 +177,8 @@ def os_security_run():
             return jsonify({'error': '現在の管理パスワードを確認してください'}), 403
         if payload.get('maintenance_confirmed') is not True or payload.get('recovery_confirmed') is not True:
             return jsonify({'error': '保守時間と外部バックアップ・コンソール復旧手段の確認が必要です'}), 400
+        if type(payload.get('reboot_after_apply', False)) is not bool:
+            return jsonify({'error': '再起動指定は真偽値で指定してください'}), 400
     try:
         if _os_update_active():
             return jsonify({'error': '別のOS更新処理が実行中です'}), 409
@@ -171,6 +190,8 @@ def os_security_run():
             command.extend(['--plan-id', plan_id])
         if action == 'apply':
             command.extend(['--maintenance-confirmed', '--recovery-confirmed'])
+            if payload.get('reboot_after_apply', False):
+                command.append('--reboot-after-apply')
         result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
         if result.returncode:
             return jsonify({'error': result.stderr or result.stdout}), 500

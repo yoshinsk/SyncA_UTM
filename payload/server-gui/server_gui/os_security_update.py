@@ -262,6 +262,43 @@ def save_state(data):
     print('os-security-update phase={0} plan={1}'.format(data.get('phase'), data.get('plan_id', '-')))
 
 
+def record_apply(job, data):
+    """適用結果を計画確認の状態とは別に保存し、次の確認で成功履歴を失わない。"""
+    data['updated_at'] = int(time.time())
+    write_json(job / 'result.json', data)
+    write_json(ROOT / 'last-apply.json', data)
+    save_state(data)
+
+
+def last_apply(data):
+    """旧版の適用済み状態と過去の適用後確認記録も区別して表示する。"""
+    path = ROOT / 'last-apply.json'
+    if path.exists():
+        result = read_json(path)
+    elif data.get('phase') in ('applied', 'attention', 'reboot_scheduled'):
+        result = data
+    else:
+        candidates = [p for p in ROOT.glob('*/health-after.json')
+                      if re.match(r'^[0-9a-f]{32}$', p.parent.name) and (p.parent / 'plan.json').exists()]
+        if not candidates:
+            return None
+        path = max(candidates, key=lambda p: p.stat().st_mtime)
+        plan = read_json(path.parent / 'plan.json')
+        return {'phase': 'postcheck_recorded', 'plan_id': path.parent.name,
+                'package_count': len(plan.get('packages', [])), 'updated_at': int(path.stat().st_mtime),
+                'message': '過去の適用後確認記録があります。直近の計画確認とは別の記録です。'}
+    result = dict(result)
+    if result.get('applied_boot_id') and boot_id() != result['applied_boot_id']:
+        result.update(reboot_required=False, reboot_pending=False,
+                      message='OS再起動を検出しました。経路・VPN・LAN・GUIの復旧を確認してください。')
+        if result['phase'] == 'reboot_scheduled':
+            result['phase'] = 'applied'
+    keys = ('phase', 'plan_id', 'updated_at', 'message', 'issues', 'reboot_required', 'reboot_pending')
+    summary = {key: result.get(key) for key in keys}
+    summary['package_count'] = len(result.get('plan', {}).get('packages', []))
+    return summary
+
+
 def checked_plan(plan_id):
     if not re.match(r'^[0-9a-f]{32}$', plan_id or ''):
         raise RuntimeError('計画IDが不正です')
@@ -275,6 +312,11 @@ def checked_plan(plan_id):
 def plan_update():
     """依存関係を解決して確認用の計画を作る。この段階ではRPMを適用しない。"""
     version = release()
+    # 旧版から更新した装置でも、次の計画作成の前に適用済み記録を保存する。
+    if (ROOT / 'state.json').exists():
+        previous = read_json(ROOT / 'state.json')
+        if previous.get('phase') in ('applied', 'attention', 'reboot_scheduled'):
+            write_json(ROOT / 'last-apply.json', previous)
     plan_id = uuid.uuid4().hex
     job = ROOT / plan_id
     job.mkdir(mode=0o700, parents=True)
@@ -369,8 +411,8 @@ def test_update(plan_id):
     save_state({'phase': 'ready', 'plan_id': plan_id, 'plan': plan})
 
 
-def apply_update(plan_id, maintenance=False, recovery=False):
-    """保守・復旧手段の確認後だけ実適用する。自動再起動や自動undoは行わない。"""
+def apply_update(plan_id, maintenance=False, recovery=False, reboot_after=False):
+    """保守・復旧確認後だけ実適用する。指定された場合も正常完了後だけ再起動を予約。"""
     if not maintenance or not recovery:
         raise RuntimeError('通信中断を伴う保守時間と、外部バックアップ・コンソール復旧手段の確認が必要です')
     job, plan = checked_plan(plan_id)
@@ -407,32 +449,63 @@ def apply_update(plan_id, maintenance=False, recovery=False):
         issues.extend('更新版を確認できません: ' + row['name'] for row in plan['packages']
                       if identity(row) not in installed)
     write_json(job / 'health-after.json', after)
-    save_state({'phase': 'attention' if issues else 'applied', 'plan_id': plan_id,
+    result = {'phase': 'attention' if issues else 'applied', 'plan_id': plan_id,
                 'plan': plan, 'issues': issues, 'reboot_required': plan['reboot_expected'],
                 'applied_boot_id': boot_id(),
                 'kernel': kernel_state(plan['os']),
                 'message': 'OSを再起動してください。再起動後に経路・VPN・LAN・GUIを確認してください。'
-                           if plan['reboot_expected'] else '稼働中サービスの旧ライブラリー利用を確認し、必要なサービスを再起動してください。'})
+                           if plan['reboot_expected'] else '稼働中サービスの旧ライブラリー利用を確認し、必要なサービスを再起動してください。'}
+    record_apply(job, result)
+    if reboot_after and not issues:
+        try:
+            # GUI応答と結果保存を完了できるよう30秒後に独立timerで再起動する。
+            command(['systemd-run', '--no-block', '--collect', '--unit=synca-os-security-reboot',
+                     '--on-active=30s', '--timer-property=AccuracySec=1s', '--', '/usr/libexec/platform-python',
+                     '/opt/server-gui/bin/os-security-update', 'reboot', '--plan-id', plan_id, '--state-dir', str(ROOT)])
+            result.update(phase='reboot_scheduled', reboot_required=True, reboot_pending=True,
+                          message='OS更新が正常に完了しました。30秒後にOSを再起動します。接続が戻るまでお待ちください。')
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            result.update(phase='attention', reboot_required=True,
+                          message='OS更新は完了しましたが再起動を予約できませんでした。管理者がOSを再起動してください。',
+                          issues=['再起動予約失敗: ' + str(exc)])
+        record_apply(job, result)
+
+
+def reboot_if_ready(plan_id):
+    """timer実行時にも成功記録を照合する。記録失敗・別処理・再起動済みなら実行しない。"""
+    job, plan = checked_plan(plan_id)
+    result = read_json(job / 'result.json')
+    current = read_json(ROOT / 'state.json')
+    if any(record.get('phase') != 'reboot_scheduled' or record.get('plan_id') != plan_id or
+           record.get('issues') or record.get('error') or record.get('applied_boot_id') != boot_id()
+           for record in (result, current)):
+        raise RuntimeError('再起動予約後の状態が一致しないため、自動再起動を中止しました')
+    command(['/usr/bin/systemctl', 'reboot'])
 
 
 def status():
     """再起動後は稼働カーネルを再照合し、再起動要求だけを解除する。通信復旧は別確認。"""
     data = read_json(ROOT / 'state.json') if (ROOT / 'state.json').exists() else {'phase': 'idle'}
-    if data.get('phase') in ('applied', 'attention'):
+    if data.get('phase') in ('applied', 'attention', 'reboot_scheduled'):
         data['kernel'] = kernel_state(release())
         if data.get('applied_boot_id') and boot_id() != data['applied_boot_id']:
             data['reboot_required'] = False
+            data['reboot_pending'] = False
+            if data['phase'] == 'reboot_scheduled':
+                data['phase'] = 'applied'
             data['message'] = 'OS再起動を検出しました。経路・VPN・LAN・GUIの復旧を確認してください。'
+    data['last_apply'] = last_apply(data)
     return data
 
 
 def main():
     global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('plan', 'prepare', 'test', 'apply', 'status'))
+    parser.add_argument('action', choices=('plan', 'prepare', 'test', 'apply', 'status', 'reboot'))
     parser.add_argument('--plan-id', default='')
     parser.add_argument('--maintenance-confirmed', action='store_true')
     parser.add_argument('--recovery-confirmed', action='store_true')
+    parser.add_argument('--reboot-after-apply', action='store_true')
     parser.add_argument('--state-dir', type=Path, default=ROOT)
     args = parser.parse_args()
     ROOT = args.state_dir
@@ -451,10 +524,14 @@ def main():
             print('別のセキュリティ更新処理が実行中です')
             return 1
         try:
+            if args.action != 'reboot' and status().get('reboot_pending'):
+                print('OS再起動を予約済みです。再起動完了まで次の更新処理は開始できません')
+                return 1
             if args.action == 'plan': plan_update()
             elif args.action == 'prepare': prepare_update(args.plan_id)
             elif args.action == 'test': test_update(args.plan_id)
-            else: apply_update(args.plan_id, args.maintenance_confirmed, args.recovery_confirmed)
+            elif args.action == 'reboot': reboot_if_ready(args.plan_id)
+            else: apply_update(args.plan_id, args.maintenance_confirmed, args.recovery_confirmed, args.reboot_after_apply)
             return 0
         except Exception as exc:
             state = read_json(ROOT / 'state.json') if (ROOT / 'state.json').exists() else {}

@@ -65,10 +65,11 @@ class ApiTests(unittest.TestCase):
     def test_dispatch_does_not_put_password_in_arguments(self):
         self.authenticate()
         payload={'action':'apply','plan_id':'a'*32,'password':'valid-test-password',
-                 'maintenance_confirmed':True,'recovery_confirmed':True}
+                 'maintenance_confirmed':True,'recovery_confirmed':True,'reboot_after_apply':True}
         self.assertEqual(self.post(payload).status_code,202)
         args=self.run.call_args.args[0]
         self.assertIn('--maintenance-confirmed',args);self.assertIn('--recovery-confirmed',args)
+        self.assertIn('--reboot-after-apply',args)
         self.assertNotIn('valid-test-password',args)
         self.assertNotIn('reboot',args)
 
@@ -83,6 +84,20 @@ class ApiTests(unittest.TestCase):
         self.run.return_value.stdout=json.dumps({'phase':'applying'})
         result=self.client.get('/admin/api/os-security/status')
         self.assertEqual(result.json['phase'],'interrupted')
+
+    def test_normal_finish_between_json_and_unit_check_is_not_interruption(self):
+        self.authenticate()
+        self.run.side_effect=[SimpleNamespace(returncode=0,stdout=json.dumps({'phase':'applying'})),
+                              SimpleNamespace(returncode=0,stdout=json.dumps({'phase':'applied'}))]
+        result=self.client.get('/admin/api/os-security/status')
+        self.assertEqual(result.json['phase'],'applied')
+        self.assertEqual(result.headers['Cache-Control'],'no-store')
+
+    def test_invalid_reboot_flag_is_rejected(self):
+        self.authenticate()
+        result=self.post({'action':'apply','plan_id':'a'*32,'password':'valid-test-password',
+                          'maintenance_confirmed':True,'recovery_confirmed':True,'reboot_after_apply':'false'})
+        self.assertEqual(result.status_code,400);self.run.assert_not_called()
 
 
 if __name__ == '__main__':
