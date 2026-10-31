@@ -327,6 +327,48 @@ https://github.com/yoshinsk/SyncA_UTM
 
 管理 GUI は設定されたブランチを確認し、GitHub アーカイブを取得して `payload/server-gui/` 配下の `server_gui` と `bin` を更新します。
 
+### OSセキュリティ更新（公式安定版のみ）
+
+「管理」画面の「OSセキュリティ更新」から、AlmaLinux 8.10・9.8の導入済みRPMに対するセキュリティ更新を適用できます。GitHubからのGUI更新は、この機能と補助スクリプトを配信するだけで、OSのRPMは自動更新しません。OS再起動も自動実行しない構成です。
+
+更新元は、現在有効な公式安定版の`baseos`・`appstream`・`extras`・`powertools`・`crb`に限定します。`baseos`と`appstream`が必要です。testing・ELRepo・EPELなどの他提供元、pipで導入したパッケージは対象外です。DNFの[セキュリティ更新フィルター](https://dnf.readthedocs.io/en/latest/api_base.html)を使い、セキュリティ修正に加えて依存関係に必要なRPMも計画へ含めます。未使用機能に関するCVEも告知に含まれるため、告知の件数と更新RPMの件数は一致しません。
+
+GUIでは次の順に操作します。
+
+1. 「更新計画を確認」で、依存関係を解決した対象RPM、変更前の版、通信・認証・起動環境への影響、再起動の見込みを確認します。この段階ではRPMを適用しません。
+2. 「署名検証付きダウンロード」で、計画と現在のRPM構成を再照合し、対象RPMを取得します。[AlmaLinux公式の主鍵fingerprint](https://almalinux.org/ja/security/)と一致する鍵だけを隔離RPM鍵DBへ登録し、全RPMの署名とSHA256を検証・保存します。準備時にシステムのRPM鍵DBは変更しません。
+3. 「トランザクション検査」で、DNF/RPMの`test`トランザクションを実行します。RPMをインストールせずに検査し、終了後もRPM構成が変わっていないことを照合します。実際のRPMスクリプトによるサービス再起動や通信への影響を再現する試験ではありません。
+4. 通信中断を許容できる保守時間、外部バックアップ、コンソール等の復旧手段を確認し、チェック欄と現在の管理パスワードを入力して「確認済みの更新を適用」を選択します。適用直前にも計画・署名・RPM構成・依存関係を検査します。実適用の承認後に限り、公式署名鍵をシステムRPM鍵DBへ登録します。
+
+各処理は独立した`synca-os-security-update.service`で実行するため、画面を閉じたりGUIサービスが再起動したりしても、開始済みのworkerは継続します。実行中は次の更新処理を開始できません。RPM処理を途中で強制終了する自動タイムアウトは設定していません。実行状況と失敗理由はGUIで確認でき、詳細ログは`journalctl -u synca-os-security-update.service`で参照できます。
+
+計画の有効期間は24時間です。RPM構成、更新対象の版、依存関係、取得済みファイルが計画から変わった場合や、署名・鍵fingerprintを確認できない場合は適用を中止します。準備後の実適用ではネットワークリポジトリを使わず、固定したローカルRPMだけでトランザクションを再構成します。`gpgcheck`を無効にせず、未署名RPMも拒否します。
+
+既存パッケージの無関係な削除は許可しません。EL8公式の`dbxtool`から`fwupd`への統合だけは、選択されたRPMに`dbxtool < 9`のObsoletes宣言があることを確認して許可し、変更前のバージョンを計画へ表示します。`installonly_limit=0`として旧カーネルを保持し、稼働版の`/boot/vmlinuz-*`が存在することを確認します。作業領域は2GiB以上かつダウンロード量の4倍以上、kernel-coreを更新する場合は`/boot`に512MiB以上の空きが必要です。
+
+実適用前に`/etc`・`/boot`のバックアップと経路・サービスの状態を保存し、既存の管理アクセス保護処理を実行します。作業データ・RPM・設定バックアップ・状態は、root専用の`/var/lib/server-gui/os-security-updates/`配下に保存します。設定バックアップだけではRPMやファイルシステム全体を復元できないため、外部バックアップとコンソール等の復旧手段は別途必要です。古いRPMを取得できるとは限らず、RPMスクリプトの副作用も残るため、自動の`dnf history undo`や設定の上書き復元は行いません。中断・失敗時は、一部適用済みの可能性を含めて表示します。作業データは自動削除しないため、処理完了と復旧用データの保管先を確認してから管理者が整理してください。
+
+通信への影響は、NetworkManager・firewalld・DHCP・VPN、SSH・GUI・公開サービス、OS基盤・認証、カーネル・起動環境に分けて表示します。これらのRPMのスクリプトでサービスが再起動される可能性があり、無停止は保証できません。機能側からNetworkManagerやfirewalldを一括再起動する処理は追加していません。更新後は、変更前にactiveだったサービス、WANデフォルト経路、NAT・転送等のfirewalld directルール、ローカルGUI、CVE-2026-98432の暫定ルール、更新対象版の導入を確認します。外部からのSSH・GUI再接続、実際のLAN/WAN通信、VPN越しの業務通信は管理者が別途確認してください。
+
+カーネル・起動環境やglibc・systemd等のOS基盤・認証パッケージを更新する場合は、OS再起動が必要または推奨と判定し、実適用後にGUIへ「OSを再起動してください」と表示します。再起動は管理者が保守時間内に実行してください。次のOS起動をboot IDで確認すると再起動要求を解除し、稼働カーネルのCVE-2026-98432修正状態を再照合します。OS再起動を検出しただけでは、通信復旧を確認済みとは扱いません。その他の更新では、旧ライブラリーを使用するサービスの再起動要否を確認するメッセージを表示します。
+
+CVE-2026-98432は、公式が公表した下限（8系`4.18.0-553.180.2.el8_10`、9系`5.14.0-687.61.2.el9_8`）と稼働カーネルを照合します。安定版に未収録の間は、この更新で解消したとは扱いません。testingへの切替や暫定緩和の自動解除は行わず、修正済み安定版の提供後に更新・再起動して確認してください。
+
+CLIでも同じworkerを使用できます。`plan`実行後、`status`の`plan_id`を後続操作へ指定します。システムDNFを使うため、GUI用venvではなく`/usr/libexec/platform-python`で起動してください。`dnf`・`python3-dnf`・`rpmkeys`・`gpg`が必要です。新規ISOには`gnupg2`を明示的に含めています。
+
+```bash
+sudo /usr/libexec/platform-python /opt/server-gui/bin/os-security-update plan
+sudo /usr/libexec/platform-python /opt/server-gui/bin/os-security-update status
+sudo /usr/libexec/platform-python /opt/server-gui/bin/os-security-update prepare --plan-id PLAN_ID
+sudo /usr/libexec/platform-python /opt/server-gui/bin/os-security-update test --plan-id PLAN_ID
+# 保守時間・外部バックアップ・コンソール復旧手段を確認した場合だけ実行
+sudo /usr/libexec/platform-python /opt/server-gui/bin/os-security-update apply --plan-id PLAN_ID --maintenance-confirmed --recovery-confirmed
+```
+
+開発時の回帰テストは`python scripts/test-os-security-update.py`と`python scripts/test-os-security-api.py`で実行します。後者にはFlask環境が必要です。回帰テストの実適用処理とsystemd起動処理は模擬し、テスト自体がOSを更新することはありません。
+
+2026年10月31日のAlmaLinux 8.10と9.8の実機検証では、隔離した作業ディレクトリで安定版の計画作成・ダウンロード・署名検証・RPMのtestトランザクションが成功し、RPM構成が変わらないことを確認しました。対象RPMは代表構成で8.10系124件、9.8系113件でした。9.8系ではシステムRPM鍵DBに公式鍵が未登録の状態でも、公式fingerprintを確認した隔離鍵DBで検証でき、システム鍵DBが未登録のままであることを確認しています。両系統でworkerの回帰テストとAPIの認証・CSRF・適用条件のテストを実施しました。RPMの実適用、RPMスクリプトによる通信への影響、実際のOS再起動と再起動後の業務通信、新規ISOの作成・起動は実施していません。再起動を促す表示とboot ID変更後の解除は回帰テストで確認しています。
+
 ## WAN 接続方式の切替
 
 ネットワーク画面の WAN 設定で PPPoE 接続中に DHCP クライアントまたは Static IP を選択すると、GUI は PPPoE プロファイルではなく、PPPoE 親NICの Ethernet WAN プロファイルを作成または再利用して編集します。

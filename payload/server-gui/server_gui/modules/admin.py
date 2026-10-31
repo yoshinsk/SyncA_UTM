@@ -51,7 +51,7 @@ from typing import Optional
 from flask import Blueprint, Flask, current_app, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash
 
-from ..auth import csrf_protect, login_required, set_password
+from ..auth import csrf_protect, login_required, set_password, verify_admin_password
 from ..config_store import ConfigStore
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,71 @@ def _normalize_update_branch(branch: object) -> str:
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+
+
+OS_UPDATE_UNIT = 'synca-os-security-update.service'
+
+
+def _os_update_active() -> bool:
+    result = subprocess.run(['systemctl', 'is-active', OS_UPDATE_UNIT],
+                            capture_output=True, text=True, timeout=5, check=False)
+    return result.stdout.strip() in ('active', 'activating', 'deactivating', 'reloading')
+
+
+@bp.route('/api/os-security/status', methods=['GET'])
+@login_required
+def os_security_status():
+    """OS更新状態を読む。異常終了したworkerを実行中と表示し続けない。"""
+    try:
+        result = subprocess.run(['sudo', '-n', '/usr/libexec/platform-python',
+                                 str(SERVER_GUI_BIN / 'os-security-update'), 'status'],
+                                capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode:
+            return jsonify({'error': result.stderr or result.stdout}), 503
+        data = json.loads(result.stdout)
+        data['job_active'] = _os_update_active()
+        if data.get('phase') in ('planning', 'preparing', 'testing', 'preflight', 'applying') and not data['job_active']:
+            data['phase'] = 'interrupted'
+            data['error'] = '処理が中断されました。journalctl -u ' + OS_UPDATE_UNIT + ' で確認してください'
+        return jsonify(data)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return jsonify({'error': str(exc)}), 503
+
+
+@bp.route('/api/os-security/run', methods=['POST'])
+@login_required
+@csrf_protect
+def os_security_run():
+    """固定操作だけを独立workerへ渡す。実適用時はパスワードと保守・復旧確認が必須。"""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or payload.get('action') not in ('plan', 'prepare', 'test', 'apply'):
+        return jsonify({'error': '操作を確認してください'}), 400
+    action = payload['action']
+    plan_id = payload.get('plan_id', '')
+    if action != 'plan' and (not isinstance(plan_id, str) or not re.fullmatch(r'[0-9a-f]{32}', plan_id)):
+        return jsonify({'error': '計画IDが不正です'}), 400
+    if action == 'apply':
+        if not isinstance(payload.get('password'), str) or not verify_admin_password(payload['password']):
+            return jsonify({'error': '現在の管理パスワードを確認してください'}), 403
+        if payload.get('maintenance_confirmed') is not True or payload.get('recovery_confirmed') is not True:
+            return jsonify({'error': '保守時間と外部バックアップ・コンソール復旧手段の確認が必要です'}), 400
+    try:
+        if _os_update_active():
+            return jsonify({'error': '別のOS更新処理が実行中です'}), 409
+        command = ['sudo', '-n', 'systemd-run', '--no-block', '--collect',
+                   '--unit=' + OS_UPDATE_UNIT, '--property=Type=oneshot',
+                   '--property=TimeoutStartSec=infinity', '--', '/usr/libexec/platform-python',
+                   str(SERVER_GUI_BIN / 'os-security-update'), action]
+        if action != 'plan':
+            command.extend(['--plan-id', plan_id])
+        if action == 'apply':
+            command.extend(['--maintenance-confirmed', '--recovery-confirmed'])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode:
+            return jsonify({'error': result.stderr or result.stdout}), 500
+        return jsonify({'ok': True, 'action': action}), 202
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify({'error': str(exc)}), 503
 
 
 def _store() -> ConfigStore:
