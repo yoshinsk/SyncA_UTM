@@ -79,6 +79,30 @@
     </div>
 </div>
 
+<!-- payload/server-gui/server_gui/templates/admin.html: 安定版OSセキュリティ更新 -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white"><strong>OSセキュリティ更新（公式安定版のみ）</strong></div>
+    <div class="card-body">
+        <p class="small text-secondary">testing・ELRepo・EPEL・pipは対象外です。確認→準備→トランザクション検査→保守時間帯の適用の順に操作します。GUIのGitHub更新だけではOSのRPMは更新されません。</p>
+        <div class="alert alert-warning small">NetworkManager・firewalld・SSH・ライブラリー等の更新では、RPM処理中に通信やサービスが一時中断する可能性があります。OS再起動は自動実行しません。適用前に外部バックアップとコンソール等の復旧手段を用意してください。</div>
+        <div class="d-flex gap-2 flex-wrap">
+            <button class="btn btn-sm btn-outline-primary" onclick="runOsSecurity('plan')">1. 更新計画を確認</button>
+            <button id="os-prepare" class="btn btn-sm btn-outline-primary" onclick="runOsSecurity('prepare')" disabled>2. 署名検証付きダウンロード</button>
+            <button id="os-test" class="btn btn-sm btn-outline-primary" onclick="runOsSecurity('test')" disabled>3. トランザクション検査</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="loadOsSecurity()">状態を更新</button>
+        </div>
+        <div id="os-security-message" class="alert alert-secondary mt-3" role="status">未確認</div>
+        <pre id="os-security-output" class="bg-light p-2 small" style="max-height:380px;overflow:auto"></pre>
+        <div class="form-check"><input id="os-maintenance" type="checkbox" class="form-check-input"><label for="os-maintenance" class="form-check-label small">通信中断を許容できる保守時間帯です</label></div>
+        <div class="form-check"><input id="os-recovery" type="checkbox" class="form-check-input"><label for="os-recovery" class="form-check-label small">外部バックアップとコンソール等の復旧手段を確認しました</label></div>
+        <div class="input-group input-group-sm mt-2">
+            <input id="os-password" type="password" class="form-control" autocomplete="current-password" placeholder="現在の管理パスワード">
+            <button id="os-apply" class="btn btn-danger" onclick="runOsSecurity('apply')" disabled>4. 確認済みの更新を適用</button>
+        </div>
+        <p class="small text-secondary mt-2 mb-0">CVE-2026-98432は修正済み安定版カーネルでの稼働が必要です。安定版に未収録の場合は未解消として扱い、暫定緩和を維持してください。設定バックアップだけではシステム全体を復元できません。自動undoは行いません。</p>
+    </div>
+</div>
+
 <!-- ========== GitHub auto-update ========== -->
 <div class="card border-0 shadow-sm">
     <div class="card-header bg-white d-flex align-items-center gap-2">
@@ -135,6 +159,52 @@
 {% endblock %}
 {% block scripts %}
 <script>
+// RPM更新は独立workerが実行するため、画面を閉じても継続する。状態はroot専用JSONから読む。
+let osSecurityState = {phase: 'idle'};
+let osSecurityTimer = null;
+async function loadOsSecurity() {
+    clearTimeout(osSecurityTimer);
+    const data = await api.get('/admin/api/os-security/status');
+    if (!data || data.error && !data.phase) {
+        document.getElementById('os-security-message').textContent = data?.error || '状態を取得できません';
+        return;
+    }
+    osSecurityState = data;
+    const busy = Boolean(data.job_active);
+    const plan = data.plan || {};
+    document.getElementById('os-prepare').disabled = busy || data.phase !== 'planned';
+    document.getElementById('os-test').disabled = busy || data.phase !== 'ready';
+    document.getElementById('os-apply').disabled = busy || data.phase !== 'ready' || !plan.transaction_test_ok;
+    const message = document.getElementById('os-security-message');
+    message.textContent = data.error || data.message || `状態: ${data.phase} / 対象RPM: ${(plan.packages || []).length} 件 / ダウンロード: ${Math.ceil((plan.download_bytes || 0) / 1048576)} MiB${plan.reboot_expected ? ' / 更新後のOS再起動が必要または推奨です' : ''}`;
+    message.className = `alert mt-3 ${data.reboot_required || data.phase === 'attention' || data.error ? 'alert-warning' : 'alert-secondary'}`;
+    document.getElementById('os-security-output').textContent = JSON.stringify({
+        plan_id: data.plan_id, impact: plan.impact, kernel: data.kernel || plan.kernel,
+        packages: plan.packages, removed_versions: plan.removed_versions, issues: data.issues,
+    }, null, 2);
+    if (busy) osSecurityTimer = setTimeout(loadOsSecurity, 5000);
+}
+
+async function runOsSecurity(action) {
+    const payload = {action, plan_id: osSecurityState.plan_id || ''};
+    if (action === 'apply') {
+        payload.maintenance_confirmed = document.getElementById('os-maintenance').checked;
+        payload.recovery_confirmed = document.getElementById('os-recovery').checked;
+        payload.password = document.getElementById('os-password').value;
+        if (!payload.maintenance_confirmed || !payload.recovery_confirmed || !payload.password) {
+            toast('保守時間・復旧手段・管理パスワードを確認してください', true); return;
+        }
+        if (!confirm('確認済みのOS更新を適用します。通信が一時中断する可能性があります。続行しますか。')) return;
+    }
+    const result = await api.send('/admin/api/os-security/run', 'POST', payload);
+    document.getElementById('os-password').value = '';
+    if (!result?.ok) toast(result?.error || '処理を開始できません', true);
+    else toast('OS更新処理を開始しました');
+    await loadOsSecurity();
+    if (result?.ok && !osSecurityState.job_active) osSecurityTimer = setTimeout(loadOsSecurity, 1500);
+}
+loadOsSecurity();
+
 let settings = null;
 
 document.addEventListener('DOMContentLoaded', () => { refresh(); });

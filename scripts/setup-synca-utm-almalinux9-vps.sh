@@ -202,7 +202,7 @@ enable_repositories() {
     # Install the small bootstrap set first. The full feature package set is
     # read from the repository after git is available.
     log "Installing bootstrap packages and enabling EPEL/CRB"
-    dnf install -y dnf-plugins-core ca-certificates curl git tar python3 python3-pip policycoreutils-python-utils >/dev/null
+    dnf install -y dnf-plugins-core ca-certificates curl git tar python3 python3-pip gnupg2 policycoreutils-python-utils >/dev/null
     dnf config-manager --set-enabled crb >/dev/null 2>&1 || warn "could not enable CRB repository"
     if ! rpm -q epel-release >/dev/null 2>&1; then
         dnf install -y epel-release >/dev/null || \

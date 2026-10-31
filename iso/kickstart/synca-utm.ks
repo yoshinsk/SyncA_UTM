@@ -27,6 +27,7 @@ bash
 ca-certificates
 coreutils
 dnf
+gnupg2
 efibootmgr
 grub2-efi-x64
 grub2-pc
