@@ -153,29 +153,91 @@ class UpdateTests(unittest.TestCase):
         with patch.object(module,'command',return_value=SimpleNamespace(stdout='Header SHA256 digest: OK\nPayload SHA256 digest: OK')):
             with self.assertRaises(RuntimeError):module.verify_signed_rpm(self.root/'unsigned.rpm',self.root/'keydb')
 
-    def test_apply_displays_reboot_message_without_reboot_command(self):
+    def exercise_apply(self,reboot_after=False,issues=(),queue_fail=False,transaction_fail=False):
+        """RPM・サービス・再起動コマンドを模擬し、実機を変更せず結果だけ検証する。"""
         row=module.package_row(pkg('kernel-core','2-1'))
         plan={'transaction_test_ok':True,'packages':[row],'download_bytes':1,'os':'9.8','reboot_expected':True}
         state={'services':{name:'active' for name in ('NetworkManager','firewalld','sshd','server-gui')},
                'route':'default via test','local_gui':True,'mitigation_active':True,'direct_rules':[]}
         transaction=Mock();transaction.__enter__=Mock(return_value=transaction);transaction.__exit__=Mock(return_value=False)
+        if transaction_fail:transaction.do_transaction.side_effect=[None,RuntimeError('RPM transaction failed')]
         verification=Mock();verification.__enter__=Mock(return_value=verification);verification.__exit__=Mock(return_value=False)
         verification.sack.query.return_value.installed.return_value=[pkg('kernel-core','2-1')]
         @contextlib.contextmanager
         def backup(path,*args,**kwargs):
             Path(path).write_bytes(b'test archive');yield Mock()
+        def run(argv,**kwargs):
+            if argv[0]=='systemd-run' and queue_fail:raise RuntimeError('timer failed')
+            return SimpleNamespace(returncode=0,stdout='',stderr='')
         with patch.object(module,'checked_plan',return_value=(self.root,plan)), \
                 patch.object(module,'preflight'),patch.object(module,'local_transaction',return_value=transaction), \
                 patch.object(module,'health',return_value=state),patch.object(module.tarfile,'open',side_effect=backup), \
                 patch.object(module,'keyring',return_value=(self.root/'key',self.root/'keydb')), \
-                patch.object(module,'command') as command,patch.object(module,'base_for',return_value=verification), \
+                patch.object(module,'command',side_effect=run) as command,patch.object(module,'base_for',return_value=verification), \
+                patch.object(module,'compare_health',return_value=list(issues)), \
                 patch.object(module,'kernel_state',return_value={'cve_2026_98432_running_fixed':False}), \
                 patch.object(module,'boot_id',return_value='before-reboot'):
-            module.apply_update('a'*32,True,True)
-        result=module.read_json(self.root/'state.json')
+            if transaction_fail:
+                with self.assertRaises(RuntimeError):module.apply_update('a'*32,True,True,reboot_after)
+            else:module.apply_update('a'*32,True,True,reboot_after)
+        return module.read_json(self.root/'state.json'),command.call_args_list
+
+    def test_apply_displays_reboot_message_without_reboot_command(self):
+        result,calls=self.exercise_apply()
         self.assertEqual(result['phase'],'applied');self.assertTrue(result['reboot_required'])
         self.assertIn('OSを再起動',result['message'])
-        self.assertFalse(any(call.args[0][0] in ('reboot','shutdown') for call in command.call_args_list))
+        self.assertFalse(any(call.args[0][0] in ('systemd-run','reboot','shutdown') for call in calls))
+
+    def test_successful_apply_can_schedule_reboot_after_30_seconds(self):
+        result,calls=self.exercise_apply(reboot_after=True)
+        self.assertEqual(result['phase'],'reboot_scheduled');self.assertTrue(result['reboot_pending'])
+        schedules=[call.args[0] for call in calls if call.args[0][0]=='systemd-run']
+        self.assertEqual(len(schedules),1);self.assertIn('--on-active=30s',schedules[0])
+        self.assertIn('reboot',schedules[0]);self.assertIn('--plan-id',schedules[0])
+        self.assertNotIn('/usr/bin/systemctl',schedules[0])
+        self.assertTrue((self.root/'last-apply.json').exists())
+        self.assertTrue((self.root/'result.json').exists())
+
+    def test_health_issue_prevents_reboot(self):
+        result,calls=self.exercise_apply(reboot_after=True,issues=['sshd unavailable'])
+        self.assertEqual(result['phase'],'attention')
+        self.assertFalse(any(call.args[0][0]=='systemd-run' for call in calls))
+
+    def test_transaction_failure_prevents_reboot(self):
+        result,calls=self.exercise_apply(reboot_after=True,transaction_fail=True)
+        self.assertEqual(result['phase'],'applying')
+        self.assertFalse(any(call.args[0][0]=='systemd-run' for call in calls))
+        self.assertFalse((self.root/'last-apply.json').exists())
+
+    def test_timer_failure_does_not_misreport_rpm_update_as_failed(self):
+        result,calls=self.exercise_apply(reboot_after=True,queue_fail=True)
+        self.assertEqual(result['phase'],'attention');self.assertTrue(result['reboot_required'])
+        self.assertIn('更新は完了',result['message'])
+
+    def test_previous_apply_is_visible_during_new_plan(self):
+        module.record_apply(self.root,{'phase':'applied','plan_id':'a'*32,'plan':{'packages':[{}]},'message':'completed'})
+        module.save_state({'phase':'planning','plan_id':'b'*32})
+        state=module.status()
+        self.assertEqual(state['phase'],'planning')
+        self.assertEqual(state['last_apply']['phase'],'applied')
+        self.assertEqual(state['last_apply']['package_count'],1)
+
+    def test_timer_callback_checks_success_record_before_reboot(self):
+        result={'phase':'reboot_scheduled','plan_id':'a'*32,'applied_boot_id':'first','issues':[]}
+        module.write_json(self.root/'result.json',result);module.write_json(self.root/'state.json',result)
+        with patch.object(module,'checked_plan',return_value=(self.root,{})), \
+                patch.object(module,'boot_id',return_value='first'),patch.object(module,'command') as run:
+            module.reboot_if_ready('a'*32)
+            run.assert_called_once_with(['/usr/bin/systemctl','reboot'])
+
+    def test_timer_callback_refuses_failed_or_changed_current_state(self):
+        result={'phase':'reboot_scheduled','plan_id':'a'*32,'applied_boot_id':'first','issues':[]}
+        module.write_json(self.root/'result.json',result)
+        module.write_json(self.root/'state.json',dict(result,phase='failed',error='state write failed'))
+        with patch.object(module,'checked_plan',return_value=(self.root,{})), \
+                patch.object(module,'boot_id',return_value='first'),patch.object(module,'command') as run:
+            with self.assertRaises(RuntimeError):module.reboot_if_ready('a'*32)
+            run.assert_not_called()
 
     def test_reboot_prompt_clears_only_after_os_boot_id_changes(self):
         module.save_state({'phase':'applied','reboot_required':True,'applied_boot_id':'first'})
