@@ -187,18 +187,48 @@ def impact(rows):
     return {key: value for key, value in affected.items() if value}
 
 
-def kernel_state(version):
-    """98432の公式修正版下限と稼働カーネルを照合する。testingへの切替はしない。"""
+FIXED_KERNEL_MINIMUM = {'8.10': ('4.18.0', '553.182.1.el8_10'),
+                        '9.8': ('5.14.0', '687.64.1.el9_8')}
+
+
+def _fixed_kernel(version, kernel):
+    """AlmaLinux本番リポジトリで修正済みと公表された版以上かを判定する。"""
     import rpm
 
-    current = os.uname().release
-    value = current.rsplit('.', 1)[0].split('-', 1)
-    minimum = ('4.18.0', '553.180.2.el8_10') if version == '8.10' else ('5.14.0', '687.61.2.el9_8')
+    value = kernel.rsplit('.', 1)[0].split('-', 1)
+    minimum = FIXED_KERNEL_MINIMUM[version]
     vendor_suffix = '.el8_10' if version == '8.10' else '.el9_8'
-    fixed = (len(value) == 2 and value[0] == minimum[0] and vendor_suffix in value[1] and
-             rpm.labelCompare(('0', value[0], value[1]), ('0',) + minimum) >= 0)
-    return {'running_kernel': current, 'cve_2026_98432_running_fixed': bool(fixed),
-            'cve_2026_98432_minimum': '-'.join(minimum)}
+    return (len(value) == 2 and value[0] == minimum[0] and vendor_suffix in value[1] and
+            rpm.labelCompare(('0', value[0], value[1]), ('0',) + minimum) >= 0)
+
+
+def kernel_state(version):
+    """稼働版と導入済み版を別々に確認し、再起動待ちを判別する。"""
+    current = os.uname().release
+    installed = command(['rpm', '-q', '--qf', '%{VERSION}-%{RELEASE}.%{ARCH}\n',
+                         'kernel-core'], check=False)
+    return {'running_kernel': current,
+            'cve_2026_98432_running_fixed': bool(_fixed_kernel(version, current)),
+            'cve_2026_98432_installed_fixed': any(_fixed_kernel(version, line)
+                                                  for line in installed.stdout.splitlines()),
+            'cve_2026_98432_minimum': '-'.join(FIXED_KERNEL_MINIMUM[version])}
+
+
+def mark_fixed_kernel(base, version):
+    """勧告メタデータのない公式修正版カーネルも、必要な場合だけ計画へ追加する。"""
+    installed = base.sack.query().installed().filter(name='kernel', arch=os.uname().machine)
+    if any(_fixed_kernel(version, pkg.evr + '.' + pkg.arch) for pkg in installed):
+        return
+    available = base.sack.query().available().filter(name='kernel', arch=os.uname().machine)
+    candidates = [pkg for pkg in available if pkg.reponame == 'baseos' and
+                  _fixed_kernel(version, pkg.evr + '.' + pkg.arch)]
+    if candidates:
+        import functools
+        import rpm
+        newest = max(candidates, key=functools.cmp_to_key(
+            lambda a, b: rpm.labelCompare(('0', a.version, a.release),
+                                          ('0', b.version, b.release))))
+        base.package_install(newest)
 
 
 def health():
@@ -325,6 +355,7 @@ def plan_update():
         fingerprint = rpmdb_hash(base)
         base.add_security_filters('gte', types=['security'])
         base.upgrade_all()
+        mark_fixed_kernel(base, version)
         base.resolve(allow_erasing=False)
         rows = validate_transaction(base)
         if any(row['repo'] not in STABLE_REPOS for row in rows):
@@ -351,6 +382,7 @@ def prepare_update(plan_id):
             raise RuntimeError('RPM構成が変化しました。計画を作成し直してください')
         base.add_security_filters('gte', types=['security'])
         base.upgrade_all()
+        mark_fixed_kernel(base, plan['os'])
         base.resolve(allow_erasing=False)
         validate_transaction(base, plan['packages'])
         preflight(job, plan['packages'], plan['download_bytes'])
@@ -486,8 +518,12 @@ def reboot_if_ready(plan_id):
 def status():
     """再起動後は稼働カーネルを再照合し、再起動要求だけを解除する。通信復旧は別確認。"""
     data = read_json(ROOT / 'state.json') if (ROOT / 'state.json').exists() else {'phase': 'idle'}
-    if data.get('phase') in ('applied', 'attention', 'reboot_scheduled'):
+    if data.get('phase') in ('planned', 'no_updates', 'ready', 'applied', 'attention', 'reboot_scheduled'):
         data['kernel'] = kernel_state(release())
+        if (data['phase'] == 'no_updates' and data['kernel']['cve_2026_98432_installed_fixed']
+                and not data['kernel']['cve_2026_98432_running_fixed']):
+            data['reboot_required'] = True
+            data['message'] = '修正済みカーネルは導入済みです。反映にはOS再起動が必要です。'
         if data.get('applied_boot_id') and boot_id() != data['applied_boot_id']:
             data['reboot_required'] = False
             data['reboot_pending'] = False

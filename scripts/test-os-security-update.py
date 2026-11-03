@@ -259,13 +259,35 @@ class UpdateTests(unittest.TestCase):
 
     def test_custom_kernel_is_not_declared_fixed_by_version_alone(self):
         with patch.dict(sys.modules,{'rpm':SimpleNamespace(labelCompare=lambda a,b:1)}), \
-                patch.object(module.os,'uname',return_value=SimpleNamespace(release='6.6.1-1.elrepo.x86_64'),create=True):
+                patch.object(module.os,'uname',return_value=SimpleNamespace(release='6.6.1-1.elrepo.x86_64'),create=True), \
+                patch.object(module,'command',return_value=SimpleNamespace(stdout='')):
             self.assertFalse(module.kernel_state('9.8')['cve_2026_98432_running_fixed'])
 
     def test_official_kernel_at_or_above_minimum_is_reported_fixed(self):
         with patch.dict(sys.modules,{'rpm':SimpleNamespace(labelCompare=lambda a,b:0)}), \
-                patch.object(module.os,'uname',return_value=SimpleNamespace(release='5.14.0-687.61.2.el9_8.x86_64'),create=True):
+                patch.object(module.os,'uname',return_value=SimpleNamespace(release='5.14.0-687.64.1.el9_8.x86_64'),create=True), \
+                patch.object(module,'command',return_value=SimpleNamespace(stdout='5.14.0-687.64.1.el9_8.x86_64')):
             self.assertTrue(module.kernel_state('9.8')['cve_2026_98432_running_fixed'])
+
+    def test_unadvised_official_kernel_is_added_to_security_plan(self):
+        old=pkg('kernel','5.14.0-687.61.1.el9_8')
+        fixed=pkg('kernel','5.14.0-687.64.1.el9_8')
+        fixed.version='5.14.0';fixed.release='687.64.1.el9_8'
+        base=Mock()
+        base.sack.query.return_value.installed.return_value.filter.return_value=[old]
+        base.sack.query.return_value.available.return_value.filter.return_value=[fixed]
+        with patch.dict(sys.modules,{'rpm':SimpleNamespace(labelCompare=lambda a,b:(a>b)-(a<b))}), \
+                patch.object(module.os,'uname',return_value=SimpleNamespace(machine='x86_64'),create=True):
+            module.mark_fixed_kernel(base,'9.8')
+        base.package_install.assert_called_once_with(fixed)
+
+    def test_no_updates_reports_installed_kernel_waiting_for_reboot(self):
+        module.save_state({'phase':'no_updates','plan':{'packages':[]}})
+        kernel={'cve_2026_98432_running_fixed':False,'cve_2026_98432_installed_fixed':True}
+        with patch.object(module,'release',return_value='9.8'),patch.object(module,'kernel_state',return_value=kernel):
+            state=module.status()
+        self.assertTrue(state['reboot_required'])
+        self.assertIn('再起動',state['message'])
 
 
 if __name__ == '__main__':

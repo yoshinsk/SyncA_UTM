@@ -199,7 +199,9 @@ function osNextStep(data) {
     if (data.phase === 'planned') return '更新計画を確認しました。対象と影響を確認し、「2. 署名検証付きダウンロード」を押してください。';
     if (data.phase === 'ready' && !data.plan?.transaction_test_ok) return 'ダウンロードと署名検証が完了しました。「3. トランザクション検査」を押してください。';
     if (data.phase === 'ready') return 'トランザクション検査が完了しました。保守時間・復旧手段を確認し、パスワードを入力して「4. 更新を適用」を押してください。成功後はOSを再起動します。';
-    if (data.phase === 'no_updates') return '適用できる安定版OS更新はありません。';
+    if (data.phase === 'no_updates') return data.kernel?.cve_2026_98432_installed_fixed && !data.kernel?.cve_2026_98432_running_fixed
+        ? '修正済みカーネルは導入済みです。反映にはOS再起動が必要です。'
+        : '適用できる安定版OS更新はありません。';
     if (data.phase === 'idle') return '「1. 更新計画を確認」から開始してください。';
     return data.message || `状態: ${data.phase}`;
 }
