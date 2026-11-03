@@ -269,6 +269,14 @@ class UpdateTests(unittest.TestCase):
                 patch.object(module,'command',return_value=SimpleNamespace(stdout='5.14.0-687.64.1.el9_8.x86_64')):
             self.assertTrue(module.kernel_state('9.8')['cve_2026_98432_running_fixed'])
 
+    def test_almalinux_8_production_kernel_minimum(self):
+        def compare(a,b):
+            return (a>b)-(a<b)
+        with patch.dict(sys.modules,{'rpm':SimpleNamespace(labelCompare=compare)}):
+            self.assertFalse(module._fixed_kernel('8.10','4.18.0-553.180.1.el8_10.x86_64'))
+            self.assertTrue(module._fixed_kernel('8.10','4.18.0-553.182.1.el8_10.x86_64'))
+        self.assertEqual(module.FIXED_KERNEL_MINIMUM['8.10'],('4.18.0','553.182.1.el8_10'))
+
     def test_unadvised_official_kernel_is_added_to_security_plan(self):
         old=pkg('kernel','5.14.0-687.61.1.el9_8')
         fixed=pkg('kernel','5.14.0-687.64.1.el9_8')
