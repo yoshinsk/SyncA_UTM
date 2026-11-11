@@ -785,6 +785,22 @@ def _nginx_access_lines() -> list[str]:
 
 def _parse_service_log_line(records: dict[str, dict[str, Any]], line: str, category: str, open_ports: set[str]) -> None:
     """Recognise narrow authentication abuse patterns from one journal line."""
+    if category == "gui":
+        if not _contains_port(open_ports, "4444/tcp"):
+            return
+        # GUIの利用者名は入力値を含むため、末尾のロガー生成フィールドだけを読む。
+        # 既存のログ形式も対象とし、文字列中の別のfromや不明な行は採用しない。
+        for pattern, event in (
+            (r"\bfailed login for user=.* from ([0-9A-Fa-f:.]+)$", "gui_failed_auth"),
+            (r"\brate limit hit for ([0-9A-Fa-f:.]+)$", "gui_rate_limit"),
+        ):
+            match = re.search(pattern, line)
+            if match:
+                ip = _public_ip(match.group(1))
+                if ip:
+                    _record_event(records, ip, event, "4444/tcp")
+                return
+        return
     ip = _first_public_ip(line)
     if not ip:
         return
@@ -794,11 +810,6 @@ def _parse_service_log_line(records: dict[str, dict[str, Any]], line: str, categ
             _record_event(records, ip, "ssh_invalid_user", "22/tcp")
         if "failed password" in lowered or "authentication failure" in lowered:
             _record_event(records, ip, "ssh_failed_auth", "22/tcp")
-    elif category == "gui" and _contains_port(open_ports, "4444/tcp"):
-        if "failed login" in lowered:
-            _record_event(records, ip, "gui_failed_auth", "4444/tcp")
-        if "rate limit hit" in lowered:
-            _record_event(records, ip, "gui_rate_limit", "4444/tcp")
     elif category == "nginx" and ("authentication failure" in lowered or "access forbidden" in lowered):
         for port in _web_ports(open_ports):
             _record_event(records, ip, "http_auth_failure", port)

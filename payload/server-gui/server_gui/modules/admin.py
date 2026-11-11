@@ -19,12 +19,10 @@ imports `_run_update_check()` from this module. The same routine backs the
 "今すぐ確認" button.
 
 Apply pipeline:
-  1. Download <github_url>/archive/refs/heads/<branch>.tar.gz to /tmp
-  2. Extract to /tmp/server-gui-update-<sha>/ — must contain a server_gui/
+  1. Download the previously checked commit SHA archive into bounded memory
+  2. Extract to a temporary staging directory — must contain a server_gui/
      directory (we reject malformed archives)
-  3. Atomically swap /opt/server-gui/server_gui with the new copy:
-        mv server_gui server_gui.old.<ts>
-        mv server_gui.new server_gui
+  3. Back up the current package and bin directories, then copy the new files
   4. Update admin.json installed_sha + log
   5. Schedule a systemd-run --no-block systemctl restart so the response
      can return cleanly before the process dies
@@ -307,24 +305,21 @@ def run_admin_command():
 
 
 def _check_current_password(password: str) -> bool:
-    creds_path = Path(current_app.config["CONFIG_DIR"]) / "credentials.json"
-    try:
-        creds = json.loads(creds_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return False
-    return check_password_hash(creds.get("password_hash", ""), password)
+    """既存の呼出し口を保ち、重要操作と同じ管理者パスワード照合を使う。"""
+    return verify_admin_password(password)
 
 
 def _truncate_output(value: str) -> str:
+    """UTF-8のバイト上限を一度の変換で検査し、従来の省略表示を保つ。"""
     if not isinstance(value, str):
         if isinstance(value, (bytes, bytearray)):
             value = bytes(value).decode("utf-8", errors="replace")
         else:
             value = str(value)
-    if len(value.encode("utf-8", errors="replace")) <= _COMMAND_OUTPUT_MAX:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= _COMMAND_OUTPUT_MAX:
         return value
-    encoded = value.encode("utf-8", errors="replace")[:_COMMAND_OUTPUT_MAX]
-    return encoded.decode("utf-8", errors="replace") + "\n[truncated]"
+    return encoded[:_COMMAND_OUTPUT_MAX].decode("utf-8", errors="replace") + "\n[truncated]"
 
 
 def _write_command_audit(record: dict) -> None:
@@ -394,10 +389,11 @@ def save_github():
         return jsonify({"error": "ブランチ名が無効です"}), 400
 
     with _store().transaction(MODULE_NAME, _default()) as data:
+        source_changed = (data.get("github_url") != url or data.get("branch") != branch)
         data["github_url"] = url
         data["branch"] = branch
-        if not url:
-            # Clearing the URL — also clear cached check state to avoid stale UI
+        if not url or source_changed:
+            # 別の配信元・ブランチへ、以前の確認結果を引き継がない。
             data["latest_sha"] = ""
             data["latest_message"] = ""
             data["update_available"] = False
@@ -498,12 +494,15 @@ def apply_update():
         return jsonify({"error": "GitHub URL が未設定です"}), 400
     if not settings.get("update_available"):
         return jsonify({"error": "更新は利用できません (先に確認してください)"}), 400
+    if not isinstance(latest_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", latest_sha) is None:
+        return jsonify({"error": "更新対象のコミットSHAが不正です。更新を確認し直してください"}), 400
 
     m = _GITHUB_URL_RE.match(url)
     if not m:
         return jsonify({"error": "GitHub URL の形式が不正です"}), 400
     owner, repo = m.group(1), m.group(2)
-    tarball = f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{branch}"
+    # 確認後にブランチが進んでも、取得物と導入済みSHAを一致させる。
+    tarball = f"https://codeload.github.com/{owner}/{repo}/tar.gz/{latest_sha}"
 
     log_lines: list[str] = []
 

@@ -35,6 +35,7 @@ from ..validators import (
     validate_identifier,
     validate_ipv4,
     validate_ipv4_cidr,
+    validate_nginx_location_path,
     validate_port,
     validate_size,
 )
@@ -803,9 +804,7 @@ def _parse_vhost(raw: dict) -> dict:
         raise ValidationError("locations must be a non-empty list")
     locations = []
     for loc in locs_raw:
-        path = loc.get("path", "/")
-        if not isinstance(path, str) or not path.startswith("/"):
-            raise ValidationError(f"invalid location path: {path!r}")
+        path = validate_nginx_location_path(loc.get("path", "/"))
         ltype = loc.get("type", "proxy")
         if ltype != "proxy":
             raise ValidationError(f"unsupported location type: {ltype!r}")
@@ -1368,7 +1367,9 @@ def _render_vhost(vhost: dict, backends_by_id: dict[str, dict]) -> str:
     ])
     for loc in vhost["locations"]:
         backend = backends_by_id.get(loc.get("backend_id") or "")
-        lines.append(f"    location {loc['path']} {{")
+        # 保存済み設定や取込経路でも、最後の文字列生成前に同じ条件を照合する。
+        path = validate_nginx_location_path(loc["path"])
+        lines.append(f"    location {path} {{")
         # ---- WAF directives (location context) ----
         waf = vhost.get("waf") or {}
         if waf.get("enabled"):
@@ -1445,10 +1446,14 @@ def _apply_all(data: dict) -> None:
     except OSError as e:
         raise RuntimeError(f"failed to prepare ACME webroot: {e}") from e
     backends_by_id = {b["id"]: b for b in data["backends"]}
-    desired_files: dict[Path, str] = {
-        _vhost_path(v["name"]): _render_vhost(v, backends_by_id)
-        for v in data["vhosts"]
-    }
+    try:
+        desired_files: dict[Path, str] = {
+            _vhost_path(v["name"]): _render_vhost(v, backends_by_id)
+            for v in data["vhosts"]
+        }
+    except ValidationError as exc:
+        # 全設定をメモリ上で検証し終わるまで、既存ファイルを置換しない。
+        raise RuntimeError(str(exc)) from exc
     # WAF zone declarations live in a separate file because limit_req_zone
     # must be in nginx http context. If no vhost has rate-limiting enabled,
     # the file is left out of desired_files and the apply pipeline's

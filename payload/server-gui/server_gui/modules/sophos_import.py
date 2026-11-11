@@ -22,6 +22,7 @@ from flask import Blueprint, Flask, current_app, jsonify, render_template, reque
 
 from ..auth import csrf_protect, login_required
 from ..config_store import ConfigStore
+from ..validators import ValidationError, validate_nginx_location_path
 from ..dnsmasq_apply import MODULE_NAME as DNSMASQ_MODULE, apply as apply_dnsmasq, default as dnsmasq_default
 from .ipsec import MODULE_NAME as IPSEC_MODULE, _apply as apply_ipsec, _default as ipsec_default
 from .nginx_proxy import MODULE_NAME as NGINX_MODULE, _apply_all as apply_nginx, _default as nginx_default
@@ -167,6 +168,8 @@ def import_upload():
         result = _import_plan(plan, source_name=_upload_name(), replace=replace, apply_system=apply_system)
     except ET.ParseError as e:
         return jsonify({"error": f"XML parse failed: {e}"}), 400
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
     logger.info("sophos import apply-upload completed: %s", result.get("summary", {}))
@@ -193,6 +196,8 @@ def import_saved_plan(name: str):
         return jsonify({"error": "plan not found"}), 404
     except json.JSONDecodeError as e:
         return jsonify({"error": f"plan JSON parse failed: {e}"}), 500
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
     return jsonify(result)
@@ -447,6 +452,8 @@ def _convert_nginx(index: dict[str, dict], source_id: str) -> dict:
             backend = next((b for b in backends if b.get("sophos_name") == fields.get("name", "")), None)
             backend_id = backend.get("id") if backend else None
         ssl_enabled = fields.get("type") == "https"
+        # 全モジュールの保存前に変換するため、不正な取込値は設定を変更しない。
+        path = validate_nginx_location_path(path if path.startswith("/") else "/")
         cert_name = domains[0]
         vhosts.append({
             "id": uuid.uuid4().hex,
@@ -470,7 +477,7 @@ def _convert_nginx(index: dict[str, dict], source_id: str) -> dict:
             "access_log": None,
             "error_log": None,
             "locations": [{
-                "path": path if path.startswith("/") else "/",
+                "path": path,
                 "type": "proxy",
                 "backend_id": backend_id,
                 "websocket": False,

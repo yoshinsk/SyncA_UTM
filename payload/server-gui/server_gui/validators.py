@@ -1,4 +1,4 @@
-"""Strict input validators. Reject anything that doesn't conform."""
+"""payload/server-gui/server_gui/validators.py - IP・識別子・設定引数の入力検証。"""
 from __future__ import annotations
 
 import ipaddress
@@ -74,6 +74,15 @@ def validate_hostname_or_ip(value: str) -> str:
         return validate_hostname(value)
     except ValidationError:
         return validate_ipv4(value)
+
+
+def validate_nginx_location_path(value: str) -> str:
+    """locationの単一パス引数を検査し、設定構文・空白・制御文字を拒否する。"""
+    if (not isinstance(value, str) or not value.startswith("/")
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127
+                   or char in "{};#\"'\\" for char in value)):
+        raise ValidationError("Nginxのlocationパスが不正です")
+    return value
 
 
 def validate_mac(value: str) -> str:
