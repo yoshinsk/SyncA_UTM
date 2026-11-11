@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -210,23 +211,28 @@ def _systemctl(*args: str) -> None:
 
 
 def _valid_request(config: dict, device: str, ts: str, nonce: str, sig: str) -> bool:
+    """形式・時刻・署名を確認した要求だけを排他的nonce登録へ進める。"""
     if device != config.get("device_id"):
         return False
-    if not ts.isdigit() or abs(time.time() - int(ts)) > WINDOW_SECONDS:
+    if len(ts) > 20 or not ts.isascii() or not ts.isdigit():
         return False
-    if not nonce or len(nonce) > 128 or "/" in nonce:
+    if abs(time.time() - int(ts)) > WINDOW_SECONDS:
         return False
-    if not _remember_nonce(nonce):
+    if not nonce or len(nonce) > 128 or "/" in nonce or "\x00" in nonce:
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{64}", sig) is None:
         return False
     secret = (config.get("sso_secret") or "").encode("utf-8")
     if not secret:
         return False
     message = f"{device}\n{ts}\n{nonce}".encode("utf-8")
     expected = hmac.new(secret, message, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, sig)
+    # 無効な署名は共有ディレクトリを走査・変更しない。再利用拒否のO_EXCLは維持する。
+    return hmac.compare_digest(expected, sig) and _remember_nonce(nonce)
 
 
 def _remember_nonce(nonce: str) -> bool:
+    """署名確認済みnonceを一度だけ保存し、期限を超えた記録を回収する。"""
     NONCE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     now = int(time.time())
     for path in NONCE_DIR.glob("*"):

@@ -1,7 +1,8 @@
-"""Session-based authentication with CSRF protection and rate limiting."""
+"""payload/server-gui/server_gui/auth.py - セッション認証・CSRF・接続元別の試行制限。"""
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
 import secrets
@@ -69,6 +70,18 @@ def _clear_failures(ip: str) -> None:
     _failures.pop(ip, None)
 
 
+def _login_client_ip() -> str:
+    """生成Nginxからのloopback接続だけで、上書きされたX-Real-IPを採用する。"""
+    peer = request.remote_addr or "unknown"
+    if peer not in {"127.0.0.1", "::1"}:
+        return peer
+    try:
+        # Nginxはこの値を実際の接続元で上書きする。XFFの任意の列は使わない。
+        return str(ipaddress.ip_address(request.headers.get("X-Real-IP", "")))
+    except ValueError:
+        return peer
+
+
 def login_required(f: Callable) -> Callable:
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -103,7 +116,7 @@ def _new_csrf_token() -> str:
 
 @auth_bp.route("/login", methods=["GET", "POST"])
 def login():
-    ip = request.remote_addr or "unknown"
+    ip = _login_client_ip()
     if request.method == "POST":
         if _record_failure(ip):
             logger.warning("rate limit hit for %s", ip)

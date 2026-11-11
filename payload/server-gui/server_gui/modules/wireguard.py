@@ -782,13 +782,13 @@ def bulk_delete_peers(iface: str):
 
     payload = request.get_json(force=True, silent=True) or {}
     if not verify_admin_password(str(payload.get("password") or "")):
-        return jsonify({"error": "?????????????????"}), 401
+        return jsonify({"error": "管理者パスワードが正しくありません"}), 401
 
     requested = _normalize_pubkey_list(payload.get("public_keys"))
     if not requested:
-        return jsonify({"error": "????????????????"}), 400
+        return jsonify({"error": "削除対象のピアを選択してください"}), 400
     if len(requested) > 512:
-        return jsonify({"error": "?????512????????????"}), 400
+        return jsonify({"error": "一括削除は512件以内で指定してください"}), 400
 
     parsed = _parse_wg_conf(path)
     data = _load_data()
@@ -801,7 +801,7 @@ def bulk_delete_peers(iface: str):
     eligible = conf_keys | meta_keys
     targets = [pubkey for pubkey in requested if pubkey in eligible]
     if not targets:
-        return jsonify({"error": "???????????????"}), 404
+        return jsonify({"error": "削除できるピアが見つかりません"}), 404
 
     target_set = set(targets)
     before = len(parsed["peers"])
