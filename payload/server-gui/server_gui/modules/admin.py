@@ -110,6 +110,15 @@ def _normalize_update_branch(branch: object) -> str:
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    # 旧版の自己更新処理からも、新版workerの起動時に定期保守と未設定DNSを導入する。
+    # テスト用・開発用の設定ディレクトリではOSに触れない。
+    if Path(app.config["CONFIG_DIR"]) == Path("/etc/server-gui") and (SERVER_GUI_BIN / "log-maintenance").is_file():
+        from .. import dns_defaults, log_maintenance
+        for provision in (log_maintenance.install, dns_defaults.initialize):
+            try:
+                provision(app.config["CONFIG_DIR"])
+            except Exception:
+                logger.exception("管理機能の初期設定に失敗しました: %s", provision.__module__)
 
 
 OS_UPDATE_UNIT = 'synca-os-security-update.service'
@@ -247,6 +256,35 @@ def get_settings():
         "last_apply_log": data.get("last_apply_log", ""),
         "username": session.get("user", ""),
     })
+
+
+@bp.route("/api/log-maintenance", methods=["GET"])
+@login_required
+def get_log_maintenance():
+    """ログ本文を含めず、日次保守の設定と直近の実行結果を取得する。"""
+    from .. import log_maintenance
+    try:
+        return jsonify(log_maintenance.status(current_app.config["CONFIG_DIR"]))
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        return jsonify({"error": f"ログ保守の状態を取得できません: {error}"}), 500
+
+
+@bp.route("/api/log-maintenance", methods=["POST"])
+@login_required
+@csrf_protect
+def save_log_maintenance():
+    """容量は次の日次処理から適用する。保存操作ではログを削除しない。"""
+    from .. import log_maintenance
+    payload = request.get_json(silent=True)
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("設定はJSONオブジェクトで指定してください")
+        value = log_maintenance.validate_min_free_gb(payload.get("min_free_gb"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    with _store().transaction(log_maintenance.MODULE, {}) as data:
+        data["min_free_gb"] = value
+    return jsonify({"ok": True, "min_free_gb": value})
 
 
 @bp.route("/api/command", methods=["POST"])

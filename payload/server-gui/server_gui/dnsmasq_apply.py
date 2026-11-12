@@ -21,9 +21,10 @@ DNSMASQ_SYSTEMD_DROPIN_PATH = DNSMASQ_SYSTEMD_DROPIN_DIR / "synca-utm.conf"
 MODULE_NAME = "dnsmasq"
 _TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DEFAULT_UPSTREAM = (
-    {"id": "cloudflare-1", "domain": "", "server": "1.1.1.1"},
-    {"id": "cloudflare-2", "domain": "", "server": "1.0.0.1"},
+    {"id": "cloudflare-1", "domain": "", "server": "1.1.1.3"},
+    {"id": "cloudflare-2", "domain": "", "server": "1.0.0.3"},
 )
+DEFAULT_DHCP_DNS = "0.0.0.0,1.1.1.3,1.0.0.3"
 DNSMASQ_SYSTEMD_DROPIN_CONTENT = """# Managed by server-gui.
 [Unit]
 Wants=network-online.target
@@ -47,7 +48,7 @@ def default() -> dict:
         "dhcp": {
             "ranges": [],      # [{id, interface, start, end, lease, tag}]
             "static_hosts": [],# [{id, mac, ip, hostname, lease}]
-            "options": [],     # [{id, option, value, tag, range_id}]
+            "options": [default_dhcp_dns()],  # [{id, option, value, tag, range_id}]
             "ignored_macs": [],# [MAC address] 初回起動時に検出したWAN NICをDHCP対象外にする
         },
     }
@@ -136,7 +137,10 @@ def generate(data: dict) -> str:
         if h.get("lease"):
             parts.append(h["lease"])
         lines.append(f"dhcp-host={','.join(parts)}")
-    for o in dhcp.get("options", []):
+    options = list(dhcp.get("options", []))
+    if not has_global_dhcp_dns(options):
+        options.append(default_dhcp_dns())
+    for o in options:
         opt = _format_option(str(o["option"]))
         option_tag = _option_tag(o, range_tags)
         if option_tag:
@@ -146,6 +150,17 @@ def generate(data: dict) -> str:
         lines.append(line)
 
     return "\n".join(lines) + "\n"
+
+
+def default_dhcp_dns() -> dict[str, str]:
+    """0.0.0.0はdnsmasqが応答するLAN IPへ置換される。外部DNSだけを固定する。"""
+    return {"id": "default-dns", "option": "dns-server", "value": DEFAULT_DHCP_DNS, "tag": ""}
+
+
+def has_global_dhcp_dns(options: list[dict]) -> bool:
+    """明示的な空値も既存指定として保持し、タグ別DNSは既定値より優先させる。"""
+    return any(str(item.get("option", "")) in ("6", "dns-server", "option:dns-server", "option:6")
+               and not item.get("tag") and not item.get("range_id") for item in options)
 
 
 def apply(config_dir: Any) -> None:

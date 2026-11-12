@@ -108,8 +108,8 @@ JSON
     "hosts": [],
     "cnames": [],
     "upstream": [
-      {"id": "cloudflare-1", "domain": "", "server": "1.1.1.1"},
-      {"id": "cloudflare-2", "domain": "", "server": "1.0.0.1"}
+      {"id": "cloudflare-1", "domain": "", "server": "1.1.1.3"},
+      {"id": "cloudflare-2", "domain": "", "server": "1.0.0.3"}
     ]
   },
   "dhcp": {
@@ -126,7 +126,7 @@ JSON
     "static_hosts": [],
     "options": [
       {"id": "router", "tag": "", "option": "router", "value": "${LAN_IP}"},
-      {"id": "dns", "tag": "", "option": "dns-server", "value": "${LAN_IP},1.1.1.1,1.0.0.1"}
+      {"id": "dns", "tag": "", "option": "dns-server", "value": "${LAN_IP},1.1.1.3,1.0.0.3"}
     ]
   }
 }
@@ -674,6 +674,7 @@ main() {
     install_modsecurity_config
     write_nginx_config
     write_systemd_units
+    /opt/server-gui/bin/log-maintenance install
     configure_firewall_for_bootstrap
     configure_selinux_compatibility
     start_services

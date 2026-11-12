@@ -1,0 +1,30 @@
+#!/opt/server-gui/venv/bin/python
+"""payload/server-gui/bin/log-maintenance - 日次ログ保守の導入・実行用エントリポイント。"""
+from pathlib import Path
+import os
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from server_gui import log_maintenance
+
+
+def main() -> int:
+    """引数を固定し、ログ本文や構成内の秘密を標準出力へ出さない。"""
+    config_dir = Path(os.environ.get("SERVER_GUI_CONFIG_DIR", "/etc/server-gui"))
+    if sys.argv[1:] == ["install"]:
+        log_maintenance.install(config_dir)
+        return 0
+    if sys.argv[1:] == ["run"]:
+        result = log_maintenance.run(config_dir)
+        print(f"log maintenance: ok={result['ok']} deleted_files={result.get('deleted_files', 0)}")
+        for error in result["errors"]:
+            print(error, file=sys.stderr)
+        if result.get("minimum_met") is False:
+            print("保存済みログの整理後も、空き容量が設定値を下回っています。", file=sys.stderr)
+        return 0 if result["ok"] else 1
+    print("usage: log-maintenance {install|run}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
