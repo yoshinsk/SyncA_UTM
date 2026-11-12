@@ -48,6 +48,23 @@
     </div>
 </div>
 
+<!-- payload/server-gui/server_gui/templates/admin.html: 日次ログ保守の空き容量設定 -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header bg-white"><strong>ログの保存と空き容量</strong></div>
+    <div class="card-body">
+        <p class="small text-secondary">毎日3:15〜3:20にログを整理します。空き容量が設定値を下回る場合は、保存済みログを古い日から削除します。当日更新されたログと使用中のログは残します。</p>
+        <div class="row g-2 align-items-end">
+            <div class="col-md-5">
+                <label for="log-min-free-gb" class="form-label small">確保する空き容量（GB）</label>
+                <input id="log-min-free-gb" type="number" min="1" max="1000000" step="1" value="10" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-3"><button class="btn btn-primary btn-sm" onclick="saveLogMaintenance()">保存</button></div>
+        </div>
+        <p class="small text-secondary mt-2">既定値は10 GB（1 GB = 1,000,000,000 bytes）です。設定は次の日次処理から適用します。削除できる過去ログが足りない場合、設定した空き容量には達しません。</p>
+        <div id="log-maintenance-status" class="small" role="status" aria-live="polite">状態を取得しています。</div>
+    </div>
+</div>
+
 <!-- ========== Command execution ========== -->
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-white d-flex align-items-center gap-2">
@@ -289,6 +306,7 @@ let settings = null;
 document.addEventListener('DOMContentLoaded', () => { refresh(); });
 
 async function refresh() {
+    await loadLogMaintenance();
     const data = await api.get('/admin/api/settings');
     if (!data) return;
     settings = data;
@@ -296,6 +314,34 @@ async function refresh() {
     document.getElementById('gh-url').value = data.github_url || '';
     document.getElementById('gh-branch').value = data.branch || 'main';
     renderUpdateStatus(data);
+}
+
+// ログ本文は取得せず、設定値・timer稼働状態・容量不足だけを表示する。
+async function loadLogMaintenance() {
+    const data = await api.get('/admin/api/log-maintenance');
+    const element = document.getElementById('log-maintenance-status');
+    if (!data || data.error) {
+        element.textContent = data?.error || 'ログ保守の状態を取得できません。';
+        return;
+    }
+    document.getElementById('log-min-free-gb').value = data.min_free_gb;
+    const last = data.last_result;
+    const lines = [`現在の空き容量: ${(data.free_bytes / 1000000000).toFixed(2)} GB`,
+        `日次実行: ${data.timer_active ? '有効' : '停止中'}`];
+    if (last?.ran_at) lines.push(`最終処理: ${last.ran_at} / ${last.ok ? '完了' : '要確認'}`);
+    if (last?.minimum_met === false) lines.push('過去ログの整理後も、空き容量が設定値を下回っています。');
+    if (last?.errors?.length) lines.push('処理エラーがあります。journalctl -u server-gui-log-maintenance.service で確認してください。');
+    element.textContent = lines.join(' / ');
+    element.className = `small ${!data.timer_active || last?.ok === false ? 'text-danger' : 'text-secondary'}`;
+}
+
+async function saveLogMaintenance() {
+    const input = document.getElementById('log-min-free-gb');
+    if (!input.reportValidity()) return;
+    const result = await api.send('/admin/api/log-maintenance', 'POST', {min_free_gb: Number(input.value)});
+    if (!result?.ok) { toast(result?.error || 'ログ保守の設定を保存できません', true); return; }
+    toast('ログ保守の設定を保存しました');
+    await loadLogMaintenance();
 }
 
 function renderUpdateStatus(d) {

@@ -49,21 +49,21 @@ class DnsmasqUpstreamTests(unittest.TestCase):
     def test_default_upstream_is_isolated(self) -> None:
         lines = self.logic["generate"](self.data).splitlines()
         self.assertEqual(lines.count("no-resolv"), 1)
-        self.assertIn("server=1.1.1.1", lines)
-        self.assertIn("server=1.0.0.1", lines)
+        self.assertIn("server=1.1.1.3", lines)
+        self.assertIn("server=1.0.0.3", lines)
 
     def test_missing_upstream_uses_isolated_defaults(self) -> None:
         del self.data["dns"]["upstream"]
         lines = self.logic["generate"](self.data).splitlines()
         self.assertIn("no-resolv", lines)
-        self.assertIn("server=1.1.1.1", lines)
-        self.assertIn("server=1.0.0.1", lines)
+        self.assertIn("server=1.1.1.3", lines)
+        self.assertIn("server=1.0.0.3", lines)
 
     def test_none_upstream_uses_isolated_defaults(self) -> None:
         self.data["dns"]["upstream"] = None
         lines = self.logic["generate"](self.data).splitlines()
         self.assertIn("no-resolv", lines)
-        self.assertIn("server=1.1.1.1", lines)
+        self.assertIn("server=1.1.1.3", lines)
 
     def test_explicit_empty_list_preserves_os_fallback(self) -> None:
         lines = self.render([])

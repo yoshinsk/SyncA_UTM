@@ -615,6 +615,8 @@ main() {
     install_extra_rpms
     enable_time_sync
     install_server_gui
+    # 管理ログを日次ローテーションし、設定した空き容量に応じて過去ログを整理する。
+    /opt/server-gui/bin/log-maintenance install
     install_wireguard_ui
     install_letsencrypt_hooks
     enable_certbot_renewal || echo "warning: certbot renewal timer could not be enabled" >&2

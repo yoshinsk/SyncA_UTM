@@ -443,7 +443,7 @@ You will select WAN/LAN interfaces, WAN connection method, administrator account
     WAN_MODE="${WAN_MODE,,}"
     WAN_ADDRESS=""
     WAN_GATEWAY=""
-    WAN_DNS="1.1.1.1,1.0.0.1"
+    WAN_DNS="1.1.1.3,1.0.0.3"
     PPPOE_USER=""
     PPPOE_PASS=""
 
@@ -486,7 +486,7 @@ collect_auto_safe_config() {
     WAN_MODE="${WAN_MODE,,}"
     WAN_ADDRESS="${SYNCA_WAN_ADDRESS:-}"
     WAN_GATEWAY="${SYNCA_WAN_GATEWAY:-}"
-    WAN_DNS="${SYNCA_WAN_DNS:-1.1.1.1,1.0.0.1}"
+    WAN_DNS="${SYNCA_WAN_DNS-1.1.1.3,1.0.0.3}"
     PPPOE_USER="${SYNCA_PPPOE_USER:-}"
     PPPOE_PASS="${SYNCA_PPPOE_PASS:-}"
     LAN_CIDR="${SYNCA_LAN_CIDR:-172.17.17.1/24}"
@@ -702,8 +702,8 @@ JSON
     "hosts": [],
     "cnames": [],
     "upstream": [
-      {"id": "cloudflare-1", "domain": "", "server": "1.1.1.1"},
-      {"id": "cloudflare-2", "domain": "", "server": "1.0.0.1"}
+      {"id": "cloudflare-1", "domain": "", "server": "1.1.1.3"},
+      {"id": "cloudflare-2", "domain": "", "server": "1.0.0.3"}
     ]
   },
   "dhcp": {
@@ -713,7 +713,7 @@ JSON
     "static_hosts": [],
     "options": [
       {"id": "router", "tag": "", "option": "router", "value": "${lan_ip}"},
-      {"id": "dns", "tag": "", "option": "dns-server", "value": "${lan_ip},1.1.1.1,1.0.0.1"}
+      {"id": "dns", "tag": "", "option": "dns-server", "value": "${lan_ip},1.1.1.3,1.0.0.3"}
     ],
     "ignored_macs": ${ignored_macs_json}
   }
