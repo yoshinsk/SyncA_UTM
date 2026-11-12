@@ -11,8 +11,8 @@ from server_gui import log_maintenance
 def main() -> int:
     """引数を固定し、ログ本文や構成内の秘密を標準出力へ出さない。"""
     config_dir = Path(os.environ.get("SERVER_GUI_CONFIG_DIR", "/etc/server-gui"))
-    if sys.argv[1:] == ["install"]:
-        log_maintenance.install(config_dir)
+    if sys.argv[1:] in (["install"], ["install", "--offline"]):
+        log_maintenance.install(config_dir, start_timer="--offline" not in sys.argv[2:])
         return 0
     if sys.argv[1:] == ["run"]:
         result = log_maintenance.run(config_dir)
@@ -22,7 +22,7 @@ def main() -> int:
         if result.get("minimum_met") is False:
             print("保存済みログの整理後も、空き容量が設定値を下回っています。", file=sys.stderr)
         return 0 if result["ok"] else 1
-    print("usage: log-maintenance {install|run}", file=sys.stderr)
+    print("usage: log-maintenance {install [--offline]|run}", file=sys.stderr)
     return 2
 
 

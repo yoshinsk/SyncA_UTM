@@ -113,7 +113,7 @@ def remove() -> dict:
     return {"active": False}
 
 
-def install(enable: bool = False) -> dict:
+def install(enable: bool = False, *, offline: bool = False) -> dict:
     """旧更新プログラムでもGUI再起動時に導入する。明示的な解除状態は保持する。"""
     with lock("control"):
         if not UNIT.exists() or UNIT.read_text(encoding="utf-8") != UNIT_TEXT:
@@ -122,9 +122,16 @@ def install(enable: bool = False) -> dict:
             temporary.write_text(UNIT_TEXT, encoding="utf-8")
             temporary.chmod(0o644)
             temporary.replace(UNIT)
-            command(["systemctl", "daemon-reload"])
+            if not offline:
+                command(["systemctl", "daemon-reload"])
         if enable:
             DISABLED.unlink(missing_ok=True)
+        if offline:
+            # インストーラのネットワーク名前空間やsystemdへ作用せず、次回起動用に登録する。
+            disabled = DISABLED.exists()
+            if not disabled:
+                command(["systemctl", "--root=/", "enable", SERVICE])
+            return {"disabled": disabled, "offline": True}
         if DISABLED.exists():
             return {"disabled": True, **table_state()}
         # nftables.serviceは起動しない。独立サービスで他のルールのflushを避ける。
@@ -158,9 +165,16 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("install", "enable", "disable", "apply", "remove", "status"))
-    action = parser.parse_args().action
+    parser.add_argument("--offline", action="store_true", help="install時に次回起動用の登録だけを行う")
+    args = parser.parse_args()
+    action = args.action
+    if args.offline and action != "install":
+        parser.error("--offlineはinstallでのみ指定できます")
     try:
-        result = install(enable=True) if action == "enable" else globals()[action]()
+        if action == "install":
+            result = install(offline=args.offline)
+        else:
+            result = install(enable=True) if action == "enable" else globals()[action]()
         print(json.dumps({"ok": True, **result}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as exc:

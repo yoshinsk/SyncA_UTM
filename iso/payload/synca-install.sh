@@ -616,13 +616,13 @@ main() {
     enable_time_sync
     install_server_gui
     # 管理ログを日次ローテーションし、設定した空き容量に応じて過去ログを整理する。
-    /opt/server-gui/bin/log-maintenance install
+    /opt/server-gui/bin/log-maintenance install --offline
     install_wireguard_ui
     install_letsencrypt_hooks
     enable_certbot_renewal || echo "warning: certbot renewal timer could not be enabled" >&2
     install_firewalld_profile
     # 専用テーブルの暫定緩和を新規ISOにも導入する。firewalldの全体reloadは不要。
-    (cd /opt/server-gui && /opt/server-gui/venv/bin/python -m server_gui.cve_2026_98432 install)
+    (cd /opt/server-gui && /opt/server-gui/venv/bin/python -m server_gui.cve_2026_98432 install --offline)
     install_pppoe_parent_ip_dispatcher
     install_upnp_support
     install_ipv6_support

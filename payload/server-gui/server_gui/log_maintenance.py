@@ -78,7 +78,7 @@ def _command(argv: list[str]) -> None:
         raise RuntimeError(f"{argv[0]}: {proc.stderr.strip()[:500]}")
 
 
-def install(config_dir: Path | str) -> None:
+def install(config_dir: Path | str, *, start_timer: bool = True) -> None:
     """新規導入・旧版からのGUI更新に共通の冪等な導入処理。ここではログを削除しない。"""
     store = ConfigStore(config_dir)
     with store.transaction(MODULE, {}) as data:
@@ -94,9 +94,13 @@ def install(config_dir: Path | str) -> None:
                 tmp.chmod(0o644)
                 tmp.replace(path)
                 changed = True
-        if changed:
+        if changed and start_timer:
             _command(["systemctl", "daemon-reload"])
-        _command(["systemctl", "enable", "--now", TIMER])
+        if start_timer:
+            _command(["systemctl", "enable", "--now", TIMER])
+        else:
+            # Anacondaのchroot内では、インストーラのsystemdへ起動要求を送らない。
+            _command(["systemctl", "--root=/", "enable", TIMER])
 
 
 def status(config_dir: Path | str) -> dict:

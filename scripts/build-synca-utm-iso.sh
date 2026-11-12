@@ -146,7 +146,13 @@ path = Path(sys.argv[1])
 user = shlex.quote(sys.argv[2])
 password = shlex.quote(sys.argv[3])
 text = path.read_text()
-marker = "%post --log=/root/synca-utm-post.log\nset -euxo pipefail\n"
+# --erroronfailの有無やオプション順を保ったまま、管理者作成先のpostを特定する。
+headers = [line for line in text.splitlines() if line.startswith("%post ")
+           and "--log=/root/synca-utm-post.log" in line and "--nochroot" not in line]
+if len(headers) != 1:
+    raise SystemExit("kickstart post marker not found or ambiguous")
+header = headers[0]
+marker = header + "\nset -euxo pipefail\n"
 block = f"""set -euxo pipefail
 if ! id {user} >/dev/null 2>&1; then
     useradd -m -G wheel {user}
@@ -158,7 +164,7 @@ chmod 0440 /etc/sudoers.d/10-synca-wheel
 """
 if marker not in text:
     raise SystemExit("kickstart post marker not found")
-path.write_text(text.replace(marker, "%post --log=/root/synca-utm-post.log\n" + block, 1))
+path.write_text(text.replace(marker, header + "\n" + block, 1))
 PY
         echo "Included initial admin user for internal ISO."
     fi

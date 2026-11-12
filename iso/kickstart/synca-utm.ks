@@ -83,20 +83,20 @@ mod_security_crs
 nginx-mod-modsecurity
 %end
 
-%post --nochroot --log=/mnt/sysroot/root/synca-utm-nochroot-post.log
+%post --nochroot --erroronfail --log=/mnt/sysroot/root/synca-utm-nochroot-post.log
 set -euxo pipefail
 mkdir -p /mnt/sysroot/opt/synca-installer
 cp -a /run/install/repo/synca/. /mnt/sysroot/opt/synca-installer/
 %end
 
-%post --log=/root/synca-utm-post.log
+%post --erroronfail --log=/root/synca-utm-post.log
 set -euxo pipefail
 chmod +x /opt/synca-installer/*.sh
 /opt/synca-installer/synca-install.sh --postinstall
 systemctl enable synca-firstboot.service
 %end
 
-%post --nochroot --log=/mnt/sysroot/root/synca-utm-bootloader-post.log
+%post --nochroot --erroronfail --log=/mnt/sysroot/root/synca-utm-bootloader-post.log
 set -euxo pipefail
 
 mountpoint -q /mnt/sysroot/dev || mount --bind /dev /mnt/sysroot/dev

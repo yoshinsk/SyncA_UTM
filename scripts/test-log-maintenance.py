@@ -179,6 +179,13 @@ class LogMaintenanceTests(unittest.TestCase):
         self.command.assert_called_once_with(["journalctl", "--rotate"])
         self.assertEqual(ConfigStore(self.state).load(logs.MODULE), result)
 
+    def test_offline_install_enables_without_starting_installer_systemd(self):
+        with patch.object(logs, "UNIT_DIR", self.base / "offline-units"):
+            logs.install(self.config, start_timer=False)
+            self.assertTrue((logs.UNIT_DIR / logs.TIMER).is_file())
+        self.command.assert_called_once_with(["systemctl", "--root=/", "enable", logs.TIMER])
+        self.assertEqual(logs.settings(self.config), {"min_free_gb": 10})
+
     def test_invalid_config_stops_deletion_and_records_error(self):
         ConfigStore(self.config).save(logs.MODULE, {"min_free_gb": False})
         path = self.file("nginx/access.log.1")
