@@ -48,6 +48,8 @@ SyncA UTMはAlmaLinux 9.8系と8.10系を対象とするUTM・ルーターアプ
 
 AlmaLinux 9.8のPython 3.9.25で、ログ保守17件と暫定緩和処理14件の回帰テストを確認しました。新旧Kickstartへの初期管理者挿入、Python 3.9の構文、Bash構文も検査しました。初回試験VMでは修正した導入後処理の正常終了を確認しましたが、最終ISO全体の導入試験はこれから実施します。
 
+続く試験ではBIOSとUEFIの両方で導入が完了し、BIOS側で初期設定、HTTPSログイン、集中管理への自動登録と状態送信を確認しました。UEFIメニューには既存のsubmenuから不要な閉じ括弧が残る問題があったため、ネスト全体を読み飛ばすよう生成処理を修正しました。メニュー変換の回帰テストを追加し、修正後の最終ISOで導入試験をやり直します。
+
 公開ビルド経路には SMTP、DDNS、証明書、VPN、集中管理登録トークンなどの秘密情報を含めません。
 
 内部 ISO ビルドではビルドホスト上の private firstboot 環境ファイルを `SYNCA_PRIVATE_FIRSTBOOT_ENV` で渡します。このファイルに `SYNCA_CENTRAL_URL` と `SYNCA_CENTRAL_ENROLLMENT_TOKEN` を含めます。

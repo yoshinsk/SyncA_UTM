@@ -394,16 +394,18 @@ skipping_submenu = False
 brace_depth = 0
 for line in text.splitlines():
     stripped = line.lstrip()
-    if stripped.startswith(("menuentry ", "submenu ")):
-        skipping_entry = stripped.startswith("menuentry ")
-        skipping_submenu = stripped.startswith("submenu ")
-        brace_depth = line.count("{") - line.count("}")
-        continue
+    # submenu内のmenuentryで深さをリセットすると、閉じ括弧が設定に残る。
+    # 削除中のブロックを先に処理し、ネスト全体が閉じるまで読み飛ばす。
     if skipping_entry or skipping_submenu:
         brace_depth += line.count("{") - line.count("}")
         if brace_depth <= 0:
             skipping_entry = False
             skipping_submenu = False
+        continue
+    if stripped.startswith(("menuentry ", "submenu ")):
+        skipping_entry = stripped.startswith("menuentry ")
+        skipping_submenu = stripped.startswith("submenu ")
+        brace_depth = line.count("{") - line.count("}")
         continue
     if stripped.startswith("set default="):
         line = 'set default="synca-utm"'
