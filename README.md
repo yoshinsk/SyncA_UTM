@@ -42,6 +42,8 @@ SyncA UTMはAlmaLinux 9.8系と8.10系を対象とするUTM・ルーターアプ
 
 ### ISOビルド
 
+2026年11月12日の9.8系社内用ISO再作成では、UEFIの導入に必要な`shim-x64`をRPM収録リストとKickstartへ追加しました。集中管理への自動接続設定は、既存の非公開環境ファイルから取り込みます。インストーラの起動用カーネルと導入後のカーネルを、公式安定版の修正済みバージョンにそろえて再作成しています。最終ISOの新規インストール、導入後の起動、集中管理への自動登録は検証中です。
+
 公開ビルド経路には SMTP、DDNS、証明書、VPN、集中管理登録トークンなどの秘密情報を含めません。
 
 内部 ISO ビルドではビルドホスト上の private firstboot 環境ファイルを `SYNCA_PRIVATE_FIRSTBOOT_ENV` で渡します。このファイルに `SYNCA_CENTRAL_URL` と `SYNCA_CENTRAL_ENROLLMENT_TOKEN` を含めます。

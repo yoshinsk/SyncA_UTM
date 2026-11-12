@@ -68,6 +68,7 @@ radvd
 rootfiles
 rsync
 shadow-utils
+shim-x64
 strongswan
 sudo
 systemd

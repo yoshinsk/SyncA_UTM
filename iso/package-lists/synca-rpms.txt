@@ -52,6 +52,7 @@ radvd
 rootfiles
 rsync
 shadow-utils
+shim-x64
 slang
 ssdeep-libs
 strongswan
