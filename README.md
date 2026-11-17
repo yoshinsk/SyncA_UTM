@@ -165,6 +165,56 @@ journalctl -u server-gui-log-maintenance.service
 
 DHCPへ切り替える場合は、上位側でDHCP OFFER、デフォルトゲートウェイ、DNSが提供されている必要があります。DHCP提供がない回線で実切替を行うと、ロールバックまでは一時的にWANが途切れる可能性があります。
 
+#### PPPoEの切断検出と自動再接続
+
+GUIとISOの初期設定でPPPoEプロファイルを新規作成すると、次の値を設定します。仮想NICがリンクありの状態を保つ場合も、PPPの相手に応答を確認して通信断を検出します。
+
+| 設定 | 初期値 | 動作 |
+| --- | --- | --- |
+| `connection.autoconnect-retries` | `0` | 自動接続の試行回数を無制限にする |
+| `ppp.lcp-echo-interval` | `10` | 10秒ごとにPPPの相手へLCP Echo-Requestを送る |
+| `ppp.lcp-echo-failure` | `6` | 6回連続で応答がなければ、PPP接続を切断と判定する |
+
+既存UTMではGUI更新後、自動接続が有効なPPPoEプロファイルへ、試行回数を無制限にする設定を一度だけ導入します。LCP監視が旧初期値の`0/0`の場合は`10/6`へ変更し、設定時に接続中だった回線を20秒後に一度再接続して有効にします。この初回適用ではWAN通信とWAN経由の管理接続が一時中断するため、保守時間に更新してください。管理画面にも通信中断の注意を表示します。9系の`main`と8.10系の`codex/almalinux8-iso`で同じ移行処理を配信します。
+
+自動接続が無効なプロファイルは変更しません。切断中の回線を強制接続せず、既に対策済みの回線も再接続しません。既存のLCP設定に非ゼロの値があれば保持します。予約後に手動切断、WAN切替、自動接続OFF、設定変更があった場合も再接続しません。移行後に管理者が変更した値は、以後のGUI起動で上書きしません。
+
+移行記録は`/etc/server-gui/pppoe_reconnect.json`にUUIDごとに保存します。変更前の3項目と自動接続設定、移行先の値、再接続待ち、直近のエラーを記録し、PPPoEのユーザー名・パスワードは取得しません。
+
+設定変更前に移行の意図を保存し、途中終了した場合は次回起動で処理を引き継ぎます。旧版の更新処理から導入した場合も、新しいGUIの起動時に移行します。新しい更新処理では、移行または再接続予約が失敗すると更新失敗として記録します。再接続worker自体が失敗した場合は、移行記録とjournalで確認します。保存済みの無制限再試行はNetworkManagerが継続します。
+
+```bash
+sudo /opt/server-gui/venv/bin/python -m server_gui.pppoe_reconnect status
+journalctl -u server-gui-pppoe-reconnect.service
+```
+
+LCP Echo-Requestに応答しない事業者など、移行を行わない機器では、GUI更新前に`sudo touch /etc/server-gui/pppoe_reconnect.disabled`を実行してください。このファイルがある間は設定変更と予約済みの再接続を行いません。手動で設定する場合は、対象のPPPoEプロファイル名を確認して次を実行します。`connection.autoconnect=yes`が必要ですが、不要な回線の自動接続を有効にしないよう対象を確認してください。
+
+```bash
+nmcli -f NAME,TYPE connection show
+sudo nmcli connection modify 'PPPoEプロファイル名' \
+  connection.autoconnect yes connection.autoconnect-retries 0 \
+  ppp.lcp-echo-interval 10 ppp.lcp-echo-failure 6
+sudo nmcli connection up 'PPPoEプロファイル名'
+```
+
+LCP監視の値は次のPPP接続から有効になります。相手がLCP Echo-Requestに応答することを導入時に確認してください。応答しない事業者では、`ppp.lcp-echo-interval 0 ppp.lcp-echo-failure 0`で監視を無効にする必要があります。設定の意味と相手による制約は、[NetworkManagerの自動接続設定](https://networkmanager.dev/docs/api/latest/settings-connection.html)と[PPP設定](https://networkmanager.dev/docs/api/latest/settings-ppp.html)を参照してください。LCP監視はPPPの相手までの疎通を確認するため、その先のインターネット障害をすべて検出するものではありません。
+
+2026年11月17日、AlmaLinux 9.8、NetworkManager 1.54.3、ppp 2.4.9の仮想機器で検証しました。NICのcarrierを1に保ったまま、既存PPPセッションのLCP Echo-Replyだけを一時遮断し、6回の無応答で切断を検出した後、NetworkManagerが自動再接続して約1秒で接続を再確立しました。試験用フィルターの撤去も確認しています。
+
+8.10系ソースのGUI更新の移行処理と関連機能の回帰テスト72件は、AlmaLinux 9.8のPython 3.9.25とWSLのPython 3.12.3で通過しました。外部コマンドを模擬し、旧版・新版の更新経路、複数worker、途中終了からの再開、失敗後の再試行、自動接続OFFや独自LCP値の保持、対策済み回線を再接続しないことを検証しました。Linux環境で次の6本を実行できます。
+
+```bash
+python scripts/test-pppoe-reconnect.py
+python scripts/test-pppoe-update.py
+python scripts/test-update-integrity.py
+python scripts/test-admin-maintenance.py
+python scripts/test-dns-defaults.py
+python scripts/test-log-maintenance.py
+```
+
+実ケーブルの抜き差し、長時間の上位障害、実際の再接続失敗の連続、OS再起動後の接続、旧GUIからの実機アップデート全体と8.10系の実回線は未検証です。今回のISO変更を含む媒体は再作成していません。
+
 ### WAN回線品質診断
 
 「WAN品質」画面は現在の IPv4 既定経路で回線品質を手動測定する画面です。自動測定は行わないため、WAN 通信は管理者が実行したときだけ発生します。結果は直近 20 件をローカルに保存します。

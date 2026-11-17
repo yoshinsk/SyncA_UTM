@@ -1,3 +1,4 @@
+{# payload/server-gui/server_gui/templates/admin.html - 管理設定・GUI更新・保守操作を表示する。 #}
 {% extends "base.html" %}
 {% block title %}管理 — SyncA UTM{% endblock %}
 {% block content %}
@@ -142,6 +143,7 @@
         <span class="text-secondary small">URL が設定されている場合、1 日 1 回 systemd timer で更新を確認</span>
     </div>
     <div class="card-body">
+        <p class="alert alert-warning small">自動接続が有効なPPPoE回線で切断監視が未設定の場合、初回のGUI更新後に一度再接続します。WAN通信が一時中断するため、保守時間に更新してください。対策済みの回線は再接続しません。</p>
         <div class="row g-2 align-items-end">
             <div class="col-lg-7 col-md-12">
                 <label class="form-label small mb-1 d-flex align-items-baseline justify-content-between gap-2">

@@ -554,10 +554,13 @@ configure_network() {
             activate_connection_with_retry synca-wan 3 || true
             ;;
         pppoe)
+            # Detect stale sessions even when the virtual NIC keeps carrier;
+            # NetworkManager must continue reconnecting after failed attempts.
             nmcli connection add type pppoe ifname "$WAN_IF" con-name synca-pppoe \
                 pppoe.username "$PPPOE_USER" pppoe.password "$PPPOE_PASS" \
                 ppp.mtu 1454 ppp.mru 1454 ipv6.method disabled \
-                connection.autoconnect yes connection.zone public
+                connection.autoconnect yes connection.autoconnect-retries 0 \
+                ppp.lcp-echo-interval 10 ppp.lcp-echo-failure 6 connection.zone public
             activate_connection_with_retry synca-pppoe 4 || true
             ;;
     esac

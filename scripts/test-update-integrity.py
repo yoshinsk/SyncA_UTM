@@ -80,7 +80,8 @@ class UpdateIntegrityTests(unittest.TestCase):
                 self.assertEqual(result.status_code, 400)
                 download.assert_not_called()
 
-    def test_download_and_installed_state_use_the_same_commit(self):
+    def apply_fixture(self, migration_ok=True):
+        """架空の更新だけを展開し、移行成否による更新状態の違いを確認する。"""
         # 構造が正しい最小の架空ソースだけを展開し、実行はしない。
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -99,9 +100,14 @@ class UpdateIntegrityTests(unittest.TestCase):
                 patch.object(admin, "SERVER_GUI_BIN", binary), \
                 patch.object(admin, "_refresh_dnsmasq_runtime_guard"), \
                 patch.object(admin, "_install_cve_mitigation", return_value=True), \
+                patch.object(admin, "_migrate_pppoe_reconnect", return_value=migration_ok), \
                 patch.object(admin.subprocess, "Popen") as restart, \
                 patch.object(admin.urllib.request, "urlopen", return_value=io.BytesIO(buffer.getvalue())) as download:
             result = self.post("/admin/api/update/apply", {})
+        return result, package, binary, restart, download
+
+    def test_download_and_installed_state_use_the_same_commit(self):
+        result, package, binary, restart, download = self.apply_fixture()
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual(download.call_args.args[0], "https://codeload.github.com/dummy/project/tar.gz/" + "a" * 40)
         self.assertEqual(result.json["installed_sha"], "a" * 40)
@@ -110,6 +116,15 @@ class UpdateIntegrityTests(unittest.TestCase):
         self.assertTrue((package / "__init__.py").is_file())
         self.assertTrue((binary / "dummy-helper").is_file())
         restart.assert_called_once()
+
+    def test_failed_pppoe_migration_does_not_claim_update_success(self):
+        result, _, _, restart, _ = self.apply_fixture(migration_ok=False)
+        self.assertEqual(result.status_code, 500)
+        state = self.store.load(admin.MODULE_NAME)
+        self.assertEqual(state["installed_sha"], "b" * 40)
+        self.assertFalse(state["last_apply_ok"])
+        self.assertTrue(state["update_available"])
+        restart.assert_not_called()
 
 
 if __name__ == "__main__":

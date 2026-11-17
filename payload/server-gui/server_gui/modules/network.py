@@ -767,6 +767,11 @@ def create_pppoe():
         "ifname", ifname,
         "username", username,
         "connection.autoconnect", "yes" if autoconnect else "no",
+        # A virtual NIC can retain carrier when the ONU or upstream path fails.
+        # Detect a stale PPP session and keep retrying after the peer recovers.
+        "connection.autoconnect-retries", "0",
+        "ppp.lcp-echo-interval", "10",
+        "ppp.lcp-echo-failure", "6",
     ]
     if service:
         add_cmd.extend(["service", service])
