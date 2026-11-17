@@ -23,8 +23,9 @@ Apply pipeline:
   2. Extract to a temporary staging directory — must contain a server_gui/
      directory (we reject malformed archives)
   3. Back up the current package and bin directories, then copy the new files
-  4. Update admin.json installed_sha + log
-  5. Schedule a systemd-run --no-block systemctl restart so the response
+  4. Install runtime guards and migrate existing PPPoE reconnect settings
+  5. Update admin.json installed_sha + log after the migration is scheduled
+  6. Schedule a systemd-run --no-block systemctl restart so the response
      can return cleanly before the process dies
 """
 from __future__ import annotations
@@ -110,6 +111,16 @@ def _normalize_update_branch(branch: object) -> str:
 
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
+    # 旧版updaterからの更新でも、新worker起動時に既存PPPoEへ対策を導入する。
+    # テスト・開発用の設定ディレクトリでは実機のネットワークを変更しない。
+    if Path(app.config["CONFIG_DIR"]) == Path("/etc/server-gui"):
+        from .. import pppoe_reconnect
+        try:
+            result = pppoe_reconnect.initialize(app.config["CONFIG_DIR"])
+            if not result["ok"]:
+                logger.error("PPPoE再接続対策の導入に失敗しました: %s", result["errors"])
+        except Exception:
+            logger.exception("PPPoE再接続対策の初期設定に失敗しました")
     # 旧版の自己更新処理からも、新版workerの起動時に定期保守と未設定DNSを導入する。
     # テスト用・開発用の設定ディレクトリではOSに触れない。
     if Path(app.config["CONFIG_DIR"]) == Path("/etc/server-gui") and (SERVER_GUI_BIN / "log-maintenance").is_file():
@@ -613,6 +624,9 @@ def apply_update():
         if not _install_cve_mitigation(_log):
             return _apply_failure("CVE-2026-98432暫定緩和の導入に失敗しました", log_lines)
 
+        if not _migrate_pppoe_reconnect(_log):
+            return _apply_failure("PPPoE再接続対策の導入に失敗しました", log_lines)
+
         # Record success + new installed_sha
         with _store().transaction(MODULE_NAME, _default()) as data:
             data["branch"] = branch
@@ -646,6 +660,24 @@ def apply_update():
             shutil.rmtree(extract_root)
         except OSError:
             pass
+
+
+def _migrate_pppoe_reconnect(log) -> bool:
+    """更新済みの子プロセスで移行し、失敗した更新を対策済みとして記録しない。"""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", sys.executable, "-m", "server_gui.pppoe_reconnect", "initialize"],
+            cwd=INSTALL_DIR, capture_output=True, text=True, timeout=90, check=False)
+        data = json.loads(result.stdout)
+        if result.returncode == 0 and isinstance(data, dict) and data.get("ok") is True:
+            log("PPPoE reconnect migration: " + result.stdout.strip())
+            if data.get("pending"):
+                log("PPPoE monitoring: changed active profiles will reconnect once after 20 seconds")
+            return True
+        log("PPPoE reconnect migration failed: " + _truncate_output(result.stdout or result.stderr))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        log("PPPoE reconnect migration failed: " + str(exc))
+    return False
 
 
 def _install_cve_mitigation(log) -> bool:
